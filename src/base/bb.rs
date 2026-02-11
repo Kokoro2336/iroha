@@ -176,7 +176,7 @@ impl Arena<Function> for IndexedArena<Function> {
                                 for op_idx in bb.cur.iter_mut() {
                                     *op_idx = match old_arena_dfg.get(op_idx.get_op_id()?).unwrap()
                                     {
-                                        ArenaItem::NewIndex(new_idx) => Operand::Op(*new_idx),
+                                        ArenaItem::NewIndex(new_idx) => Operand::Value(*new_idx),
                                         _ => {
                                             return Err("Compaction gc: op index in BB not found"
                                                 .to_string());

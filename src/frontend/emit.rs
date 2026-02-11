@@ -1,6 +1,6 @@
 use crate::base::ir;
 use crate::base::ir::*;
-use crate::base::{BranchInfo, Builder, BuilderContext, LoopInfo};
+use crate::base::{Builder, BuilderContext, LoopInfo};
 /**
  * Original IR generation.
  */
@@ -25,6 +25,11 @@ pub struct Emit<'a> {
     current_function: Option<usize>,
     // original name -> promoted name
     mangled: HashMap<String, String>,
+
+    // func name -> Func
+    func_ids: HashMap<String, usize>,
+    // var name -> OpId
+    var_ids: HashMap<String, usize>,
 
     // counters
     counter: u32,
@@ -76,6 +81,8 @@ impl<'a> Emit<'a> {
             program: Program::new(),
             current_function: None,
             mangled: HashMap::new(),
+            func_ids: HashMap::new(),
+            var_ids: HashMap::new(),
             counter: 0,
             str_counter: 0,
         }
@@ -89,6 +96,11 @@ impl<'a> Emit<'a> {
                     .funcs
                     .add(Function::new(fn_decl.name.clone()))?,
             );
+
+            // store function id
+            if let Some(func_id) = self.current_function {
+                self.func_ids.insert(fn_decl.name.clone(), func_id);
+            }
 
             // get and store arguments
             // shadow the ctx to use function's cfg/dfg
@@ -106,7 +118,7 @@ impl<'a> Emit<'a> {
                     ctx,
                     ir::Op::new(
                         arg.1.clone(),
-                        vec![],
+                        vec![Attr::Name(arg.0.clone())],
                         OpData::GetArg(Operand::ParamId(i as u32)),
                     ),
                 )?;
@@ -116,7 +128,7 @@ impl<'a> Emit<'a> {
                         Type::Pointer {
                             base: Box::new(arg.1.clone()),
                         },
-                        vec![],
+                        vec![Attr::Name(arg.0.clone())],
                         OpData::Alloca(arg.1.size_in_bytes()),
                     ),
                 )?;
@@ -203,6 +215,7 @@ impl<'a> Emit<'a> {
                                     return Err("Global VarDecl has no init_value".to_string());
                                 },
                             },
+                            Attr::Name(var_decl.name.clone()),
                         ],
                         OpData::GlobalAlloca(var_decl.typ.size_in_bytes()),
                     ),
@@ -218,7 +231,7 @@ impl<'a> Emit<'a> {
                         Type::Pointer {
                             base: Box::new(var_decl.typ.clone()),
                         },
-                        vec![],
+                        vec![Attr::Name(var_decl.name.clone())],
                         OpData::Alloca(var_decl.typ.size_in_bytes()),
                     ),
                 )?;
@@ -259,28 +272,31 @@ impl<'a> Emit<'a> {
                         Type::Pointer {
                             base: Box::new(var_array.typ.clone()),
                         },
-                        vec![Attr::GlobalArray {
-                            name: var_array.name.clone(),
-                            mutable: true,
-                            typ: var_array.typ.clone(),
-                            values: if let Some(init_values) = &var_array.init_values {
-                                init_values
-                                    .iter()
-                                    .map(|v| {
-                                        if let Some(lit) = cast::<Literal>(v) {
-                                            lit.clone()
-                                        } else {
-                                            panic!(
+                        vec![
+                            Attr::GlobalArray {
+                                name: var_array.name.clone(),
+                                mutable: true,
+                                typ: var_array.typ.clone(),
+                                values: if let Some(init_values) = &var_array.init_values {
+                                    init_values
+                                        .iter()
+                                        .map(|v| {
+                                            if let Some(lit) = cast::<Literal>(v) {
+                                                lit.clone()
+                                            } else {
+                                                panic!(
                                                 "Global VarArray init_values contain non-Literal"
                                             );
-                                        }
-                                    })
-                                    .collect()
-                            } else {
-                                // panic
-                                return Err("Global VarArray has no init_values".to_string());
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    // panic
+                                    return Err("Global VarArray has no init_values".to_string());
+                                },
                             },
-                        }],
+                            Attr::Name(var_array.name.clone()),
+                        ],
                         OpData::GlobalAlloca(var_array.typ.size_in_bytes()),
                     ),
                 )?;
@@ -294,7 +310,7 @@ impl<'a> Emit<'a> {
                         Type::Pointer {
                             base: Box::new(var_array.typ.clone()),
                         },
-                        vec![],
+                        vec![Attr::Name(var_array.name.clone())],
                         OpData::Alloca(total_size),
                     ),
                 )?;
@@ -386,22 +402,25 @@ impl<'a> Emit<'a> {
                     Type::Pointer {
                         base: Box::new(const_array.typ.clone()),
                     },
-                    vec![Attr::GlobalArray {
-                        name: name.clone(),
-                        mutable: false,
-                        typ: const_array.typ.clone(),
-                        values: const_array
-                            .init_values
-                            .iter()
-                            .map(|v| {
-                                if let Some(lit) = cast::<Literal>(v) {
-                                    lit.clone()
-                                } else {
-                                    panic!("ConstArray init_values contain non-Literal");
-                                }
-                            })
-                            .collect(),
-                    }],
+                    vec![
+                        Attr::GlobalArray {
+                            name: name.clone(),
+                            mutable: false,
+                            typ: const_array.typ.clone(),
+                            values: const_array
+                                .init_values
+                                .iter()
+                                .map(|v| {
+                                    if let Some(lit) = cast::<Literal>(v) {
+                                        lit.clone()
+                                    } else {
+                                        panic!("ConstArray init_values contain non-Literal");
+                                    }
+                                })
+                                .collect(),
+                        },
+                        Attr::Name(name.clone()),
+                    ],
                     OpData::GlobalAlloca(const_array.typ.size_in_bytes()),
                 ),
             )?;
@@ -446,18 +465,10 @@ impl<'a> Emit<'a> {
                 )
             };
 
-            // set BranchInfo
-            self.builder.push_branch(BranchInfo {
-                then_block: Some(then_block.clone()),
-                else_block: else_block.clone(),
-                end_block: Some(end_block.clone()),
-            });
             // evaluate the codition
             let cond_op = self.emit(&if_stmt.condition)?;
-            self.builder.pop_branch();
 
             let ctx = context_or_err!(self, "If statement outside function");
-
             // create branch instructions
             self.builder.create(
                 ctx,
@@ -738,9 +749,17 @@ impl<'a> Emit<'a> {
                 ctx,
                 ir::Op::new(
                     call.typ.clone(),
-                    vec![],
+                    vec![Attr::Name(call.func_name.clone())],
                     OpData::Call {
-                        func: Operand::Symbol(call.func_name.clone()),
+                        func: Operand::Func(match self.func_ids.get(&call.func_name) {
+                            Some(func_id) => *func_id,
+                            None => {
+                                return Err(format!(
+                                    "Call: function {} not found in func_ids",
+                                    call.func_name
+                                ))
+                            }
+                        }),
                         args: arg_ops,
                     },
                 ),

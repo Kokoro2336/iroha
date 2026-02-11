@@ -1,9 +1,8 @@
 use crate::base::ir::*;
-use crate::base::{BranchInfo, LoopInfo};
+use crate::base::LoopInfo;
 
 pub struct Builder {
     pub loop_stack: Vec<LoopInfo>,
-    pub branch_stack: Vec<BranchInfo>,
     // current basic block
     pub current_block: Option<Operand>,
     // current instruction
@@ -20,7 +19,6 @@ impl Builder {
     pub fn new() -> Self {
         Self {
             loop_stack: vec![],
-            branch_stack: vec![],
             current_block: None,
             current_inst: None,
         }
@@ -32,18 +30,6 @@ impl Builder {
 
     pub fn pop_loop(&mut self) -> Option<LoopInfo> {
         self.loop_stack.pop()
-    }
-
-    pub fn push_branch(&mut self, branch_info: BranchInfo) {
-        self.branch_stack.push(branch_info);
-    }
-
-    pub fn pop_branch(&mut self) -> Option<BranchInfo> {
-        self.branch_stack.pop()
-    }
-
-    pub fn get_branch_info(&mut self) -> Option<&mut BranchInfo> {
-        self.branch_stack.last_mut()
     }
 
     pub fn current_loop(&mut self) -> Option<&mut LoopInfo> {
@@ -298,7 +284,7 @@ impl Builder {
             OpData::GlobalAlloca(_) => {
                 let globals = &mut ctx.globals;
                 let op_id = globals.alloc(op)?;
-                Ok(Operand::Op(op_id))
+                Ok(Operand::Value(op_id))
             }
             _ => {
                 let dfg = if ctx.dfg.is_none() {
@@ -351,12 +337,12 @@ impl Builder {
                                 current_inst, self.current_block
                             )
                         })?;
-                    let op_id = Operand::Op(op_id);
+                    let op_id = Operand::Value(op_id);
                     bb.cur.insert(pos, op_id.clone());
                     op_id
                 } else {
                     // insert at the end
-                    let op_id = Operand::Op(op_id);
+                    let op_id = Operand::Value(op_id);
                     bb.cur.push(op_id.clone());
                     op_id
                 };

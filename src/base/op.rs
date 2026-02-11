@@ -282,8 +282,9 @@ impl Op {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operand {
-    Op(usize),
+    Value(usize),
     BB(usize),
+    Func(usize),
     Global(usize),
     Int(i32),
     Float(f32),
@@ -291,14 +292,13 @@ pub enum Operand {
     Index(usize),
     // for GetArg
     ParamId(u32),
-    Symbol(String),
     Reg(Reg),
 }
 
 impl Operand {
     pub fn get_op_id(&self) -> Result<usize, String> {
         match self {
-            Operand::Op(op_id) => Ok(*op_id),
+            Operand::Value(op_id) => Ok(*op_id),
             _ => Err("Operand is not an OpId".to_string()),
         }
     }
@@ -332,10 +332,10 @@ impl Operand {
             _ => Err("Operand is not a ParamId".to_string()),
         }
     }
-    pub fn get_symbol(&self) -> Result<String, String> {
+    pub fn get_func_id(&self) -> Result<usize, String> {
         match self {
-            Operand::Symbol(symbol) => Ok(symbol.clone()),
-            _ => Err("Operand is not a Symbol".to_string()),
+            Operand::Func(func_id) => Ok(*func_id),
+            _ => Err("Operand is not a FuncId".to_string()),
         }
     }
     pub fn get_reg(&self) -> Result<Reg, String> {
@@ -349,14 +349,14 @@ impl Operand {
 impl std::fmt::Display for Operand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Operand::Op(op_id) => write!(f, "%{}", op_id),
+            Operand::Value(op_id) => write!(f, "%{}", op_id),
             Operand::BB(bb_id) => write!(f, "%{}", bb_id),
             Operand::Global(global_id) => write!(f, "@{}", global_id),
             Operand::Int(value) => write!(f, "{}", value),
             Operand::Float(value) => write!(f, "{}", value),
             Operand::Index(index) => write!(f, "<index = {}>", index),
             Operand::ParamId(param_id) => write!(f, "<param_idx = {}>", param_id),
-            Operand::Symbol(symbol) => write!(f, "@{}", symbol),
+            Operand::Func(func_id) => write!(f, "@{}", func_id),
             Operand::Reg(reg) => write!(f, "<reg = {}>", reg),
         }
     }
@@ -372,6 +372,8 @@ pub enum Attr {
         typ: Type,
         values: Vec<Literal>,
     },
+    // Name
+    Name(String),
 }
 
 impl std::fmt::Display for Attr {
@@ -383,6 +385,7 @@ impl std::fmt::Display for Attr {
                 typ: _,
                 values: _,
             } => write!(f, "<global array: {}>", name),
+            Attr::Name(name) => write!(f, "{}", name),
         }
     }
 }
@@ -415,7 +418,7 @@ impl Arena<Op> for IndexedArena<Op> {
                 // rewrite uses
                 for use_idx in node.uses.iter_mut() {
                     if let ArenaItem::NewIndex(new_idx) = self.storage[use_idx.get_op_id()?] {
-                        *use_idx = Operand::Op(new_idx);
+                        *use_idx = Operand::Value(new_idx);
                     };
                 }
 
@@ -449,65 +452,65 @@ impl Arena<Op> for IndexedArena<Op> {
                     | OpData::OGe { lhs, rhs }
                     | OpData::OLe { lhs, rhs } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[lhs.get_op_id()?] {
-                            *lhs = Operand::Op(new_idx);
+                            *lhs = Operand::Value(new_idx);
                         };
                         if let ArenaItem::NewIndex(new_idx) = self.storage[rhs.get_op_id()?] {
-                            *rhs = Operand::Op(new_idx);
+                            *rhs = Operand::Value(new_idx);
                         };
                     }
 
                     OpData::Sitofp { value } | OpData::Fptosi { value } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                            *value = Operand::Op(new_idx);
+                            *value = Operand::Value(new_idx);
                         };
                     }
                     OpData::Store { addr, value } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[addr.get_op_id()?] {
-                            *addr = Operand::Op(new_idx);
+                            *addr = Operand::Value(new_idx);
                         };
                         if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                            *value = Operand::Op(new_idx);
+                            *value = Operand::Value(new_idx);
                         };
                     }
                     OpData::Load { addr } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[addr.get_op_id()?] {
-                            *addr = Operand::Op(new_idx);
+                            *addr = Operand::Value(new_idx);
                         };
                     }
                     OpData::Call { args, .. } => {
                         for arg in args.iter_mut() {
                             if let ArenaItem::NewIndex(new_idx) = self.storage[arg.get_op_id()?] {
-                                *arg = Operand::Op(new_idx);
+                                *arg = Operand::Value(new_idx);
                             };
                         }
                     }
                     OpData::Br { cond, .. } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[cond.get_op_id()?] {
-                            *cond = Operand::Op(new_idx);
+                            *cond = Operand::Value(new_idx);
                         };
                     }
                     OpData::Ret { value } => {
                         if let Some(val) = value {
                             if let ArenaItem::NewIndex(new_idx) = self.storage[val.get_op_id()?] {
-                                *val = Operand::Op(new_idx);
+                                *val = Operand::Value(new_idx);
                             };
                         }
                     }
 
                     OpData::GEP { base, indices } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[base.get_op_id()?] {
-                            *base = Operand::Op(new_idx);
+                            *base = Operand::Value(new_idx);
                         };
                         for index in indices.iter_mut() {
                             if let ArenaItem::NewIndex(new_idx) = self.storage[index.get_op_id()?] {
-                                *index = Operand::Op(new_idx);
+                                *index = Operand::Value(new_idx);
                             };
                         }
                     }
 
                     OpData::Move { value, .. } => {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                            *value = Operand::Op(new_idx);
+                            *value = Operand::Value(new_idx);
                         };
                     }
 

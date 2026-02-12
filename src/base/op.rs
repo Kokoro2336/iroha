@@ -1,4 +1,5 @@
 use std::vec::Vec;
+use strum_macros::EnumDiscriminants;
 
 use crate::asm::config::Reg;
 use crate::base::Type;
@@ -7,7 +8,10 @@ use crate::utils::arena::*;
 
 pub type DFG = IndexedArena<Op>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EnumDiscriminants)]
+// Specify the type enum's name
+#[strum_discriminants(name(OpType))]
+#[strum_discriminants(derive(Hash, Ord, PartialOrd))]
 pub enum OpData {
     // customized instructions for convenience
     GlobalAlloca(u32),
@@ -167,6 +171,9 @@ pub enum OpData {
     Load {
         addr: Operand,
     },
+    Phi {
+        incoming: Vec<(Operand, Operand)>, // Vec<(value, bb_id)>
+    },
     Alloca(u32),
 
     /// Control flow
@@ -185,6 +192,12 @@ pub enum OpData {
     Ret {
         value: Option<Operand>,
     },
+}
+
+impl OpData {
+    pub fn is(&self, op_typ: OpType) -> bool {
+        OpType::from(self) == op_typ
+    }
 }
 
 impl std::fmt::Display for Op {
@@ -244,6 +257,16 @@ impl std::fmt::Display for Op {
 
             OpData::Store { addr, value } => write!(f, "store {}, {}", addr, value),
             OpData::Load { addr } => write!(f, "load {}", addr),
+            OpData::Phi { incoming } => {
+                write!(f, "phi [")?;
+                for (i, (value, bb_id)) in incoming.iter().enumerate() {
+                    write!(f, "({}, {})", value, bb_id)?;
+                    if i != incoming.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "]")
+            }
             OpData::Alloca(size) => write!(f, "alloc {}", size),
             OpData::Call { func, args } => {
                 write!(f, "call {} {:?}", func, args)
@@ -277,6 +300,10 @@ impl Op {
             data,
             uses: vec![],
         }
+    }
+
+    pub fn is(&self, op_typ: OpType) -> bool {
+        self.data.is(op_typ)
     }
 }
 
@@ -374,6 +401,8 @@ pub enum Attr {
     },
     // Name
     Name(String),
+    // Old OpId for Phi
+    OldIdx(Operand),
 }
 
 impl std::fmt::Display for Attr {
@@ -386,6 +415,7 @@ impl std::fmt::Display for Attr {
                 values: _,
             } => write!(f, "<global array: {}>", name),
             Attr::Name(name) => write!(f, "{}", name),
+            Attr::OldIdx(op) => write!(f, "<old idx: {}>", op),
         }
     }
 }
@@ -512,6 +542,14 @@ impl Arena<Op> for IndexedArena<Op> {
                         if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
                             *value = Operand::Value(new_idx);
                         };
+                    }
+
+                    OpData::Phi { incoming } => {
+                        for (value, _bb_id) in incoming.iter_mut() {
+                            if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
+                                *value = Operand::Value(new_idx);
+                            };
+                        }
                     }
 
                     // Get global should be processed outside of gc()

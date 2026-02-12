@@ -1,2 +1,2 @@
 pub mod compaction;
-pub mod ssa;
+pub mod mem2reg;

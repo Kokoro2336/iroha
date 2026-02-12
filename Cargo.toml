@@ -18,6 +18,10 @@ textwrap = "0.16.2"
 tool = "0.2.1"
 regex = "1.11.0"
 
+# Generating enums
+strum = "0.27"
+strum_macros = "0.27"
+
 # logging
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["fmt", "env-filter"] }

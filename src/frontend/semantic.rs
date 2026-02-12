@@ -34,10 +34,8 @@ impl Semantic {
             let rhs_type = self.analyze(&mut bin_op.rhs)?;
 
             // Modulo
-            if bin_op.op == Op::Mod {
-                if !matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int) {
-                    return Err("Modulo operator % only supports Int type".to_string());
-                }
+            if bin_op.op == Op::Mod && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int)) {
+                return Err("Modulo operator % only supports Int type".to_string());
             }
 
             // And & Or

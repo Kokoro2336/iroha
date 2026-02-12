@@ -71,6 +71,8 @@ macro_rules! context_or_err {
     };
 }
 
+pub(crate) use {context, context_or_err};
+
 impl<'a> Emit<'a> {
     pub fn new(builder: Builder, root: &'a Box<dyn Node>) -> Self {
         Self {

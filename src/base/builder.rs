@@ -1,5 +1,26 @@
 use crate::base::ir::*;
 use crate::base::LoopInfo;
+use crate::utils::arena::ArenaItem;
+
+macro_rules! acquire_cfg {
+    ($ctx:ident, $msg:expr) => {
+        if $ctx.cfg.is_none() {
+            return Err($msg.to_string());
+        } else {
+            $ctx.cfg.as_mut().unwrap()
+        }
+    };
+}
+
+macro_rules! acquire_dfg {
+    ($ctx:ident, $msg:expr) => {
+        if $ctx.dfg.is_none() {
+            return Err($msg.to_string());
+        } else {
+            $ctx.dfg.as_mut().unwrap()
+        }
+    };
+}
 
 pub struct Builder {
     pub loop_stack: Vec<LoopInfo>,
@@ -9,9 +30,40 @@ pub struct Builder {
     pub current_inst: Option<Operand>,
 }
 
+pub struct BuilderGuard<'a> {
+    pub builder: &'a mut Builder,
+    pub loop_stack: Vec<LoopInfo>,
+    pub current_block: Option<Operand>,
+    pub current_inst: Option<Operand>,
+}
+
+impl<'a> BuilderGuard<'a> {
+    pub fn new(builder: &'a mut Builder) -> Self {
+        let loop_stack = builder.loop_stack.clone();
+        let current_block = builder.current_block.clone();
+        let current_inst = builder.current_inst.clone();
+        Self {
+            builder,
+            loop_stack,
+            current_block,
+            current_inst,
+        }
+    }
+}
+
+impl Drop for BuilderGuard<'_> {
+    fn drop(&mut self) {
+        self.builder.loop_stack = self.loop_stack.clone();
+        self.builder.current_block = self.current_block.clone();
+        self.builder.current_inst = self.current_inst.clone();
+    }
+}
+
 pub struct BuilderContext<'a> {
+    // current function
     pub cfg: Option<&'a mut CFG>,
     pub dfg: Option<&'a mut DFG>,
+    // global vars
     pub globals: &'a mut DFG,
 }
 
@@ -45,17 +97,14 @@ impl Builder {
     }
 
     // set builder's location before inst
+    // None: at the end
     // current_inst must be an instruction in the current block
     pub fn set_before_inst(
         &mut self,
         ctx: &mut BuilderContext,
         inst_id: Option<Operand>,
     ) -> Result<(), String> {
-        let cfg = if ctx.cfg.is_none() {
-            return Err("Builder set_before_inst: ctx.cfg is None".to_string());
-        } else {
-            ctx.cfg.as_mut().unwrap()
-        };
+        let cfg = acquire_cfg!(ctx, "Builder set_before_inst: ctx.cfg is None");
         if self.current_block.is_none() {
             return Err("Builder set_before_inst: current_block is None".to_string());
         };
@@ -88,11 +137,7 @@ impl Builder {
 
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
-        let dfg = if ctx.dfg.is_none() {
-            return Err("Builder add_uses: ctx.dfg is None".to_string());
-        } else {
-            ctx.dfg.as_mut().unwrap()
-        };
+        let dfg = acquire_dfg!(ctx, "Builder add_uses: ctx.dfg is None");
         let data = dfg.get(op.get_bb_id()?)?;
         let data = if data.is_none() {
             return Err("Builder add_uses: op points to None".to_string());
@@ -119,6 +164,11 @@ impl Builder {
             OpData::Ret { value } => {
                 if let Some(val) = value {
                     dfg.add_use(val, op)?;
+                }
+            }
+            OpData::Phi { incoming } => {
+                for (_, value) in incoming {
+                    dfg.add_use(value, op.clone())?;
                 }
             }
 
@@ -186,23 +236,13 @@ impl Builder {
         ctx: &mut BuilderContext,
         op: Operand,
     ) -> Result<(), String> {
-        let cfg = if ctx.cfg.is_none() {
-            return Err("Builder add_control_flow: ctx.cfg is None".to_string());
-        } else {
-            ctx.cfg.as_mut().unwrap()
-        };
-        let dfg = if ctx.dfg.is_none() {
-            return Err("Builder add_control_flow: ctx.dfg is None".to_string());
-        } else {
-            ctx.dfg.as_mut().unwrap()
-        };
+        let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
+        let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
         let bb = cfg.get(op.get_bb_id()?)?;
-        let bb = if bb.is_none() {
+        if bb.is_none() {
             return Err("Builder add_control_flow: op points to None".to_string());
-        } else {
-            bb.unwrap()
-        };
+        }
         let data = dfg.get(op.get_op_id()?)?;
         let data = if data.is_none() {
             return Err("Builder add_control_flow: op points to None".to_string());
@@ -244,6 +284,7 @@ impl Builder {
             | OpData::Load { .. }
             | OpData::Store { .. }
             | OpData::Alloca(_)
+            | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
             | OpData::GetArg { .. }
             | OpData::Int(_)
@@ -287,16 +328,8 @@ impl Builder {
                 Ok(Operand::Value(op_id))
             }
             _ => {
-                let dfg = if ctx.dfg.is_none() {
-                    return Err("Builder create: ctx.dfg is None".to_string());
-                } else {
-                    ctx.dfg.as_mut().unwrap()
-                };
-                let cfg = if ctx.cfg.is_none() {
-                    return Err("Builder create: ctx.cfg is None".to_string());
-                } else {
-                    ctx.cfg.as_mut().unwrap()
-                };
+                let dfg = acquire_dfg!(ctx, "Builder create: ctx.dfg is None");
+                let cfg = acquire_cfg!(ctx, "Builder create: ctx.cfg is None");
 
                 // append_at will update the prev and next pointers accordingly
                 let op_id = dfg.alloc(op)?;
@@ -356,13 +389,100 @@ impl Builder {
         }
     }
 
+    pub fn create_at_head(&mut self, ctx: &mut BuilderContext, op: Op) -> Result<Operand, String> {
+        let bb_id = match &self.current_block {
+            Some(block) => block.get_bb_id()?,
+            None => return Err("Builder create_at_head: current_block is None".to_string()),
+        };
+        // if no instruction in the block, insert at the end, otherwise insert before the first instruction
+        let inst_id = {
+            let cfg = acquire_cfg!(ctx, "Builder create_at_head: ctx.cfg is None");
+            let bb = cfg.get(bb_id)?.ok_or_else(|| {
+                format!(
+                    "Builder create_at_head: current_block {:?} points to None",
+                    self.current_block
+                )
+            })?;
+            if bb.cur.is_empty() {
+                None
+            } else {
+                Some(bb.cur[0].clone())
+            }
+        };
+
+        self.set_before_inst(ctx, inst_id)?;
+        self.create(ctx, op)
+    }
+
     pub fn create_new_block(&mut self, ctx: &mut BuilderContext) -> Result<Operand, String> {
-        let cfg = ctx
-            .cfg
-            .as_mut()
-            .ok_or("Builder create_new_block: ctx.cfg is None")?;
+        let cfg = acquire_cfg!(ctx, "Builder create_new_block: ctx.cfg is None");
         let bb_id = cfg.alloc(BasicBlock::new())?;
         // we separate block creation and setting current block
         Ok(Operand::BB(bb_id))
+    }
+
+    pub fn get_all_ops(&self, ctx: &mut BuilderContext, op_typ: OpType) -> Vec<Operand> {
+        let dfg = if ctx.dfg.is_none() {
+            panic!("Builder get_all_ops: ctx.dfg is None");
+        } else {
+            ctx.dfg.as_mut().unwrap()
+        };
+        dfg.storage
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if let ArenaItem::Data(node) = item {
+                    if node.is(op_typ) {
+                        Some(Operand::Value(idx))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<Operand>>()
+    }
+
+    pub fn get_all_ops_in_block(
+        &self,
+        ctx: &mut BuilderContext,
+        block: Operand,
+        op_typ: OpType,
+    ) -> Result<Vec<Operand>, String> {
+        let cfg = acquire_cfg!(ctx, "Builder get_all_ops_in_block: ctx.cfg is None");
+        let dfg = acquire_dfg!(ctx, "Builder get_all_ops_in_block: ctx.dfg is None");
+
+        let bb_id = block.get_bb_id()?;
+        let bb = cfg.get(bb_id)?.ok_or_else(|| {
+            format!(
+                "Builder get_all_ops_in_block: block {:?} points to None",
+                block
+            )
+        })?;
+
+        let mut ops = Vec::new();
+        for inst in &bb.cur {
+            let data = dfg.get(inst.get_op_id()?)?.ok_or_else(|| {
+                format!(
+                    "Builder get_all_ops_in_block: instruction {:?} points to None",
+                    inst
+                )
+            })?;
+            if data.is(op_typ) {
+                ops.push(inst.clone());
+            }
+        }
+        Ok(ops)
+    }
+
+    pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) -> Result<(), String> {
+        // TODO
+        todo!()
+    }
+
+    pub fn remove_op(&mut self, op: Operand) -> Result<(), String> {
+        // TODO
+        todo!()
     }
 }

@@ -241,6 +241,25 @@ impl Arena<Function> for IndexedArena<Function> {
                                         }
                                     }
 
+                                    OpData::Phi { incoming } => {
+                                        for (_val, bb_idx) in incoming.iter_mut() {
+                                            *bb_idx = match old_arena_cfg
+                                                .get(bb_idx.get_bb_id()?)
+                                                .unwrap()
+                                            {
+                                                ArenaItem::NewIndex(new_idx) => {
+                                                    Operand::BB(*new_idx)
+                                                }
+                                                _ => {
+                                                    return Err(
+                                                        "Compaction gc: BB index in Op not found"
+                                                            .to_string(),
+                                                    );
+                                                }
+                                            };
+                                        }
+                                    }
+
                                     OpData::AddF { .. }
                                     | OpData::SubF { .. }
                                     | OpData::MulF { .. }

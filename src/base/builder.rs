@@ -30,32 +30,27 @@ pub struct Builder {
     pub current_inst: Option<Operand>,
 }
 
-pub struct BuilderGuard<'a> {
-    pub builder: &'a mut Builder,
+pub struct BuilderGuard {
     pub loop_stack: Vec<LoopInfo>,
+    // current basic block
     pub current_block: Option<Operand>,
+    // current instruction
     pub current_inst: Option<Operand>,
 }
 
-impl<'a> BuilderGuard<'a> {
-    pub fn new(builder: &'a mut Builder) -> Self {
-        let loop_stack = builder.loop_stack.clone();
-        let current_block = builder.current_block.clone();
-        let current_inst = builder.current_inst.clone();
+impl BuilderGuard {
+    pub fn new(builder: &Builder) -> Self {
         Self {
-            builder,
-            loop_stack,
-            current_block,
-            current_inst,
+            loop_stack: builder.loop_stack.clone(),
+            current_block: builder.current_block.clone(),
+            current_inst: builder.current_inst.clone(),
         }
     }
-}
 
-impl Drop for BuilderGuard<'_> {
-    fn drop(&mut self) {
-        self.builder.loop_stack = self.loop_stack.clone();
-        self.builder.current_block = self.current_block.clone();
-        self.builder.current_inst = self.current_inst.clone();
+    pub fn restore(self, builder: &mut Builder) {
+        builder.loop_stack = self.loop_stack;
+        builder.current_block = self.current_block;
+        builder.current_inst = self.current_inst;
     }
 }
 
@@ -481,7 +476,7 @@ impl Builder {
         todo!()
     }
 
-    pub fn remove_op(&mut self, op: Operand) -> Result<(), String> {
+    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
         // TODO
         todo!()
     }

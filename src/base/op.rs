@@ -399,6 +399,7 @@ pub enum Attr {
         typ: Type,
         values: Vec<Literal>,
     },
+    Promotion,
     // Name
     Name(String),
     // Old OpId for Phi
@@ -415,6 +416,7 @@ impl std::fmt::Display for Attr {
                 values: _,
             } => write!(f, "<global array: {}>", name),
             Attr::Name(name) => write!(f, "{}", name),
+            Attr::Promotion => write!(f, "<promotion>"),
             Attr::OldIdx(op) => write!(f, "<old idx: {}>", op),
         }
     }

@@ -1,5 +1,5 @@
 use crate::base::ir::{Attr, Op, OpData, OpType, Operand, Program};
-use crate::base::{Builder, BuilderGuard, BuilderContext, Type, Pass};
+use crate::base::{Builder, BuilderContext, BuilderGuard, Pass, Type};
 use crate::frontend::context_or_err;
 use crate::utils::bitset::BitSet;
 
@@ -155,7 +155,7 @@ impl<'a> BuildDomTree<'a> {
         // Init dom trees first
         self.dom_trees = vec![vec![]; self.program.funcs.storage.len()];
 
-        for idx in (0..self.program.funcs.storage.len()) {
+        for idx in 0..self.program.funcs.storage.len() {
             validate_func!(self, idx);
             let func = &self.program.funcs[idx];
             let head = match func.cfg.entry {
@@ -390,14 +390,16 @@ impl<'a> InsertPhi<'a> {
         self.var_to_op.clear();
         self.var_counter = 0;
 
-        let func = &self.program.funcs[acquire_cur_func_id!(self)];
-        let allocas = self.builder.get_all_ops(
-            context_or_err!(
+        let (cfg_len, allocas) = {
+            let func = &self.program.funcs[acquire_cur_func_id!(self)];
+            let cfg_len = func.cfg.storage.len();
+            let mut ctx = context_or_err!(
                 self,
                 "InsertPhi: No current function context found".to_string()
-            ),
-            OpType::Alloca,
-        );
+            );
+            (cfg_len, self.builder.get_all_ops(&mut ctx, OpType::Alloca))
+        };
+
 
         // Initialize the map between OpId and VarId
         for alloca in allocas.into_iter() {
@@ -413,10 +415,20 @@ impl<'a> InsertPhi<'a> {
         }
 
         self.defsites = Vec::with_capacity(self.var_counter);
-        self.origins = Vec::with_capacity(func.cfg.storage.len());
+        self.origins = Vec::with_capacity(cfg_len);
         self.phis = Vec::with_capacity(self.var_counter);
+        
+        // Initialize the vectors with empty vectors
+        for _ in 0..self.var_counter {
+            self.defsites.push(vec![]);
+            self.phis.push(vec![]);
+        }
+        for _ in 0..cfg_len {
+            self.origins.push(vec![]);
+        }
 
         // Compute defsites, origins and phis
+        let func = &self.program.funcs[acquire_cur_func_id!(self)];
         (0..func.cfg.storage.len()).try_for_each(|bb_id| {
             let block = &func.cfg[bb_id];
             block.cur.iter().try_for_each(|op_id| {
@@ -427,9 +439,11 @@ impl<'a> InsertPhi<'a> {
 
                 let op = &func.dfg[op_id];
                 if op.is(OpType::Store) {
-                    let var_id = self.op_to_var[&op_id];
-                    self.defsites[var_id].push(bb_id);
-                    self.origins[bb_id].push(var_id);
+                    if let Some(&var_id) = self.op_to_var.get(&op_id) {
+                         self.defsites[var_id].push(bb_id);
+                         self.origins[bb_id].push(var_id);
+                    }
+                     // If it's not in op_to_var, it might not be a relevant store for mem2reg (e.g., global or array), so we skip it.
                 }
                 Ok(())
             })
@@ -453,11 +467,12 @@ impl<'a> InsertPhi<'a> {
                     if !self.phis[idx].contains(frontier) {
                         // Insert phi
                         // Use guard to save the old context
-                        let _guard = BuilderGuard::new(&mut self.builder);
+                        let guard = BuilderGuard::new(&self.builder);
 
                         self.builder.set_current_block(Operand::BB(bb_id))?;
+                        let mut ctx = context_or_err!(self, "InsertPhi: No current function context found");
                         self.builder.create_at_head(
-                            context_or_err!(self, "InsertPhi: No current function context found"),
+                            &mut ctx,
                             Op::new(
                                 // We don't know the inst's result type yet
                                 Type::Void,
@@ -466,6 +481,9 @@ impl<'a> InsertPhi<'a> {
                                 OpData::Phi { incoming: vec![] },
                             ),
                         )?;
+
+                        // Restore the old context
+                        guard.restore(&mut self.builder);
 
                         self.phis[idx].push(*frontier);
                         if !self.origins[*frontier].contains(&idx) {
@@ -533,14 +551,13 @@ impl<'a> Renaming<'a> {
         self.var_to_op.clear();
         self.var_counter = 0;
 
-        let func = &self.program.funcs[acquire_cur_func_id!(self)];
-        let allocas = self.builder.get_all_ops(
-            context_or_err!(
+        let allocas = {
+            let mut ctx = context_or_err!(
                 self,
-                "InsertPhi: No current function context found".to_string()
-            ),
-            OpType::Alloca,
-        );
+                "Renaming: No current function context found".to_string()
+            );
+            self.builder.get_all_ops(&mut ctx, OpType::Alloca)
+        };
 
         // Initialize the map between OpId and VarId
         for alloca in allocas.into_iter() {
@@ -555,8 +572,8 @@ impl<'a> Renaming<'a> {
             self.var_to_op.insert(var_id, op_id);
         }
 
-        self.records = Vec::with_capacity(self.var_counter);
-        self.versions = Vec::with_capacity(self.var_counter);
+        self.records = vec![vec![]; self.var_counter];
+        self.versions = vec![vec![]; self.var_counter];
         Ok(())
     }
 
@@ -565,94 +582,145 @@ impl<'a> Renaming<'a> {
         for var in 0..self.versions.len() {
             self.records[var].push(self.versions[var].len());
         }
-        let bb = &self.program.funcs[acquire_cur_func_id!(self)].cfg[bb_id];
-        for inst in bb.cur.iter() {
+
+        // Gather information first to avoid holding borrow of self.program.funcs
+        let (insts, succs) = {
+            let func = &self.program.funcs[acquire_cur_func_id!(self)];
+            let bb = &func.cfg[bb_id];
+            let insts = bb.cur.clone();
+            let succs = bb.succs.clone();
+            (insts, succs)
+        };
+
+        // 1. Process instructions in current block
+        for inst in insts {
             let op_id = match inst {
-                Operand::Value(id) => *id,
+                Operand::Value(id) => id,
                 _ => return Err("Renaming: cur contains non-op".to_string()),
             };
-            let op = &self.program.funcs[acquire_cur_func_id!(self)].dfg[op_id];
-            if op.is(OpType::Store) {
-                let var_id = self.op_to_var[&op_id];
-                self.versions[var_id].push(op_id);
-                self.removed.push(Operand::Value(op_id));
-            } else if op.is(OpType::Load) {
-                let var_id = self.op_to_var[&op_id];
-                if let Some(version) = self.versions[var_id].last() {
-                    // Replace the load with the current version
-                    let new_op_id = *version;
-                    self.builder.replace_all_uses(
-                        context_or_err!(
+
+            // We need to access op data. 
+            // We can't hold `op` borrow across replace_all_uses (which takes &mut ctx).
+            // So we clone the necessary data or just check type first.
+            let (is_store, is_load, is_phi, need_promotion) = {
+                 let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                 let op = &func.dfg[op_id];
+                 let need_promotion = op.attrs.iter().any(|attr| matches!(attr, Attr::Promotion));
+                 (op.is(OpType::Store), op.is(OpType::Load), op.is(OpType::Phi), need_promotion)
+            };
+
+            if !need_promotion {
+                continue;
+            }
+
+            if is_store {
+                if let Some(&var_id) = self.op_to_var.get(&op_id) {
+                     self.versions[var_id].push(op_id);
+                     self.removed.push(Operand::Value(op_id));
+                }
+            } else if is_load {
+                if let Some(&var_id) = self.op_to_var.get(&op_id) {
+                    if let Some(version) = self.versions[var_id].last() {
+                        // Replace the load with the current version
+                        let new_op_id = *version;
+                        let mut ctx = context_or_err!(
                             self,
                             "Renaming: No current function context found".to_string()
-                        ),
-                        Operand::Value(op_id),
-                        Operand::Value(new_op_id),
-                    )?;
-                    self.removed.push(Operand::Value(op_id));
-                } else {
-                    return Err(format!(
-                        "Renaming: load from variable {} before any store",
-                        var_id
-                    ));
+                        );
+                        self.builder.replace_all_uses(
+                            &mut ctx,
+                            Operand::Value(op_id),
+                            Operand::Value(new_op_id),
+                        )?;
+                        self.removed.push(Operand::Value(op_id));
+                    } else {
+                         return Err(format!(
+                            "Renaming: load from variable {} before any store",
+                            var_id
+                        ));
+                    }
                 }
-            } else if op.is(OpType::Phi) {
-                let var_id = self.op_to_var[&op_id];
-                self.versions[var_id].push(op_id);
+            } else if is_phi {
+                if let Some(&var_id) = self.op_to_var.get(&op_id) {
+                     self.versions[var_id].push(op_id);
+                }
             }
         }
 
-        // Processing succs
-        for succ in &bb.succs {
+        // 2. Process successors
+        for succ in succs {
             let succ_id = match succ {
-                Operand::BB(id) => *id,
+                Operand::BB(id) => id,
                 _ => return Err("Renaming: successor is not a basic block".to_string()),
             };
-            let succ_block = &self.program.funcs[acquire_cur_func_id!(self)].cfg[succ_id];
-            // Replace the k'th incoming block with the current version
-            let k = succ_block
-                .preds
-                .iter()
-                .position(|pred| match pred {
-                    Operand::BB(id) => *id == bb_id,
-                    _ => false,
-                })
-                .ok_or_else(|| {
-                    "Renaming: predecessor not found in successor's preds".to_string()
-                })?;
-            // Find all the phis
-            let phis = self.builder.get_all_ops_in_block(
-                context_or_err!(self, "No context available"),
-                succ.clone(),
-                OpType::Phi,
-            )?;
+            
+            // Calculate k (predecessor index)
+            let k = {
+                 let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                 let succ_block = &func.cfg[succ_id];
+                 succ_block.preds.iter().position(|pred| match pred {
+                        Operand::BB(id) => *id == bb_id,
+                        _ => false,
+                    })
+                    .ok_or_else(|| {
+                        "Renaming: predecessor not found in successor's preds".to_string()
+                    })?
+            };
+
+            // Get all phis in successor
+            let phis = {
+                 let mut ctx = context_or_err!(
+                    self,
+                    "Renaming: No current function context found".to_string()
+                );
+                self.builder.get_all_ops_in_block(
+                    &mut ctx,
+                    Operand::BB(succ_id),
+                    OpType::Phi,
+                )?
+            };
+
             for phi in phis {
                 let phi_id = match phi {
                     Operand::Value(id) => id,
                     _ => return Err("Renaming: phi contains non-op".to_string()),
                 };
-                let phi_op = &mut self.program.funcs[acquire_cur_func_id!(self)].dfg[phi_id];
-                match &mut phi_op.data {
-                    OpData::Phi { incoming } => {
-                        let var_id = self.op_to_var[&phi_id];
-                        if let Some(version) = self.versions[var_id].last() {
-                            // Replace the k'th incoming block with the current version
-                            incoming[k] = (Operand::Value(*version), Operand::BB(bb_id));
-                        } else {
-                            return Err(format!(
-                                "Renaming: phi operand from variable {} before any store",
-                                var_id
-                            ));
+
+                // Check if this phi is one we track (has a var_id)
+                if let Some(&var_id) = self.op_to_var.get(&phi_id) {
+                    if let Some(version) = self.versions[var_id].last() {
+                        // Update phi incoming
+                        let func = &mut self.program.funcs[acquire_cur_func_id!(self)];
+                        let phi_op = &mut func.dfg[phi_id];
+                         match &mut phi_op.data {
+                            OpData::Phi { incoming } => {
+                                // Ensure incoming is large enough (it should be)
+                                if k >= incoming.len() {
+                                     while incoming.len() <= k {
+                                         incoming.push((Operand::Value(0), Operand::BB(0))); // Dummy
+                                     }
+                                }
+                                incoming[k] = (Operand::Value(*version), Operand::BB(bb_id));
+                            }
+                            _ => return Err("Renaming: expected phi op".to_string()),
                         }
+                    } else {
+                         return Err(format!(
+                            "Renaming: phi operand from variable {} before any store",
+                            var_id
+                        ));
                     }
-                    _ => return Err("Renaming: expected phi op".to_string()),
                 }
             }
         }
 
-        // Processing children in domtree
-        for child in &self.dom_trees[acquire_cur_func_id!(self)][bb_id] {
-            self.rename(*child)?;
+        // 3. Process children in domtree
+        // Clone children list to avoid borrow
+        let children = {
+             self.dom_trees[acquire_cur_func_id!(self)][bb_id].clone()
+        };
+        for child_id in children {
+            self.rename(child_id)?;
         }
 
         // Restore the "frame pointer"
@@ -664,19 +732,14 @@ impl<'a> Renaming<'a> {
             self.versions[var].truncate(record);
         }
 
-        // remove the load/store
-        for op in &self.removed {
-            let op_id = match op {
-                Operand::Value(id) => *id,
-                _ => return Err("Renaming: removed contains non-op".to_string()),
-            };
-            self.builder.remove_op(Operand::Value(op_id))?;
-        }
         Ok(())
     }
 
     pub fn run(&mut self) -> Result<(), String> {
-        for idx in 0..self.program.funcs.storage.len() {
+        let func_len = self.program.funcs.storage.len();
+        // remove load/store is done in rename
+        
+        for idx in 0..func_len {
             validate_func!(self, idx);
             self.current_function = Some(idx);
             self.init()?;
@@ -688,22 +751,14 @@ impl<'a> Renaming<'a> {
                 }
             };
             self.rename(head)?;
+            
+            // Clean up removed ops for this function
+            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+            for op in &self.removed {
+                 self.builder.remove_op(&mut ctx, op.clone())?;
+            }
+            self.removed.clear();
         }
-        // TODO: Compact field incoming in phi ops to eliminate the redundant placeholders
-        Ok(())
-    }
-}
-
-pub struct Mem2Reg<'a> {
-    program: &'a mut Program,
-}
-
-impl<'a> Pass<()> for Mem2Reg<'a> {
-    fn run(&mut self) -> Result<(), String> {
-        let dom_trees = BuildDomTree::new(self.program).build()?;
-        let dom_frontiers = BuildDomFrontier::new(self.program, dom_trees.clone()).build()?;
-        InsertPhi::new(self.program, dom_frontiers).run()?;
-        Renaming::new(self.program, dom_trees).run()?;
         Ok(())
     }
 }

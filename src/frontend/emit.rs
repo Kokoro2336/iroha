@@ -238,7 +238,7 @@ impl<'a> Emit<'a> {
                             Type::Pointer {
                                 base: Box::new(var_decl.typ.clone()),
                             },
-                            vec![Attr::Name(var_decl.name.clone()), ],
+                            vec![Attr::Name(var_decl.name.clone()), Attr::Promotion],
                             OpData::Alloca(var_decl.typ.size_in_bytes()),
                         ),
                     )?

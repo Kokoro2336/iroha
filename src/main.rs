@@ -14,6 +14,7 @@ use crate::debug::setup;
 use crate::frontend::ast::Node;
 use crate::frontend::parse;
 use crate::frontend::*;
+use crate::opt::*;
 
 use debug::graph::dump_graph;
 use debug::info;
@@ -113,6 +114,18 @@ fn main() -> Result<()> {
         }
     };
     info!("Finish Emitting.");
+
+    info!("Start Running Mem2Reg.");
+    let ir = {
+        let mut pass = Mem2Reg::new(ir);
+        match pass.run() {
+            Ok(res) => res,
+            Err(e) => {
+                panic!("Mem2Reg Error: {}", e);
+            }
+        }
+    };
+    info!("Finish Running Mem2Reg.");
 
     Ok(())
 }

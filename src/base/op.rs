@@ -16,9 +16,6 @@ pub enum OpData {
     // customized instructions for convenience
     GlobalAlloca(u32),
     GetArg(Operand),
-    // for immediate values
-    Int(Operand),
-    Float(Operand),
     // getelementptr
     GEP {
         base: Operand,
@@ -28,6 +25,10 @@ pub enum OpData {
     Move {
         value: Operand,
         reg: Reg,
+    },
+    Declare {
+        name: String,
+        typ: Type,
     },
 
     /* regular instructions */
@@ -200,18 +201,13 @@ impl OpData {
     }
 
     pub fn is_inner_control_flow(&self) -> bool {
-        matches!(
-            self,
-            OpData::Br { .. } | OpData::Jump { .. }
-        )
-     }
+        matches!(self, OpData::Br { .. } | OpData::Jump { .. })
+    }
 }
 
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data {
-            OpData::Int(value) => write!(f, "{}", value),
-            OpData::Float(value) => write!(f, "{}", value),
             OpData::GetArg(idx) => write!(f, "get_arg <idx = {}>", idx),
             OpData::GEP { base, indices } => {
                 write!(f, "gep {}, [", base)?;
@@ -225,6 +221,26 @@ impl std::fmt::Display for Op {
             }
             OpData::GlobalAlloca(size) => write!(f, "global_alloc {}", size),
             OpData::Move { value, reg } => write!(f, "move {}, <reg = {}>", value, reg),
+            OpData::Declare { name, typ } => {
+                let (ret_typ, param_typs) = match typ {
+                    Type::Function {
+                        return_type,
+                        param_types,
+                    } => (return_type, param_types),
+                    _ => unreachable!("Declare op must have function type"),
+                };
+                write!(
+                    f,
+                    "declare {} @{}({})",
+                    name,
+                    ret_typ,
+                    param_typs
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )
+            }
 
             OpData::AddI { lhs, rhs } => write!(f, "add {}, {}", lhs, rhs),
             OpData::SubI { lhs, rhs } => write!(f, "sub {}, {}", lhs, rhs),
@@ -571,10 +587,9 @@ impl Arena<Op> for IndexedArena<Op> {
                     // TODO: As long as program global arena is not changed, the indices are stable.
                     OpData::GlobalAlloca { .. }
                     | OpData::GetArg { .. }
-                    | OpData::Int(_)
-                    | OpData::Float(_)
                     | OpData::Alloca(_)
-                    | OpData::Jump { .. } => { /* no operands to rewrite */ }
+                    | OpData::Jump { .. }
+                    | OpData::Declare { .. } => { /* no operands to rewrite */ }
                 }
             }
         }
@@ -586,7 +601,14 @@ impl Arena<Op> for IndexedArena<Op> {
 
 impl IndexedArena<Op> {
     pub fn add_use(&mut self, op_idx: Operand, use_idx: Operand) -> Result<(), String> {
-        if let Some(node) = self.get_mut(op_idx.get_op_id()?)? {
+        let op_id = match op_idx {
+            Operand::Value(op_id) => op_id,
+            // literals don't have uses in the DFG
+            Operand::Int(_) | Operand::Float(_) => return Ok(()),
+            _ => return Err("Operand is not a valid data".to_string()),
+        };
+
+        if let Some(node) = self.get_mut(op_id)? {
             node.uses.push(use_idx);
             Ok(())
         } else {

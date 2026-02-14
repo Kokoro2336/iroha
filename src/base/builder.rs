@@ -132,8 +132,10 @@ impl Builder {
 
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
+        crate::debug::info!("Adding uses for instruction: {:?}", op);
         let dfg = acquire_dfg!(ctx, "Builder add_uses: ctx.dfg is None");
         let data = dfg.get(op.get_op_id()?)?;
+
         let data = if let Some(data) = data {
             data.data.clone()
         } else {
@@ -216,11 +218,10 @@ impl Builder {
             // GlobalAlloca: Do not maintain uses for global alloca
             OpData::GlobalAlloca(_)
             | OpData::GetArg(_)
-            | OpData::Int(_)
-            | OpData::Float(_)
             // ?
             | OpData::Alloca(_)
-            | OpData::Jump {..} => { /* do nothing */ }
+            | OpData::Jump {..}
+            | OpData::Declare {..} => { /* do nothing */ }
         }
         Ok(())
     }
@@ -231,6 +232,7 @@ impl Builder {
         ctx: &mut BuilderContext,
         op: Operand,
     ) -> Result<(), String> {
+        crate::debug::info!("Adding control flow for instruction: {:?}", op);
         let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
@@ -239,7 +241,7 @@ impl Builder {
         } else {
             return Err("Builder add_control_flow: current_block is None".to_string());
         };
-        
+
         let data = dfg.get(op.get_op_id()?)?;
         let data = if data.is_none() {
             return Err("Builder add_control_flow: op points to None".to_string());
@@ -284,8 +286,6 @@ impl Builder {
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
             | OpData::GetArg { .. }
-            | OpData::Int(_)
-            | OpData::Float(_)
             | OpData::Call { .. }
             | OpData::Move { .. }
             | OpData::GEP { .. }
@@ -309,8 +309,9 @@ impl Builder {
             | OpData::OGt { .. }
             | OpData::OLt { .. }
             | OpData::OGe { .. }
-            | OpData::OLe { .. } => {
-                unreachable!("Builder add_control_flow: not a control flow instruction");
+            | OpData::OLe { .. }
+            | OpData::Declare { .. } => {
+                unreachable!("Builder add_control_flow: not a control flow instruction")
             }
         }
         Ok(())
@@ -320,13 +321,57 @@ impl Builder {
     pub fn create(&mut self, ctx: &mut BuilderContext, op: Op) -> Result<Operand, String> {
         crate::debug::info!("Creating new instruction: {:?}", op);
         let is_inner_control_flow = op.is_inner_control_flow();
-        match op.data {
+        let op_id = match op.data {
             OpData::GlobalAlloca(_) => {
                 let globals = &mut ctx.globals;
                 let op_id = globals.alloc(op)?;
-                Ok(Operand::Value(op_id))
+                Operand::Value(op_id)
             }
-            _ => {
+            OpData::Declare { .. } => {
+                let globals = &mut ctx.globals;
+                let op_id = globals.alloc(op)?;
+                Operand::Value(op_id)
+            }
+            OpData::GetArg(_)
+            | OpData::GEP { .. }
+            | OpData::Move { .. }
+            | OpData::AddI { .. }
+            | OpData::SubI { .. }
+            | OpData::MulI { .. }
+            | OpData::DivI { .. }
+            | OpData::ModI { .. }
+            | OpData::And { .. }
+            | OpData::Or { .. }
+            | OpData::Xor { .. }
+            | OpData::SNe { .. }
+            | OpData::SEq { .. }
+            | OpData::SGt { .. }
+            | OpData::SLt { .. }
+            | OpData::SGe { .. }
+            | OpData::SLe { .. }
+            | OpData::Shl { .. }
+            | OpData::Shr { .. }
+            | OpData::Sar { .. }
+            | OpData::AddF { .. }
+            | OpData::SubF { .. }
+            | OpData::MulF { .. }
+            | OpData::DivF { .. }
+            | OpData::ONe { .. }
+            | OpData::OEq { .. }
+            | OpData::OGt { .. }
+            | OpData::OLt { .. }
+            | OpData::OGe { .. }
+            | OpData::OLe { .. }
+            | OpData::Sitofp { .. }
+            | OpData::Fptosi { .. }
+            | OpData::Store { .. }
+            | OpData::Load { .. }
+            | OpData::Phi { .. }
+            | OpData::Alloca(_)
+            | OpData::Call { .. }
+            | OpData::Br { .. }
+            | OpData::Jump { .. }
+            | OpData::Ret { .. } => {
                 let dfg = acquire_dfg!(ctx, "Builder create: ctx.dfg is None");
                 let cfg = acquire_cfg!(ctx, "Builder create: ctx.cfg is None");
 
@@ -385,9 +430,10 @@ impl Builder {
                     self.add_control_flow(ctx, op_id.clone())?;
                 }
                 // We don't update current_inst, so that the next created instruction is still before the same instruction
-                Ok(op_id)
+                op_id
             }
-        }
+        };
+        Ok(op_id)
     }
 
     pub fn create_at_head(&mut self, ctx: &mut BuilderContext, op: Op) -> Result<Operand, String> {

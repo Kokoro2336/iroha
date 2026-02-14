@@ -123,6 +123,26 @@ impl DumpLlvm for Op {
                     .join(", ");
                 write!(s, "global_alloca {} with attrs: {}", self.typ.dump_to_llvm(ctx)?, attrs)?;
             }
+            OpData::Declare { name, typ } => {
+                if let Type::Function {
+                    return_type,
+                    param_types,
+                } = typ
+                {
+                    write!(s, "declare {} @{}(", return_type.dump_to_llvm(ctx)?, name)?;
+                    for (i, param_ty) in param_types.iter().enumerate() {
+                        write!(s, "{}", param_ty.dump_to_llvm(ctx)?)?;
+                        if i < param_types.len() - 1 {
+                            write!(s, ", ")?;
+                        }
+                    }
+                    write!(s, ")")?;
+                } else {
+                    // This indicates an invalid Declare op, which should have a function type.
+                    // Returning an error is appropriate.
+                    return Err(std::fmt::Error);
+                }
+            }
             OpData::Load { addr } => {
                 let ptr_ty = ctx.function.unwrap().dfg.get(addr.get_op_id().unwrap()).unwrap().unwrap().typ.clone();
                 let ty = if let Type::Pointer { base } = &ptr_ty {
@@ -147,8 +167,6 @@ impl DumpLlvm for Op {
 
                 write!(s, "store {} {}, {} {}", val_ty.dump_to_llvm(ctx)?, value.dump_to_llvm(ctx)?, ptr_ty.dump_to_llvm(ctx)?, addr.dump_to_llvm(ctx)?)?;
             }
-            OpData::Int(val) => write!(s, "add i32 0, {}", val.dump_to_llvm(ctx)?)?,
-            OpData::Float(val) => write!(s, "fadd float 0.0, {}", val.dump_to_llvm(ctx)?)?,
             OpData::AddI { lhs, rhs } => write!(s, "add i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
             OpData::SubI { lhs, rhs } => write!(s, "sub i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
             OpData::MulI { lhs, rhs } => write!(s, "mul i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
@@ -294,6 +312,11 @@ impl DumpLlvm for Program {
 
         for (_id, global_op) in self.globals.get_all_items() {
             if let Some(global_op) = global_op {
+                if let OpData::Declare { .. } = &global_op.data {
+                    writeln!(s, "{}", global_op.dump_to_llvm(&program_ctx)?)?;
+                    continue;
+                }
+
                 let mut name = None;
                 let mut global_array_attr = None;
 

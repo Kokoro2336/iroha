@@ -4,9 +4,11 @@ mod r#type;
 mod builder;
 mod context;
 mod pass;
+mod sysy_lib;
 pub use crate::base::builder::*;
 pub use crate::base::context::*;
 pub use crate::base::pass::*;
+pub use crate::base::sysy_lib::*;
 
 mod bb;
 mod op;

@@ -1,5 +1,6 @@
 use crate::base::ir;
 use crate::base::ir::*;
+use crate::base::SYSY_LIB;
 use crate::base::{Builder, BuilderContext, LoopInfo};
 /**
  * Original IR generation.
@@ -293,7 +294,6 @@ impl<'a> Emit<'a> {
                                     init_values
                                         .iter()
                                         .map(|v| {
-                                            crate::debug::info!("Emitting global array init value: {:#?}", v);
                                             if let Some(lit) = cast::<Literal>(&**v) {
                                                 lit.clone()
                                             } else {
@@ -704,7 +704,7 @@ impl<'a> Emit<'a> {
             let typ = Type::Pointer {
                 base: Box::new(array_access.typ.clone()),
             };
-            if let Some(global_id) = self.globals.get(array_name) {
+            let ptr_addr = if let Some(global_id) = self.globals.get(array_name) {
                 // global array
                 self.builder.create(
                     &mut ctx,
@@ -758,6 +758,7 @@ impl<'a> Emit<'a> {
                     ),
                 )?
             };
+            return Ok(Some(ptr_addr));
         } else if let Some(call) = cast::<Call>(&**node) {
             // evaluate arguments
             let mut arg_ops: Vec<Operand> = vec![];
@@ -775,21 +776,14 @@ impl<'a> Emit<'a> {
                     call.typ.clone(),
                     vec![Attr::Name(call.func_name.clone())],
                     OpData::Call {
-                        func: Operand::Func(match self.func_ids.get(&call.func_name) {
-                            Some(func_id) => *func_id,
-                            None => {
-                                return Err(format!(
-                                    "Call: function {} not found in func_ids",
-                                    call.func_name
-                                ))
-                            }
-                        }),
+                        func: Operand::Func(self.func_ids[&call.func_name]),
                         args: arg_ops,
                     },
                 ),
             )?;
             return Ok(Some(call_op));
         } else if let Some(binary_op) = cast::<BinaryOp>(&**node) {
+            crate::debug::info!("Emitting binary operation: {:?}", binary_op);
             // And & Or need short-circuit evaluation, so we handle them separately.
             match &binary_op.op {
                 ast::Op::And => {
@@ -1231,22 +1225,14 @@ impl<'a> Emit<'a> {
                 ast::Op::Minus => {
                     if typ == Type::Int {
                         // 0 - rhs
-                        let zero_op = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(Type::Int, vec![], OpData::Int(Operand::Int(0))),
-                        )?;
                         OpData::SubI {
-                            lhs: zero_op,
+                            lhs: Operand::Int(0),
                             rhs: operand.unwrap(),
                         }
                     } else {
                         // 0.0 - rhs
-                        let zero_op = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(Type::Float, vec![], OpData::Float(Operand::Float(0.0))),
-                        )?;
                         OpData::SubF {
-                            lhs: zero_op,
+                            lhs: Operand::Float(0.0),
                             rhs: operand.unwrap(),
                         }
                     }
@@ -1254,13 +1240,9 @@ impl<'a> Emit<'a> {
                 ast::Op::Not => {
                     if typ == Type::Int {
                         // 1 - rhs
-                        let zero_op = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(Type::Int, vec![], OpData::Int(Operand::Int(0))),
-                        )?;
                         OpData::SNe {
                             lhs: operand.unwrap(),
-                            rhs: zero_op,
+                            rhs: Operand::Int(0),
                         }
                     } else {
                         return Err("Not operator only supports Int type".to_string());
@@ -1293,18 +1275,10 @@ impl<'a> Emit<'a> {
 
             match literal {
                 Literal::Int(val) => {
-                    let op_id = self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(Type::Int, vec![], OpData::Int(Operand::Int(*val))),
-                    )?;
-                    return Ok(Some(op_id));
+                    return Ok(Some(Operand::Int(*val)));
                 }
                 Literal::Float(val) => {
-                    let op_id = self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(Type::Float, vec![], OpData::Float(Operand::Float(*val))),
-                    )?;
-                    return Ok(Some(op_id));
+                    return Ok(Some(Operand::Float(*val)));
                 }
                 Literal::String(string) => {
                     // create a global u8 ConstArray
@@ -1365,6 +1339,31 @@ impl<'a> Emit<'a> {
 impl Pass<Program> for Emit<'_> {
     fn run(&mut self) -> Result<Program, String> {
         let root = self.root;
+        // Emit declare ops for SysY lib first
+        SYSY_LIB.with(|lib| -> Result<(), String> {
+            let mut ctx = context!(self);
+            for (name, typ) in lib.iter() {
+                // Add it in globals first
+                self.builder.create(
+                    &mut ctx,
+                    ir::Op::new(
+                        Type::Void,
+                        vec![],
+                        OpData::Declare {
+                            name: name.to_string(),
+                            typ: typ.clone(),
+                        },
+                    ),
+                )?;
+            }
+            for (name, _) in lib.iter() {
+                // Alloc space for the function in Call Graph
+                let func_id = self.program.funcs.add(Function::new(name.to_string()))?;
+                // Add it in func_ids for later call lookup
+                self.func_ids.insert(name.to_string(), func_id);
+            }
+            Ok(())
+        })?;
         self.emit(root)?;
         Ok(std::mem::take(&mut self.program))
     }

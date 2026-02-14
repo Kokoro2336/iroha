@@ -52,6 +52,14 @@ impl<T> IndexedArena<T> where T: std::fmt::Debug {
         Ok(index)
     }
 
+    pub fn add_name(&mut self, name: String, idx: usize) -> Result<(), String> {
+        if self.map.contains_key(&name) {
+            return Err("IndexedArena add_name: name already exists".to_string());
+        }
+        self.map.insert(name, idx);
+        Ok(())
+    }
+
     pub fn set_entry(&mut self, idx: usize) -> Result<(), String> {
         self.entry = Some(idx);
         Ok(())

@@ -1,3 +1,4 @@
+use crate::base::SYSY_LIB;
 use crate::base::Type;
 /**
  * Semantic analysis.
@@ -33,7 +34,9 @@ impl Semantic {
             let rhs_type = self.analyze(&mut bin_op.rhs)?;
 
             // Modulo
-            if bin_op.op == Op::Mod && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int)) {
+            if bin_op.op == Op::Mod
+                && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int))
+            {
                 return Err("Modulo operator % only supports Int type".to_string());
             }
 
@@ -130,16 +133,18 @@ impl Semantic {
                 var_access.typ = var_type.clone();
                 Ok(var_type.clone())
             } else {
-                return Err(format!("Undefined variable: {}", var_access.name));
+                Err(format!("Undefined variable: {}", var_access.name))
             }
         } else if let Some(call) = cast_mut::<Call>(&mut **node) {
             let (fn_params, return_typ) = if let Some(func_typ) = self.syms.get(&call.func_name) {
-                match func_typ {
-                    Type::Function {
-                        return_type,
-                        param_types,
-                    } => (param_types.clone(), *return_type.clone()),
-                    _ => return Err(format!("{} is not a function", call.func_name)),
+                if let Type::Function {
+                    return_type,
+                    param_types,
+                } = func_typ
+                {
+                    (param_types.clone(), *return_type.clone())
+                } else {
+                    return Err(format!("{} is not a function", call.func_name));
                 }
             } else {
                 return Err(format!("Undefined FnDecl: {}", call.func_name));
@@ -158,8 +163,10 @@ impl Semantic {
                 for (i, arg) in call.args.iter_mut().enumerate() {
                     let arg_type = self.analyze(arg)?;
                     let param_type = &fn_params[i];
-                    
-                    if matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int) || matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float) {
+
+                    if matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int)
+                        || matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float)
+                    {
                         // insert implicit cast
                         *arg = Box::new(UnaryOp {
                             typ: param_type.clone(),
@@ -181,7 +188,11 @@ impl Semantic {
                 let fmt_str = if let Some(lit) = cast::<Literal>(&*call.args[0]) {
                     match lit {
                         Literal::String(s) => s.clone(),
-                        _ => return Err("The first argument of putf must be a string literal".to_string()),
+                        _ => {
+                            return Err(
+                                "The first argument of putf must be a string literal".to_string()
+                            )
+                        }
                     }
                 } else {
                     return Err("The first argument of putf must be a string literal".to_string());
@@ -208,7 +219,9 @@ impl Semantic {
                 for (i, arg) in call.args.iter_mut().skip(1).enumerate() {
                     let arg_type = self.analyze(arg)?;
                     let param_type = &placeholder_types[i];
-                    if (matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int)) || (matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float)) {
+                    if (matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int))
+                        || (matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float))
+                    {
                         *arg = Box::new(UnaryOp {
                             typ: param_type.clone(),
                             op: Op::Cast(arg_type, param_type.clone()),
@@ -226,9 +239,15 @@ impl Semantic {
             call.typ = return_typ.clone();
             Ok(return_typ)
         } else if let Some(array_access) = cast_mut::<ArrayAccess>(&mut **node) {
-            let array_type = self.syms.get(&array_access.name).ok_or_else(|| {
-                format!("Undefined array variable: {}", array_access.name)
-            })?;
+            let array_type = match self.syms.get(&array_access.name) {
+                Some(typ) => typ.clone(),
+                None => return Err(format!("Undefined variable: {}", array_access.name)),
+            };
+
+            // infer the type of indices
+            for index in &mut array_access.indices {
+                self.analyze(index)?;
+            }
 
             // infer the access's typ
             array_access.typ = if let Type::Array { base, dims } = array_type {
@@ -252,8 +271,7 @@ impl Semantic {
 
         // Declarations
         } else if let Some(func) = cast_mut::<FnDecl>(&mut **node) {
-            self.syms
-                .insert(func.name.clone(), func.typ.clone());
+            self.syms.insert(func.name.clone(), func.typ.clone());
             // enter the scope created for function itself, which is 1 level higher than the function body scope
             self.syms.enter_scope();
 
@@ -273,7 +291,9 @@ impl Semantic {
             if let Some(init_value) = &mut var_decl.init_value {
                 let val_typ = self.analyze(init_value)?;
                 // if val_typ does not match the decl's typ, insert implicit cast
-                if matches!(val_typ, Type::Float) && matches!(var_decl.typ, Type::Int) || matches!(val_typ, Type::Int) && matches!(var_decl.typ, Type::Float) {
+                if matches!(val_typ, Type::Float) && matches!(var_decl.typ, Type::Int)
+                    || matches!(val_typ, Type::Int) && matches!(var_decl.typ, Type::Float)
+                {
                     var_decl.init_value = Some(Box::new(UnaryOp {
                         typ: var_decl.typ.clone(),
                         op: Op::Cast(val_typ, var_decl.typ.clone()),
@@ -282,8 +302,7 @@ impl Semantic {
                 } else if val_typ != var_decl.typ {
                     return Err(format!(
                         "Variable type mismatch: expected {:?}, got {:?}",
-                        var_decl.typ,
-                        val_typ
+                        var_decl.typ, val_typ
                     ));
                 }
             }
@@ -328,7 +347,9 @@ impl Semantic {
                         _ => panic!("VarArray must have array type!"),
                     };
                     // since we don't know whether the init_values is float or int, we insert cast node here.
-                    if matches!(val_typ, Type::Float) && matches!(base_typ, Type::Int) || matches!(val_typ, Type::Int) && matches!(base_typ, Type::Float) {
+                    if matches!(val_typ, Type::Float) && matches!(base_typ, Type::Int)
+                        || matches!(val_typ, Type::Int) && matches!(base_typ, Type::Float)
+                    {
                         match val_typ {
                             Type::Int => {
                                 *init_val = Box::new(UnaryOp {
@@ -409,9 +430,10 @@ impl Semantic {
                     Type::Function { return_type, .. } => *return_type,
                     _ => panic!("Current function is not a function type!"),
                 };
-                
+
                 if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
-                || (matches!(func_ret_typ, Type::Int) && matches!(ret_typ, Type::Float)) {
+                    || (matches!(func_ret_typ, Type::Int) && matches!(ret_typ, Type::Float))
+                {
                     // insert implicit cast if necessary
                     ret.0 = Some(Box::new(UnaryOp {
                         typ: func_ret_typ.clone(),
@@ -432,7 +454,9 @@ impl Semantic {
             let lhs_type = self.analyze(&mut assign.lhs)?;
             let rhs_type = self.analyze(&mut assign.rhs)?;
             // insert implicit cast if necessary
-            if (matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int)) || (matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float)) {
+            if (matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int))
+                || (matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float))
+            {
                 assign.rhs = Box::new(UnaryOp {
                     typ: lhs_type.clone(),
                     op: Op::Cast(rhs_type, lhs_type),
@@ -457,116 +481,12 @@ impl Pass<Box<dyn Node>> for Semantic {
         let mut node = self.node.take().unwrap();
         // create a scope for SysY lib functions, which is outermost scope
         self.syms.enter_scope();
-        self.syms.insert(
-            "getint".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Int),
-                param_types: vec![],
-            },
-        );
-        self.syms.insert(
-            "getfloat".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Float),
-                param_types: vec![],
-            },
-        );
-        self.syms.insert(
-            "getch".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Int),
-                param_types: vec![],
-            },
-        );
-        self.syms.insert(
-            "getarray".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Int),
-                param_types: vec![Type::Pointer {
-                    base: Box::new(Type::Int),
-                }],
-            },
-        );
-        self.syms.insert(
-            "getfarray".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Int),
-                param_types: vec![Type::Pointer {
-                    base: Box::new(Type::Float),
-                }],
-            },
-        );
-        self.syms.insert(
-            "putint".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![Type::Int],
-            },
-        );
-        self.syms.insert(
-            "putfloat".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![Type::Float],
-            },
-        );
-        self.syms.insert(
-            "putch".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![Type::Int],
-            },
-        );
-        self.syms.insert(
-            "putarray".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![
-                    Type::Int,
-                    Type::Pointer {
-                        base: Box::new(Type::Int),
-                    },
-                ],
-            },
-        );
-        self.syms.insert(
-            "putfarray".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![
-                    Type::Int,
-                    Type::Pointer {
-                        base: Box::new(Type::Float),
-                    },
-                ],
-            },
-        );
-        self.syms.insert(
-            "putf".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![
-                    Type::Pointer {
-                        base: Box::new(Type::Char),
-                    },
-                    /*only store the string type, since the trailing params are dynamic according to the format string*/ 
-                ],
-            },
-        );
-        self.syms.insert(
-            "starttime".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![],
-            },
-        );
-        self.syms.insert(
-            "stoptime".to_string(),
-            Type::Function {
-                return_type: Box::new(Type::Void),
-                param_types: vec![],
-            },
-        );
+        // insert SysY lib functions into symbol table
+        SYSY_LIB.with(|lib| {
+            for (name, typ) in lib.iter() {
+                self.syms.insert(name.to_string(), typ.clone());
+            }
+        });
         self.analyze(&mut node)?;
         self.syms.exit_scope();
         Ok(node)
@@ -590,9 +510,9 @@ pub fn decay(typ: Type) -> Result<Type, String> {
                     }),
                 })
             }
-        },
+        }
         // do nothing for pointer type
-        Type::Pointer {..} => Ok(typ),
+        Type::Pointer { .. } => Ok(typ),
         _ => Err(format!("Cannot decay non-array type: {:?}", typ)),
     }
 }

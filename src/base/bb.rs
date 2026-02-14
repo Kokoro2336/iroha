@@ -6,7 +6,9 @@ pub type CG = IndexedArena<Function>;
 
 #[derive(Debug, Clone)]
 pub struct Program {
-    // global vars
+    // Including:
+    // 1. global variables
+    // 2. SysY library functions
     pub globals: DFG,
     // global funcs
     pub funcs: CG,
@@ -277,8 +279,7 @@ impl Arena<Function> for IndexedArena<Function> {
                                     | OpData::Alloca(_)
                                     | OpData::GlobalAlloca { .. }
                                     | OpData::GetArg { .. }
-                                    | OpData::Int(_)
-                                    | OpData::Float(_)
+                                    | OpData::Declare { .. }
                                     | OpData::Call { .. }
                                     | OpData::Move { .. }
                                     | OpData::GEP { .. }
@@ -318,7 +319,9 @@ impl Arena<Function> for IndexedArena<Function> {
 
 impl IndexedArena<Function> {
     pub fn add(&mut self, func: Function) -> Result<usize, String> {
-        crate::debug::info!("Allocating new data in arena: {:?}", func);
-        self.alloc(func)
+        let name = func.name.clone();
+        let func_id = self.alloc(func)?;
+        self.add_name(name, func_id)?;
+        Ok(func_id)
     }
 }

@@ -2,7 +2,9 @@
  * Dump customized IR into LLVM format for debugging.
  */
 use crate::base::ir::*;
+use crate::base::pass::Pass;
 use crate::base::Type;
+use crate::debug::info;
 use crate::frontend::ast;
 use crate::utils::arena::{ArenaItem, IndexedArena};
 use std::fmt::Write;
@@ -374,5 +376,29 @@ impl<T> ArenaExt<T> for IndexedArena<T> {
                 }
             })
             .collect()
+    }
+}
+
+pub struct DumpLlvmPass {
+    program: Program,
+}
+
+impl DumpLlvmPass {
+    pub fn new(program: Program) -> Self {
+        Self { program }
+    }
+}
+
+impl Pass<Program> for DumpLlvmPass {
+    fn run(&mut self) -> std::result::Result<Program, String> {
+        let ctx = DumpContext {
+            program: &self.program,
+            function: None,
+        };
+        match self.program.dump_to_llvm(&ctx) {
+            Ok(s) => info!("\n{}", s),
+            Err(e) => info!("Error dumping LLVM IR: {}", e),
+        }
+        Ok(std::mem::take(&mut self.program))
     }
 }

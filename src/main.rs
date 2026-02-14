@@ -18,6 +18,7 @@ use crate::opt::*;
 
 use debug::graph::dump_graph;
 use debug::info;
+use debug::DumpLlvmPass;
 
 // 引用 lalrpop 生成的解析器
 // 因为我们刚刚创建了 sysy.lalrpop, 所以模块名是 sysy
@@ -126,6 +127,18 @@ fn main() -> Result<()> {
         }
     };
     info!("Finish Running Mem2Reg.");
+
+    info!("Start Dumping LLVM IR.");
+    let ir = {
+        let mut pass = DumpLlvmPass::new(ir);
+        match pass.run() {
+            Ok(res) => res,
+            Err(e) => {
+                panic!("DumpLlvmPass Error: {}", e);
+            }
+        }
+    };
+    info!("Finish Dumping LLVM IR.");
 
     Ok(())
 }

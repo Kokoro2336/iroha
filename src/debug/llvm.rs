@@ -2,7 +2,7 @@
  * Dump customized IR into LLVM format for debugging.
  */
 use crate::base::ir::*;
-use crate::base::pass::Pass;
+use crate::base::Pass;
 use crate::base::Type;
 use crate::debug::info;
 use crate::frontend::ast;

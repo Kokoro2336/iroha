@@ -30,7 +30,7 @@ pub CompUnit: Box<dyn Node> = {
               let decl_aggr = cast_deref::<DeclAggr>(obj).unwrap();
               for mut decl in decl_aggr.decls.into_iter() {
                 // overwrite is_global field
-                if let Some(var_array) = cast_mut::<VarArray>(&mut decl) {
+                if let Some(var_array) = cast_mut::<VarArray>(&mut *decl) {
                   var_array.is_global = true;
 
                   if var_array.init_values.is_none() {
@@ -46,7 +46,7 @@ pub CompUnit: Box<dyn Node> = {
                     // fold the initializer
                     var_array.init_values = Some(init_vals.into_iter().map(|init_val| parser.fold(init_val)).collect());
                   }
-                } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut decl) {
+                } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut *decl) {
                   var_decl.is_global = true;
 
                   if var_decl.mutable {

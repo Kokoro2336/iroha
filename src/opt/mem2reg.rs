@@ -2,6 +2,7 @@ use crate::base::ir::{Attr, Op, OpData, OpType, Operand, Program};
 use crate::base::{Builder, BuilderContext, BuilderGuard, Pass, Type};
 use crate::frontend::context_or_err;
 use crate::utils::bitset::BitSet;
+use crate::debug::info;
 
 use std::collections::HashMap;
 
@@ -156,6 +157,7 @@ impl<'a> BuildDomTree<'a> {
         self.dom_trees = vec![vec![]; self.program.funcs.storage.len()];
 
         for idx in 0..self.program.funcs.storage.len() {
+            info!("Building dominator tree for function {}", idx);
             validate_func!(self, idx);
             let func = &self.program.funcs[idx];
             let head = match func.cfg.entry {
@@ -164,8 +166,10 @@ impl<'a> BuildDomTree<'a> {
             };
 
             self.init(idx)?;
+            info!("Start DFS traversal.");
             self.dfs(head)?;
 
+            info!("DFS traversal completed. Start computing dominators.");
             for i in (1..self.rev.len()).rev() {
                 let u = self.rev[i];
                 let preds_num = {
@@ -215,6 +219,7 @@ impl<'a> BuildDomTree<'a> {
             }
 
             // Refine idom
+            info!("Dominator tree computed. Start refining immediate dominators.");
             for i in 1..self.rev.len() {
                 let v = self.rev[i];
                 let u = self.idom[v];
@@ -787,20 +792,28 @@ impl Mem2Reg {
 impl Pass<Program> for Mem2Reg {
     fn run(&mut self) -> Result<Program, String> {
         // 1. Build dominator tree
+        info!("Start building dominator tree.");
         let mut dom_builder = BuildDomTree::new(&mut self.program);
         let dom_trees = dom_builder.build()?;
+        info!("Dominator tree built.");
 
         // 2. Build dominator frontier
+        info!("Start building dominator frontier.");
         let mut df_builder = BuildDomFrontier::new(&mut self.program, dom_trees.clone());
         let frontiers = df_builder.build()?;
+        info!("Dominator frontier built.");
 
         // 3. Insert Phi nodes
+        info!("Start inserting phi nodes.");
         let mut phi_inserter = InsertPhi::new(&mut self.program, frontiers);
         phi_inserter.run()?;
+        info!("Phi nodes inserted.");
 
         // 4. Rename variables
+        info!("Start renaming variables.");
         let mut renamer = Renaming::new(&mut self.program, dom_trees);
         renamer.run()?;
+        info!("Variables renamed.");
 
         Ok(std::mem::take(&mut self.program))
     }

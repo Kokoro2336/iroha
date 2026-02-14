@@ -363,7 +363,7 @@ trait ArenaExt<T> {
     fn get_all_items(&self) -> Vec<(usize, Option<&T>)>;
 }
 
-impl<T> ArenaExt<T> for IndexedArena<T> {
+impl<T> ArenaExt<T> for IndexedArena<T> where T: std::fmt::Debug {
     fn get_all_items(&self) -> Vec<(usize, Option<&T>)> {
         self.storage
             .iter()

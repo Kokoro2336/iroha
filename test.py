@@ -47,6 +47,7 @@ def main():
     parser.add_argument('--hidden', action='store_true', help='Include hidden functional tests')
     parser.add_argument('--clean', action='store_true', help='Clean test directories before running')
     parser.add_argument('--graph', action='store_true', help='Dump AST graph')
+    parser.add_argument('--trace', action='store_true', help='Enable trace logging')
     args = parser.parse_args()
 
     if args.clean and not (args.test or args.test_all):
@@ -141,7 +142,10 @@ def main():
                 cmd.append("--graph")
             
             try:
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if args.trace:
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, "RUST_BACKTRACE": "1"})
+                else:
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 # Determine output directory based on result
                 status = "passed" if result.returncode == 0 else "failed"

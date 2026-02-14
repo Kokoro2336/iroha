@@ -51,7 +51,7 @@ struct Cli {
 fn main() -> Result<()> {
     // setup logging
     // We need to keep this guard alive for the entire duration of the program.
-    let _guard = setup("parse.log");
+    let _guard = setup("rsyc.log");
     info!("Logger initialized.");
 
     // preprocess argv so single-dash long-style `-koopa` becomes `--koopa`
@@ -96,7 +96,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    info!("Finish Semantic Analysis");
+    info!("Finish Semantic Analysis.");
 
     // Try to dump graph to log file
     if cli.graph {
@@ -114,7 +114,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    info!("Finish Emitting.");
+    info!("Finish Emitting. IR generated: \n{:#?}", ir);
 
     info!("Start Running Mem2Reg.");
     let ir = {

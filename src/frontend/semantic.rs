@@ -5,7 +5,7 @@ use crate::base::Type;
  */
 use crate::base::{Pass, SymbolTable};
 use crate::frontend::ast::*;
-use crate::utils::{cast, cast_mut, is, replace, take};
+use crate::utils::{cast, cast_mut, replace, take};
 
 use regex::Regex;
 
@@ -28,8 +28,7 @@ impl Semantic {
 
     pub fn analyze(&mut self, node: &mut Box<dyn Node>) -> Result<Type, String> {
         // Exps
-        if is::<BinaryOp>(node) {
-            let bin_op = cast_mut::<BinaryOp>(node).unwrap();
+        if let Some(bin_op) = cast_mut::<BinaryOp>(&mut **node) {
             let lhs_type = self.analyze(&mut bin_op.lhs)?;
             let rhs_type = self.analyze(&mut bin_op.rhs)?;
 
@@ -86,8 +85,7 @@ impl Semantic {
                 bin_op.typ = Type::Int;
                 Ok(Type::Int)
             }
-        } else if is::<UnaryOp>(node) {
-            let un_op = cast_mut::<UnaryOp>(node).unwrap();
+        } else if let Some(un_op) = cast_mut::<UnaryOp>(&mut **node) {
             if matches!(un_op.op, Op::Cast(_, _)) {
                 panic!("Cast op is impossible to occur before semantic analysis!");
             }
@@ -119,8 +117,7 @@ impl Semantic {
                 }
                 _ => unreachable!("Unexpected unary op: {:?}", un_op),
             }
-        } else if is::<Literal>(node) {
-            let lit = cast_mut::<Literal>(node).unwrap();
+        } else if let Some(lit) = cast_mut::<Literal>(&mut **node) {
             match *lit {
                 Literal::Int(_) => Ok(Type::Int),
                 Literal::Float(_) => Ok(Type::Float),
@@ -128,16 +125,14 @@ impl Semantic {
                     base: Box::new(Type::Char),
                 }),
             }
-        } else if is::<VarAccess>(node) {
-            let var_access = cast_mut::<VarAccess>(node).unwrap();
+        } else if let Some(var_access) = cast_mut::<VarAccess>(&mut **node) {
             if let Some(var_type) = self.syms.get(&var_access.name) {
                 var_access.typ = var_type.clone();
                 Ok(var_type.clone())
             } else {
                 return Err(format!("Undefined variable: {}", var_access.name));
             }
-        } else if is::<Call>(node) {
-            let call = cast_mut::<Call>(node).unwrap();
+        } else if let Some(call) = cast_mut::<Call>(&mut **node) {
             let (fn_params, return_typ) = if let Some(func_typ) = self.syms.get(&call.func_name) {
                 match func_typ {
                     Type::Function {
@@ -163,18 +158,19 @@ impl Semantic {
                 for (i, arg) in call.args.iter_mut().enumerate() {
                     let arg_type = self.analyze(arg)?;
                     let param_type = &fn_params[i];
-                    if (arg_type == Type::Void) ^ (param_type == &Type::Void) {
-                        return Err(format!(
-                            "Argument type mismatch in function {}: expected {:?}, got {:?}",
-                            call.func_name, param_type, arg_type
-                        ));
-                    } else if arg_type != *param_type {
+                    
+                    if matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int) || matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float) {
                         // insert implicit cast
                         *arg = Box::new(UnaryOp {
                             typ: param_type.clone(),
                             op: Op::Cast(arg_type, param_type.clone()),
                             operand: take(arg),
                         });
+                    } else if arg_type != *param_type {
+                        return Err(format!(
+                            "Argument type mismatch in function {}: expected {:?}, got {:?}",
+                            call.func_name, param_type, arg_type
+                        ));
                     }
                 }
             } else {
@@ -212,20 +208,24 @@ impl Semantic {
                 for (i, arg) in call.args.iter_mut().skip(1).enumerate() {
                     let arg_type = self.analyze(arg)?;
                     let param_type = &placeholder_types[i];
-                    if arg_type != *param_type {
+                    if (matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int)) || (matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float)) {
                         *arg = Box::new(UnaryOp {
                             typ: param_type.clone(),
                             op: Op::Cast(arg_type, param_type.clone()),
                             operand: take(arg),
                         });
+                    } else if arg_type != *param_type {
+                        return Err(format!(
+                            "Argument type mismatch in putf: expected {:?}, got {:?}",
+                            param_type, arg_type
+                        ));
                     }
                 }
             }
 
             call.typ = return_typ.clone();
             Ok(return_typ)
-        } else if is::<ArrayAccess>(node) {
-            let array_access = cast_mut::<ArrayAccess>(node).unwrap();
+        } else if let Some(array_access) = cast_mut::<ArrayAccess>(&mut **node) {
             let array_type = self.syms.get(&array_access.name).ok_or_else(|| {
                 format!("Undefined array variable: {}", array_access.name)
             })?;
@@ -251,8 +251,7 @@ impl Semantic {
             Ok(array_access.typ.clone())
 
         // Declarations
-        } else if is::<FnDecl>(node) {
-            let func = cast_mut::<FnDecl>(node).unwrap();
+        } else if let Some(func) = cast_mut::<FnDecl>(&mut **node) {
             self.syms
                 .insert(func.name.clone(), func.typ.clone());
             // enter the scope created for function itself, which is 1 level higher than the function body scope
@@ -268,24 +267,28 @@ impl Semantic {
 
             self.syms.exit_scope();
             Ok(Type::Void)
-        } else if is::<VarDecl>(node) {
-            let var_decl = cast_mut::<VarDecl>(node).unwrap();
+        } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut **node) {
             self.syms
                 .insert(var_decl.name.clone(), var_decl.typ.clone());
             if let Some(init_value) = &mut var_decl.init_value {
                 let val_typ = self.analyze(init_value)?;
                 // if val_typ does not match the decl's typ, insert implicit cast
-                if val_typ != var_decl.typ {
+                if matches!(val_typ, Type::Float) && matches!(var_decl.typ, Type::Int) || matches!(val_typ, Type::Int) && matches!(var_decl.typ, Type::Float) {
                     var_decl.init_value = Some(Box::new(UnaryOp {
                         typ: var_decl.typ.clone(),
                         op: Op::Cast(val_typ, var_decl.typ.clone()),
                         operand: take(init_value),
                     }));
+                } else if val_typ != var_decl.typ {
+                    return Err(format!(
+                        "Variable type mismatch: expected {:?}, got {:?}",
+                        var_decl.typ,
+                        val_typ
+                    ));
                 }
             }
             Ok(Type::Void)
-        } else if is::<ConstArray>(node) {
-            let const_array = cast_mut::<ConstArray>(node).unwrap();
+        } else if let Some(const_array) = cast_mut::<ConstArray>(&mut **node) {
             self.syms
                 .insert(const_array.name.clone(), const_array.typ.clone());
             let base = match &const_array.typ {
@@ -314,27 +317,30 @@ impl Semantic {
                 }
             }
             Ok(Type::Void)
-        } else if is::<VarArray>(node) {
-            let local_array = cast_mut::<VarArray>(node).unwrap();
+        } else if let Some(local_array) = cast_mut::<VarArray>(&mut **node) {
             self.syms
                 .insert(local_array.name.clone(), local_array.typ.clone());
             if let Some(init_values) = &mut local_array.init_values {
                 for init_val in init_values {
                     let val_typ = self.analyze(init_val)?;
+                    let base_typ = match &local_array.typ {
+                        Type::Array { base, .. } => base.as_ref().clone(),
+                        _ => panic!("VarArray must have array type!"),
+                    };
                     // since we don't know whether the init_values is float or int, we insert cast node here.
-                    if val_typ != local_array.typ {
+                    if matches!(val_typ, Type::Float) && matches!(base_typ, Type::Int) || matches!(val_typ, Type::Int) && matches!(base_typ, Type::Float) {
                         match val_typ {
                             Type::Int => {
                                 *init_val = Box::new(UnaryOp {
-                                    typ: local_array.typ.clone(),
-                                    op: Op::Cast(Type::Int, local_array.typ.clone()),
+                                    typ: base_typ.clone(),
+                                    op: Op::Cast(Type::Int, base_typ.clone()),
                                     operand: take(init_val),
                                 });
                             },
                             Type::Float => {
                                 *init_val = Box::new(UnaryOp {
-                                    typ: local_array.typ.clone(),
-                                    op: Op::Cast(Type::Float, local_array.typ.clone()),
+                                    typ: base_typ.clone(),
+                                    op: Op::Cast(Type::Float, base_typ.clone()),
                                     operand: take(init_val),
                                 });
                             },
@@ -342,22 +348,25 @@ impl Semantic {
                                 "LocalArray can only be initialized with Int or Float literals: {:?}", val_typ
                             ),
                         }
+                    } else if val_typ != base_typ {
+                        return Err(format!(
+                            "Array variable type mismatch: expected {:?}, got {:?}",
+                            base_typ, val_typ
+                        ));
                     }
                 }
             }
             Ok(Type::Void)
 
         // Statements
-        } else if is::<Block>(node) {
-            let block = cast_mut::<Block>(node).unwrap();
+        } else if let Some(block) = cast_mut::<Block>(&mut **node) {
             self.syms.enter_scope();
             for stmt in &mut block.statements {
                 self.analyze(stmt)?;
             }
             self.syms.exit_scope();
             Ok(Type::Void)
-        } else if is::<If>(node) {
-            let if_stmt = cast_mut::<If>(node).unwrap();
+        } else if let Some(if_stmt) = cast_mut::<If>(&mut **node) {
             // Do implicit cast for cond if necessary.
             let cond_type = self.analyze(&mut if_stmt.condition)?;
             if matches!(cond_type, Type::Float) {
@@ -374,8 +383,7 @@ impl Semantic {
                 self.analyze(else_branch)?;
             }
             Ok(Type::Void)
-        } else if is::<While>(node) {
-            let while_stmt = cast_mut::<While>(node).unwrap();
+        } else if let Some(while_stmt) = cast_mut::<While>(&mut **node) {
             let cond_type = self.analyze(&mut while_stmt.condition)?;
             if matches!(cond_type, Type::Float) {
                 while_stmt.condition = Box::new(BinaryOp {
@@ -388,9 +396,8 @@ impl Semantic {
 
             self.analyze(&mut while_stmt.body)?;
             Ok(Type::Void)
-        } else if is::<Return>(node) {
+        } else if let Some(ret) = cast_mut::<Return>(&mut **node) {
             // check whether the function return type matches
-            let ret = cast_mut::<Return>(node).unwrap();
             if let Some(expr) = &mut ret.0 {
                 let ret_typ = self.analyze(expr)?;
                 let func_typ = self
@@ -402,34 +409,40 @@ impl Semantic {
                     Type::Function { return_type, .. } => *return_type,
                     _ => panic!("Current function is not a function type!"),
                 };
-                if (func_ret_typ == Type::Void) ^ (ret_typ == Type::Void) {
-                    return Err(format!(
-                        "Return type mismatch in function {}: expected {:?}, got {:?}",
-                        self.current_func.as_ref().unwrap(),
-                        func_ret_typ,
-                        ret_typ
-                    ));
-                } else if func_ret_typ != ret_typ {
+                
+                if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
+                || (matches!(func_ret_typ, Type::Int) && matches!(ret_typ, Type::Float)) {
                     // insert implicit cast if necessary
                     ret.0 = Some(Box::new(UnaryOp {
                         typ: func_ret_typ.clone(),
                         op: Op::Cast(ret_typ, func_ret_typ.clone()),
                         operand: take(expr),
                     }));
+                } else if ret_typ != func_ret_typ {
+                    return Err(format!(
+                        "Return type mismatch in function {}: expected {:?}, got {:?}",
+                        self.current_func.as_ref().unwrap(),
+                        func_ret_typ,
+                        ret_typ
+                    ));
                 }
             }
             Ok(Type::Void)
-        } else if is::<Assign>(node) {
-            let assign = cast_mut::<Assign>(node).unwrap();
+        } else if let Some(assign) = cast_mut::<Assign>(&mut **node) {
             let lhs_type = self.analyze(&mut assign.lhs)?;
             let rhs_type = self.analyze(&mut assign.rhs)?;
             // insert implicit cast if necessary
-            if lhs_type != rhs_type {
+            if (matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int)) || (matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float)) {
                 assign.rhs = Box::new(UnaryOp {
                     typ: lhs_type.clone(),
                     op: Op::Cast(rhs_type, lhs_type),
                     operand: take(&mut assign.rhs),
                 });
+            } else if lhs_type != rhs_type {
+                return Err(format!(
+                    "Assignment type mismatch: expected {:?}, got {:?}",
+                    lhs_type, rhs_type
+                ));
             }
 
             Ok(Type::Void)

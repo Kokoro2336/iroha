@@ -5,12 +5,13 @@
 use std::collections::HashMap;
 use std::ops::{Index, IndexMut};
 
-pub trait Arena<T> {
+pub trait Arena<T> where T: std::fmt::Debug {
     fn remove(&mut self, idx: usize) -> Result<usize, String>;
     fn gc(&mut self) -> Result<Vec<ArenaItem<T>>, String>;
 }
 
-pub enum ArenaItem<T> {
+#[derive(Debug, Clone)]
+pub enum ArenaItem<T> where T: std::fmt::Debug {
     // This is for storing actual data.
     Data(T),
     // This is for marking transported data's new index in the new arena.
@@ -19,19 +20,20 @@ pub enum ArenaItem<T> {
     None,
 }
 
-impl<T> ArenaItem<T> {
+impl<T> ArenaItem<T> where T: std::fmt::Debug {
     pub fn replace(&mut self, new_index: usize) -> Self {
         std::mem::replace(self, ArenaItem::NewIndex(new_index))
     }
 }
 
-pub struct IndexedArena<T> {
+#[derive(Debug, Clone)]
+pub struct IndexedArena<T> where T: std::fmt::Debug {
     pub entry: Option<usize>,
     pub map: HashMap<String, usize>,
     pub storage: Vec<ArenaItem<T>>,
 }
 
-impl<T> IndexedArena<T> {
+impl<T> IndexedArena<T> where T: std::fmt::Debug {
     pub fn new() -> Self {
         Self {
             entry: None,
@@ -106,7 +108,7 @@ impl<T> IndexedArena<T> {
     }
 }
 
-impl<T> Index<usize> for IndexedArena<T> {
+impl<T> Index<usize> for IndexedArena<T> where T: std::fmt::Debug {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -114,13 +116,13 @@ impl<T> Index<usize> for IndexedArena<T> {
     }
 }
 
-impl<T> IndexMut<usize> for IndexedArena<T> {
+impl<T> IndexMut<usize> for IndexedArena<T> where T: std::fmt::Debug {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).unwrap().unwrap()
     }
 }
 
-impl<T> Index<String> for IndexedArena<T> {
+impl<T> Index<String> for IndexedArena<T> where T: std::fmt::Debug {
     type Output = T;
 
     fn index(&self, index: String) -> &Self::Output {
@@ -128,7 +130,7 @@ impl<T> Index<String> for IndexedArena<T> {
     }
 }
 
-impl<T> IndexMut<String> for IndexedArena<T> {
+impl<T> IndexMut<String> for IndexedArena<T> where T: std::fmt::Debug {
     fn index_mut(&mut self, index: String) -> &mut Self::Output {
         self.get_mut_by_name(index).unwrap().unwrap()
     }

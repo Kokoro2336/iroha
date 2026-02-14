@@ -104,7 +104,7 @@ impl Builder {
             return Err("Builder set_before_inst: current_block is None".to_string());
         };
 
-        let current_block = self.current_block.clone().unwrap().get_bb_id()?;
+        let current_block = self.current_block.as_ref().unwrap().get_bb_id()?;
         let bb = cfg.get_mut(current_block)?;
         let bb = if bb.is_none() {
             return Err(format!(
@@ -133,11 +133,11 @@ impl Builder {
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
         let dfg = acquire_dfg!(ctx, "Builder add_uses: ctx.dfg is None");
-        let data = dfg.get(op.get_bb_id()?)?;
-        let data = if data.is_none() {
-            return Err("Builder add_uses: op points to None".to_string());
+        let data = dfg.get(op.get_op_id()?)?;
+        let data = if let Some(data) = data {
+            data.data.clone()
         } else {
-            data.unwrap().data.clone()
+            return Err("Builder add_uses: op points to None".to_string());
         };
 
         match data {
@@ -234,10 +234,12 @@ impl Builder {
         let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
-        let bb = cfg.get(op.get_bb_id()?)?;
-        if bb.is_none() {
-            return Err("Builder add_control_flow: op points to None".to_string());
-        }
+        let bb = if let Some(block) = &self.current_block {
+            block.get_bb_id()?
+        } else {
+            return Err("Builder add_control_flow: current_block is None".to_string());
+        };
+        
         let data = dfg.get(op.get_op_id()?)?;
         let data = if data.is_none() {
             return Err("Builder add_control_flow: op points to None".to_string());
@@ -308,7 +310,7 @@ impl Builder {
             | OpData::OLt { .. }
             | OpData::OGe { .. }
             | OpData::OLe { .. } => {
-                return Err("Builder add_control_flow: not a control flow instruction".to_string())
+                unreachable!("Builder add_control_flow: not a control flow instruction");
             }
         }
         Ok(())
@@ -316,6 +318,8 @@ impl Builder {
 
     // create an instruction after current instruction
     pub fn create(&mut self, ctx: &mut BuilderContext, op: Op) -> Result<Operand, String> {
+        crate::debug::info!("Creating new instruction: {:?}", op);
+        let is_inner_control_flow = op.is_inner_control_flow();
         match op.data {
             OpData::GlobalAlloca(_) => {
                 let globals = &mut ctx.globals;
@@ -328,19 +332,19 @@ impl Builder {
 
                 // append_at will update the prev and next pointers accordingly
                 let op_id = dfg.alloc(op)?;
-                let current_block = if self.current_block.is_none() {
-                    return Err("Builder create: current_block is None".to_string());
+                let current_block = if let Some(block) = &self.current_block {
+                    block.get_bb_id()?
                 } else {
-                    self.current_block.as_ref().unwrap().get_bb_id()?
+                    return Err("Builder create: current_block is None".to_string());
                 };
                 let bb = cfg.get_mut(current_block)?;
-                let bb = if bb.is_none() {
+                let bb = if let Some(bb) = bb {
+                    bb
+                } else {
                     return Err(format!(
                         "Builder create: current_block {:?} points to None",
                         self.current_block
                     ));
-                } else {
-                    bb.unwrap()
                 };
 
                 let op_id = if let Some(current_inst) = &self.current_inst {
@@ -377,7 +381,9 @@ impl Builder {
                 // add uses
                 self.add_uses(ctx, op_id.clone())?;
                 // add control flow info if needed
-                self.add_control_flow(ctx, op_id.clone())?;
+                if is_inner_control_flow {
+                    self.add_control_flow(ctx, op_id.clone())?;
+                }
                 // We don't update current_inst, so that the next created instruction is still before the same instruction
                 Ok(op_id)
             }
@@ -471,7 +477,12 @@ impl Builder {
         Ok(ops)
     }
 
-    pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) -> Result<(), String> {
+    pub fn replace_all_uses(
+        &mut self,
+        ctx: &mut BuilderContext,
+        old: Operand,
+        new: Operand,
+    ) -> Result<(), String> {
         // TODO
         todo!()
     }

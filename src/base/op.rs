@@ -198,6 +198,13 @@ impl OpData {
     pub fn is(&self, op_typ: OpType) -> bool {
         OpType::from(self) == op_typ
     }
+
+    pub fn is_inner_control_flow(&self) -> bool {
+        matches!(
+            self,
+            OpData::Br { .. } | OpData::Jump { .. }
+        )
+     }
 }
 
 impl std::fmt::Display for Op {
@@ -285,6 +292,7 @@ impl std::fmt::Display for Op {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Op {
     pub typ: Type,
     pub attrs: Vec<Attr>,
@@ -304,6 +312,10 @@ impl Op {
 
     pub fn is(&self, op_typ: OpType) -> bool {
         self.data.is(op_typ)
+    }
+
+    pub fn is_inner_control_flow(&self) -> bool {
+        self.data.is_inner_control_flow()
     }
 }
 
@@ -390,6 +402,7 @@ impl std::fmt::Display for Operand {
 }
 
 // attributes of instructions
+#[derive(Clone, Debug)]
 pub enum Attr {
     // for global var
     GlobalArray {

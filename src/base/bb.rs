@@ -4,6 +4,7 @@ use crate::utils::arena::*;
 pub type CFG = IndexedArena<BasicBlock>;
 pub type CG = IndexedArena<Function>;
 
+#[derive(Debug, Clone)]
 pub struct Program {
     // global vars
     pub globals: DFG,
@@ -26,6 +27,7 @@ impl Default for Program {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
     pub cfg: CFG,
@@ -42,6 +44,7 @@ impl Function {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct BasicBlock {
     pub preds: Vec<Operand>,
     pub cur: Vec<Operand>,
@@ -315,6 +318,7 @@ impl Arena<Function> for IndexedArena<Function> {
 
 impl IndexedArena<Function> {
     pub fn add(&mut self, func: Function) -> Result<usize, String> {
-        Ok(self.alloc(func)?)
+        crate::debug::info!("Allocating new data in arena: {:?}", func);
+        self.alloc(func)
     }
 }

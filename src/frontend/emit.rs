@@ -91,7 +91,8 @@ impl<'a> Emit<'a> {
     }
 
     pub fn emit(&mut self, node: &Box<dyn Node>) -> Result<Option<Operand>, String> {
-        if let Some(fn_decl) = cast::<FnDecl>(node) {
+        if let Some(fn_decl) = cast::<FnDecl>(&**node) {
+            crate::debug::info!("Emitting function: {}", fn_decl.name);
             // create new function
             self.current_function = Some(
                 self.program
@@ -170,10 +171,10 @@ impl<'a> Emit<'a> {
             // exit function scope
             self.syms.exit_scope();
             return Ok(None);
-        } else if let Some(block) = cast::<Block>(node) {
-            {
-                let mut ctx = context!(self);
-                // create new block
+        } else if let Some(block) = cast::<Block>(&**node) {
+            // Check whether we are already in a function. If not, it means this block is the global scope, we don't need to create a new block for it. Otherwise, we need to create a new block for it.
+            if self.current_function.is_some() {
+                let mut ctx = context_or_err!(self, "Function not found");
                 let block_id = self.builder.create_new_block(&mut ctx)?;
                 self.builder.set_current_block(block_id)?;
             }
@@ -189,7 +190,7 @@ impl<'a> Emit<'a> {
                 })?;
             // exit scope
             self.syms.exit_scope();
-        } else if let Some(var_decl) = cast::<VarDecl>(node) {
+        } else if let Some(var_decl) = cast::<VarDecl>(&**node) {
             // Global alloca
             if var_decl.is_global {
                 let mut ctx = context!(self);
@@ -208,16 +209,20 @@ impl<'a> Emit<'a> {
                                 // cast to pointer typ
                                 typ: var_decl.typ.clone(),
                                 values: if let Some(init_value) = &var_decl.init_value {
-                                    if let Some(lit) = cast::<Literal>(init_value) {
+                                    if let Some(lit) = cast::<Literal>(&**init_value) {
                                         vec![lit.clone()]
                                     } else {
-                                        return Err(
-                                            "Global VarDecl init_value is not Literal".to_string()
-                                        );
+                                        return Err(format!(
+                                            "Global VarDecl init_value is not Literal. Varname: {}",
+                                            var_decl.name
+                                        ));
                                     }
                                 } else {
                                     // Global values' initializer can't be None here(initializer added in Parse)
-                                    return Err("Global VarDecl has no init_value".to_string());
+                                    return Err(format!(
+                                        "Global VarDecl has no init_value. Varname: {}",
+                                        var_decl.name
+                                    ));
                                 },
                             },
                             Attr::Name(var_decl.name.clone()),
@@ -266,7 +271,7 @@ impl<'a> Emit<'a> {
                 // If no init value, do nothing (the value is undefined)
             }
             return Ok(None);
-        } else if let Some(var_array) = cast::<VarArray>(node) {
+        } else if let Some(var_array) = cast::<VarArray>(&**node) {
             if var_array.is_global {
                 let mut ctx = context!(self);
                 // Global alloca
@@ -288,18 +293,17 @@ impl<'a> Emit<'a> {
                                     init_values
                                         .iter()
                                         .map(|v| {
-                                            if let Some(lit) = cast::<Literal>(v) {
+                                            crate::debug::info!("Emitting global array init value: {:#?}", v);
+                                            if let Some(lit) = cast::<Literal>(&**v) {
                                                 lit.clone()
                                             } else {
-                                                panic!(
-                                                "Global VarArray init_values contain non-Literal"
-                                            );
+                                                panic!("Global VarArray init_values contain non-Literal. Varname: {}", var_array.name);
                                             }
                                         })
                                         .collect()
                                 } else {
                                     // panic
-                                    return Err("Global VarArray has no init_values".to_string());
+                                    return Err(format!("Global VarArray has no init_values. Varname: {}", var_array.name));
                                 },
                             },
                             Attr::Name(var_array.name.clone()),
@@ -378,7 +382,7 @@ impl<'a> Emit<'a> {
                     // TODO: when the trailing zeroes reach some kind of limit, we add a loop to init them.
                 }
             }
-        } else if let Some(const_array) = cast::<ConstArray>(node) {
+        } else if let Some(const_array) = cast::<ConstArray>(&**node) {
             let func_name_opt = if let Some(current_func) = self.current_function {
                 Some(self.program.funcs[current_func].name.clone())
             } else {
@@ -436,7 +440,7 @@ impl<'a> Emit<'a> {
             )?;
             // insert into globals table. If the var is global, then the symbol table must because at global scope.
             self.globals.insert(name, alloca);
-        } else if let Some(ret) = cast::<Return>(node) {
+        } else if let Some(ret) = cast::<Return>(&**node) {
             if let Some(ret_val) = &ret.0 {
                 let op_id = self.emit(ret_val)?;
                 let mut ctx = context_or_err!(self, "Return outside function");
@@ -459,7 +463,7 @@ impl<'a> Emit<'a> {
                     ir::Op::new(Type::Void, vec![], OpData::Ret { value: None }),
                 )?;
             }
-        } else if let Some(if_stmt) = cast::<If>(node) {
+        } else if let Some(if_stmt) = cast::<If>(&**node) {
             let (then_block, else_block, end_block) = {
                 let mut ctx = context_or_err!(self, "If statement outside function");
 
@@ -539,7 +543,7 @@ impl<'a> Emit<'a> {
 
             // set current block to end_block
             self.builder.set_current_block(end_block)?;
-        } else if let Some(while_stmt) = cast::<While>(node) {
+        } else if let Some(while_stmt) = cast::<While>(&**node) {
             let (while_entry, while_body, while_end) = {
                 let mut ctx = context_or_err!(self, "While statement outside function");
 
@@ -613,7 +617,7 @@ impl<'a> Emit<'a> {
 
             // set current block to while_end
             self.builder.set_current_block(while_end.clone())?;
-        } else if cast::<Break>(node).is_some() {
+        } else if cast::<Break>(&**node).is_some() {
             let loop_info = self
                 .builder
                 .loop_stack
@@ -631,7 +635,7 @@ impl<'a> Emit<'a> {
                     },
                 ),
             )?;
-        } else if cast::<Continue>(node).is_some() {
+        } else if cast::<Continue>(&**node).is_some() {
             let loop_info = self
                 .builder
                 .loop_stack
@@ -650,7 +654,8 @@ impl<'a> Emit<'a> {
                     },
                 ),
             )?;
-        } else if let Some(assign_stmt) = cast::<Assign>(node) {
+        } else if let Some(assign_stmt) = cast::<Assign>(&**node) {
+            crate::debug::info!("Emitting assignment statement: {:?}", assign_stmt);
             // emit rhs first
             let rhs_op = self.emit(&assign_stmt.rhs)?;
             // emit lhs
@@ -669,7 +674,7 @@ impl<'a> Emit<'a> {
                     },
                 ),
             )?;
-        } else if let Some(var_access) = cast::<VarAccess>(node) {
+        } else if let Some(var_access) = cast::<VarAccess>(&**node) {
             // remember, only address.
             if let Some(global_id) = self.globals.get(&var_access.name) {
                 return Ok(Some(global_id.clone()));
@@ -681,7 +686,7 @@ impl<'a> Emit<'a> {
                     var_access.name
                 ));
             }
-        } else if let Some(array_access) = cast::<ArrayAccess>(node) {
+        } else if let Some(array_access) = cast::<ArrayAccess>(&**node) {
             // emit indices first
             let mut index_ops = vec![];
             for index in &array_access.indices {
@@ -753,7 +758,7 @@ impl<'a> Emit<'a> {
                     ),
                 )?
             };
-        } else if let Some(call) = cast::<Call>(node) {
+        } else if let Some(call) = cast::<Call>(&**node) {
             // evaluate arguments
             let mut arg_ops: Vec<Operand> = vec![];
             for arg in &call.args {
@@ -784,7 +789,7 @@ impl<'a> Emit<'a> {
                 ),
             )?;
             return Ok(Some(call_op));
-        } else if let Some(binary_op) = cast::<BinaryOp>(node) {
+        } else if let Some(binary_op) = cast::<BinaryOp>(&**node) {
             // And & Or need short-circuit evaluation, so we handle them separately.
             match &binary_op.op {
                 ast::Op::And => {
@@ -1197,7 +1202,7 @@ impl<'a> Emit<'a> {
                 .builder
                 .create(&mut ctx, ir::Op::new(typ.clone(), vec![], op_data))?;
             return Ok(Some(bin_op));
-        } else if let Some(unary_op) = cast::<UnaryOp>(node) {
+        } else if let Some(unary_op) = cast::<UnaryOp>(&**node) {
             let mut operand = self.emit(&unary_op.operand)?;
             // load operand
             if is::<VarAccess>(&unary_op.operand) || is::<ArrayAccess>(&unary_op.operand) {
@@ -1283,7 +1288,7 @@ impl<'a> Emit<'a> {
                 .builder
                 .create(&mut ctx, ir::Op::new(typ.clone(), vec![], op_data))?;
             return Ok(Some(un_op));
-        } else if let Some(literal) = cast::<Literal>(node) {
+        } else if let Some(literal) = cast::<Literal>(&**node) {
             let mut ctx = context!(self);
 
             match literal {
@@ -1317,19 +1322,17 @@ impl<'a> Emit<'a> {
                             Type::Pointer {
                                 base: Box::new(typ.clone()),
                             },
-                            vec![
-                                Attr::GlobalArray {
-                                    name: "".to_string(),
-                                    typ: typ.clone(),
-                                    mutable: false,
-                                    values: string
-                                        .chars()
-                                        .map(|c| Literal::Int(c as i32))
-                                        // This chain adds the null terminator
-                                        .chain(std::iter::once(Literal::Int(0)))
-                                        .collect(),
-                                }
-                            ],
+                            vec![Attr::GlobalArray {
+                                name: "".to_string(),
+                                typ: typ.clone(),
+                                mutable: false,
+                                values: string
+                                    .chars()
+                                    .map(|c| Literal::Int(c as i32))
+                                    // This chain adds the null terminator
+                                    .chain(std::iter::once(Literal::Int(0)))
+                                    .collect(),
+                            }],
                             OpData::GlobalAlloca(typ.size_in_bytes()),
                         ),
                     )?;

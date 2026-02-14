@@ -218,7 +218,14 @@ impl<'a> BuildDomTree<'a> {
             for i in 1..self.rev.len() {
                 let v = self.rev[i];
                 let u = self.idom[v];
-                self.idom[v] = self.dfn_min(u, self.idom[u]);
+                // If sdom[u] != sdom[v], then there's a vertex with lower dfn that dominates v, which is idom[u], 
+                // so we set idom[v] to idom[u]. 
+                // Otherwise, sdom[u] is the immediate dominator of v.
+                if self.sdom[u] != self.sdom[v] {
+                    self.idom[v] = self.idom[u];
+                } else {
+                    self.idom[v] = self.sdom[u];
+                }
             }
 
             // export dom tree

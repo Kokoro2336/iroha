@@ -4,11 +4,11 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use std::fs::File;
 use std::path::PathBuf;
-use std::collections::HashMap;
 
 // Expose logging macros for outer use.
 pub use tracing::{debug, info, trace, warn};
 pub mod graph;
+pub mod llvm;
 
 // since tracing crate does not support lazy logging, we need to setup the logger at the start of the program.
 pub fn setup(path: &str) -> WorkerGuard {

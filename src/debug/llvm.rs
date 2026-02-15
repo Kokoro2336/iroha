@@ -49,12 +49,10 @@ impl DumpLlvm for Operand {
             Operand::Int(val) => write!(s, "{}", val)?,
             Operand::Float(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
-            Operand::Func(id) => {
-                match ctx.program.funcs.get(*id) {
-                    Ok(Some(func)) => write!(s, "@{}", func.name)?,
-                    _ => write!(s, "@func_{}", id)?,
-                }
-            }
+            Operand::Func(id) => match ctx.program.funcs.get(*id) {
+                Ok(Some(func)) => write!(s, "@{}", func.name)?,
+                _ => write!(s, "@func_{}", id)?,
+            },
             Operand::ParamId(id) => write!(s, "<param_idx = {}>", id)?,
             Operand::Index(id) => write!(s, "<index = {}>", id)?,
             Operand::Reg(reg) => write!(s, "<reg = {:?}>", reg)?,
@@ -593,16 +591,30 @@ impl DumpLlvm for BasicBlock {
 impl DumpLlvm for Function {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
-        let ret_ty = Type::Int; //FIXME
+
+        if self.is_external {
+            for (_id, op) in self.dfg.get_all_items() {
+                if let Some(op) = op {
+                    if let OpData::Declare { .. } = &op.data {
+                        return op.dump_to_llvm(ctx);
+                    }
+                }
+            }
+            return Ok(s);
+        }
+
+        let ret_ty = if let Type::Function { return_type, .. } = &self.typ {
+            return_type.clone()
+        } else {
+            return Err(std::fmt::Error);
+        };
 
         let mut args_str = String::new();
         let mut get_arg_ops = vec![];
         for (_id, op) in self.dfg.get_all_items() {
             if let Some(op) = op {
-                if let OpData::GetArg(param_id_operand) = &op.data {
-                    if let Operand::ParamId(id) = param_id_operand {
-                        get_arg_ops.push((*id, op.typ.clone()));
-                    }
+                if let OpData::GetArg(Operand::ParamId(id)) = &op.data {
+                    get_arg_ops.push((*id, op.typ.clone()));
                 }
             }
         }
@@ -714,6 +726,9 @@ impl DumpLlvm for Program {
 
         for (_, func) in self.funcs.get_all_items() {
             if let Some(func) = func {
+                if func.is_external {
+                    continue;
+                }
                 let func_ctx = DumpContext {
                     program: self,
                     function: Some(func),

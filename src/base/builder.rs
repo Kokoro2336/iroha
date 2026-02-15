@@ -1,6 +1,6 @@
 use crate::base::ir::*;
 use crate::base::LoopInfo;
-use crate::utils::arena::{ArenaItem, Arena};
+use crate::utils::arena::{Arena, ArenaItem};
 
 macro_rules! acquire_cfg {
     ($ctx:ident, $msg:expr) => {
@@ -164,7 +164,7 @@ impl Builder {
                 }
             }
             OpData::Phi { incoming } => {
-                for (_, value) in incoming {
+                for (value, _) in incoming {
                     dfg.add_use(value, op.clone())?;
                 }
             }
@@ -207,7 +207,9 @@ impl Builder {
             OpData::GEP { base, indices } => {
                 dfg.add_use(base, op.clone())?;
                 for index in indices {
-                    dfg.add_use(index, op.clone())?;
+                    if matches!(index, Operand::Value(_)) {
+                        dfg.add_use(index, op.clone())?;
+                    }
                 }
             }
 
@@ -538,7 +540,12 @@ impl Builder {
         Ok(())
     }
 
-    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
+    pub fn remove_op(
+        &mut self,
+        ctx: &mut BuilderContext,
+        op: Operand,
+        bb: Operand,
+    ) -> Result<(), String> {
         let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
         let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
 
@@ -546,7 +553,7 @@ impl Builder {
             Ok(id) => id,
             Err(_) => return Err("Builder remove_op: operand is not an instruction".to_string()),
         };
-        let bb_id = match op.get_bb_id() {
+        let bb_id = match bb.get_bb_id() {
             Ok(id) => id,
             Err(_) => return Err("Builder remove_op: operand is not in a basic block".to_string()),
         };
@@ -556,7 +563,7 @@ impl Builder {
         } else {
             return Err(format!(
                 "Builder remove_op: current_block {:?} points to None",
-                self.current_block
+                bb_id
             ));
         };
 
@@ -572,7 +579,7 @@ impl Builder {
         } else {
             return Err(format!(
                 "Builder remove_op: instruction {:?} not found in current_block {:?}",
-                op, self.current_block
+                op, bb_id
             ));
         }
 

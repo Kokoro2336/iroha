@@ -1,4 +1,5 @@
 use crate::base::ir::{OpData, Operand, DFG};
+use crate::base::Type;
 use crate::utils::arena::*;
 
 pub type CFG = IndexedArena<BasicBlock>;
@@ -32,14 +33,18 @@ impl Default for Program {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
+    pub is_external: bool,
+    pub typ: Type,
     pub cfg: CFG,
     pub dfg: DFG,
 }
 
 impl Function {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, is_external: bool, typ: Type) -> Self {
         Self {
             name,
+            is_external,
+            typ,
             cfg: IndexedArena::new(),
             dfg: DFG::new(),
         }
@@ -329,5 +334,22 @@ impl IndexedArena<Function> {
         let func_id = self.alloc(func)?;
         self.add_name(name, func_id)?;
         Ok(func_id)
+    }
+    pub fn collect_internal(&self) -> Vec<usize> {
+        self.storage
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if let ArenaItem::Data(func) = item {
+                    if !func.is_external {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }

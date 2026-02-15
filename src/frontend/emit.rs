@@ -986,7 +986,7 @@ impl<'a> Emit<'a> {
             }
 
             let mut lhs = self.emit(&binary_op.lhs)?;
-            if is::<VarAccess>(&binary_op.lhs) || is::<ArrayAccess>(&binary_op.lhs) {
+            if is::<VarAccess>(&*binary_op.lhs) || is::<ArrayAccess>(&*binary_op.lhs) {
                 // load lhs
                 let mut ctx = context_or_err!(self, "BinaryOp lhs load outside function");
                 let load_lhs = self.builder.create(
@@ -1001,7 +1001,7 @@ impl<'a> Emit<'a> {
                 lhs = Some(load_lhs);
             }
             let mut rhs = self.emit(&binary_op.rhs)?;
-            if is::<VarAccess>(&binary_op.rhs) || is::<ArrayAccess>(&binary_op.rhs) {
+            if is::<VarAccess>(&*binary_op.rhs) || is::<ArrayAccess>(&*binary_op.rhs) {
                 // load rhs
                 let mut ctx = context_or_err!(self, "BinaryOp rhs load outside function");
                 let load_rhs = self.builder.create(
@@ -1016,7 +1016,7 @@ impl<'a> Emit<'a> {
                 rhs = Some(load_rhs);
             }
 
-            let mut ctx = context_or_err!(self, "BinaryOp outside function");
+            let mut ctx: BuilderContext<'_> = context_or_err!(self, "BinaryOp outside function");
 
             // select Operator
             let typ = binary_op.typ.clone();
@@ -1199,7 +1199,7 @@ impl<'a> Emit<'a> {
         } else if let Some(unary_op) = cast::<UnaryOp>(&**node) {
             let mut operand = self.emit(&unary_op.operand)?;
             // load operand
-            if is::<VarAccess>(&unary_op.operand) || is::<ArrayAccess>(&unary_op.operand) {
+            if is::<VarAccess>(&*unary_op.operand) || is::<ArrayAccess>(&*unary_op.operand) {
                 let mut ctx = context_or_err!(self, "UnaryOp operand load outside function");
                 let load_operand = self.builder.create(
                     &mut ctx,

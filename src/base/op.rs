@@ -604,7 +604,8 @@ impl IndexedArena<Op> {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
-            Operand::Int(_) | Operand::Float(_) => return Ok(()),
+            // For global variables, we don't maintain uses in the DFG, so just return.
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return Ok(()),
             _ => return Err("Operand is not a valid data".to_string()),
         };
 

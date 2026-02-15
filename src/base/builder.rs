@@ -325,12 +325,13 @@ impl Builder {
             OpData::GlobalAlloca(_) => {
                 let globals = &mut ctx.globals;
                 let op_id = globals.alloc(op)?;
-                Operand::Value(op_id)
+                // Distinguish global alloca from normal local variables. They don't share the same namespace.
+                Operand::Global(op_id)
             }
             OpData::Declare { .. } => {
                 let globals = &mut ctx.globals;
                 let op_id = globals.alloc(op)?;
-                Operand::Value(op_id)
+                Operand::Global(op_id)
             }
             OpData::GetArg(_)
             | OpData::GEP { .. }

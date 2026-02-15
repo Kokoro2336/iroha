@@ -97,13 +97,15 @@ impl Semantic {
             // Insert Ne for float
             match un_op.op {
                 Op::Plus => {
-                    // remove the plus node
+                    // remove the plus node, and we don't need to update the op's type anymore.
                     let operand = take(&mut un_op.operand);
                     replace(node, operand);
                     Ok(operand_type)
                 }
                 Op::Minus => {
                     // Minus always returns the same type as operand
+                    // Infer the type of unary op based on operand type
+                    un_op.typ = operand_type.clone();
                     Ok(operand_type)
                 }
                 Op::Not => {
@@ -116,6 +118,7 @@ impl Semantic {
                             rhs: Box::new(Literal::Float(0.0)),
                         });
                     }
+                    un_op.typ = Type::Int;
                     Ok(Type::Int)
                 }
                 _ => unreachable!("Unexpected unary op: {:?}", un_op),
@@ -263,8 +266,8 @@ impl Semantic {
                 }
             } else {
                 return Err(format!(
-                    "Variable {} is not an array, cannot access with indices",
-                    array_access.name
+                    "Variable {} is not an array, cannot access with indices. Got type {:?}",
+                    array_access.name, array_type
                 ));
             };
             Ok(array_access.typ.clone())

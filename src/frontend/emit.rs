@@ -95,11 +95,11 @@ impl<'a> Emit<'a> {
         if let Some(fn_decl) = cast::<FnDecl>(&**node) {
             crate::debug::info!("Emitting function: {}", fn_decl.name);
             // create new function
-            self.current_function = Some(
-                self.program
-                    .funcs
-                    .add(Function::new(fn_decl.name.clone()))?,
-            );
+            self.current_function = Some(self.program.funcs.add(Function::new(
+                fn_decl.name.clone(),
+                false,
+                fn_decl.typ.clone(),
+            ))?);
 
             // store function id
             if let Some(func_id) = self.current_function {
@@ -143,11 +143,13 @@ impl<'a> Emit<'a> {
                             Type::Void,
                             vec![],
                             OpData::Store {
-                                addr: alloca,
+                                addr: alloca.clone(),
                                 value: get_arg,
                             },
                         ),
                     )?;
+                    // insert into symbol table
+                    self.syms.insert(arg.0.clone(), alloca);
                 }
 
                 // create new block for body
@@ -173,13 +175,6 @@ impl<'a> Emit<'a> {
             self.syms.exit_scope();
             return Ok(None);
         } else if let Some(block) = cast::<Block>(&**node) {
-            // Check whether we are already in a function. If not, it means this block is the global scope, we don't need to create a new block for it. Otherwise, we need to create a new block for it.
-            if self.current_function.is_some() {
-                let mut ctx = context_or_err!(self, "Function not found");
-                let block_id = self.builder.create_new_block(&mut ctx)?;
-                self.builder.set_current_block(block_id)?;
-            }
-
             // enter scope
             self.syms.enter_scope();
             block
@@ -341,9 +336,12 @@ impl<'a> Emit<'a> {
                     let ranges = MultiDimIter::new(dims.iter().map(|&d| d as usize).collect());
                     for range in ranges {
                         // evaluate the init value
-                        let idx = range.iter().fold(0usize, |acc, &x| {
-                            acc * (dims[range.len() - acc.leading_zeros() as usize - 1] as usize)
-                                + x
+                        let idx = range.iter().enumerate().fold(0usize, |acc, (i, &x)| {
+                            if i < range.len() - 1 {
+                                (acc + x) * dims[i + 1] as usize
+                            } else {
+                                acc + x
+                            }
                         });
                         let op_id = self.emit(&init_values[idx])?;
 
@@ -425,10 +423,13 @@ impl<'a> Emit<'a> {
                                 .init_values
                                 .iter()
                                 .map(|v| {
-                                    if let Some(lit) = cast::<Literal>(v) {
+                                    if let Some(lit) = cast::<Literal>(&**v) {
                                         lit.clone()
                                     } else {
-                                        panic!("ConstArray init_values contain non-Literal");
+                                        panic!(
+                                            "ConstArray init_values contain non-Literal: {:?}",
+                                            v
+                                        );
                                     }
                                 })
                                 .collect(),
@@ -774,7 +775,7 @@ impl<'a> Emit<'a> {
                 &mut ctx,
                 ir::Op::new(
                     call.typ.clone(),
-                    vec![Attr::Name(call.func_name.clone())],
+                    vec![Attr::FuncName(call.func_name.clone())],
                     OpData::Call {
                         func: Operand::Func(self.func_ids[&call.func_name]),
                         args: arg_ops,
@@ -1245,7 +1246,10 @@ impl<'a> Emit<'a> {
                             rhs: Operand::Int(0),
                         }
                     } else {
-                        return Err("Not operator only supports Int type".to_string());
+                        return Err(format!(
+                            "Not operator only supports Int type: {:?}",
+                            unary_op
+                        ));
                     }
                 }
 
@@ -1262,7 +1266,7 @@ impl<'a> Emit<'a> {
                     }
                 },
 
-                _ => unreachable!("Unsupported unary operator in Emit"),
+                _ => unreachable!("Unsupported unary operator in Emit: {:?}", unary_op),
             };
 
             // create the op
@@ -1356,9 +1360,12 @@ impl Pass<Program> for Emit<'_> {
                     ),
                 )?;
             }
-            for (name, _) in lib.iter() {
+            for (name, typ) in lib.iter() {
                 // Alloc space for the function in Call Graph
-                let func_id = self.program.funcs.add(Function::new(name.to_string()))?;
+                let func_id =
+                    self.program
+                        .funcs
+                        .add(Function::new(name.to_string(), true, typ.clone()))?;
                 // Add it in func_ids for later call lookup
                 self.func_ids.insert(name.to_string(), func_id);
             }

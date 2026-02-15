@@ -343,7 +343,7 @@ pub enum Operand {
     Global(usize),
     Int(i32),
     Float(f32),
-    // for GEP
+    // for GEP: Raw integer index
     Index(usize),
     // for GetArg
     ParamId(u32),
@@ -433,6 +433,7 @@ pub enum Attr {
     Name(String),
     // Old OpId for Phi
     OldIdx(Operand),
+    FuncName(String),
 }
 
 impl std::fmt::Display for Attr {
@@ -447,6 +448,7 @@ impl std::fmt::Display for Attr {
             Attr::Name(name) => write!(f, "{}", name),
             Attr::Promotion => write!(f, "<promotion>"),
             Attr::OldIdx(op) => write!(f, "<old idx: {}>", op),
+            Attr::FuncName(name) => write!(f, "<func name: {}>", name),
         }
     }
 }
@@ -610,14 +612,14 @@ impl IndexedArena<Op> {
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
             Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return Ok(()),
-            _ => return Err("Operand is not a valid data".to_string()),
+            _ => return Err(format!("Operand is not a valid data: {:?}", op_idx)),
         };
 
         if let Some(node) = self.get_mut(op_id)? {
             node.uses.push(use_idx);
             Ok(())
         } else {
-            Err("DFG add_use: op index not found".to_string())
+            Err(format!("DFG add_use: op index {} not found", op_id))
         }
     }
 

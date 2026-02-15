@@ -53,14 +53,14 @@ where
         Self {
             entry: None,
             map: HashMap::new(),
-            storage: vec![ArenaItem::None],
+            storage: vec![],
         }
     }
 
     pub fn alloc(&mut self, data: T) -> Result<usize, String> {
         let index = self.storage.len();
         // if it's the first element, set it as head.
-        if index == 0 {
+        if self.entry.is_none() {
             self.entry = Some(index);
         }
         self.storage.push(ArenaItem::Data(data));
@@ -125,7 +125,10 @@ where
             self.storage.get(idx),
             Some(ArenaItem::None) | Some(ArenaItem::NewIndex(_))
         ) {
-            return Err(format!("IndexedArena get_mut: index {} points to None or NewIndex", idx));
+            return Err(format!(
+                "IndexedArena get_mut: index {} points to None or NewIndex",
+                idx
+            ));
         }
         match self.storage.get_mut(idx) {
             Some(ArenaItem::Data(node)) => Ok(Some(node)),
@@ -133,7 +136,7 @@ where
         }
     }
 
-    // Collect all the slots with data in the arena and return them as a vector. 
+    // Collect all the slots with data in the arena and return them as a vector.
     pub fn collect(&self) -> Vec<usize> {
         self.storage
             .iter()

@@ -114,7 +114,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    info!("Finish Emitting. IR generated: \n{:#?}", ir);
+    info!("Finish Emitting. IR generated.");
 
     info!("Start Running Mem2Reg.");
     let ir = {
@@ -126,7 +126,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    info!("Finish Running Mem2Reg.");
+    info!("Finish Running Mem2Reg. IR after Mem2Reg.");
 
     info!("Start Dumping LLVM IR.");
     let ir = {

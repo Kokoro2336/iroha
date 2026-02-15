@@ -50,12 +50,14 @@ impl DumpLlvm for Operand {
             Operand::Float(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
             Operand::Func(id) => {
-                let func = ctx.program.funcs.get(*id).unwrap().unwrap();
-                write!(s, "@{}", func.name)?
+                match ctx.program.funcs.get(*id) {
+                    Ok(Some(func)) => write!(s, "@{}", func.name)?,
+                    _ => write!(s, "@func_{}", id)?,
+                }
             }
             Operand::ParamId(id) => write!(s, "<param_idx = {}>", id)?,
             Operand::Index(id) => write!(s, "<index = {}>", id)?,
-            other => todo!("operand {:?}", other),
+            Operand::Reg(reg) => write!(s, "<reg = {:?}>", reg)?,
         }
         Ok(s)
     }
@@ -66,20 +68,33 @@ impl DumpLlvm for Op {
         let mut s = String::new();
         match &self.data {
             OpData::GEP { base, indices } => {
-                let function = ctx.function.unwrap();
-                let base_op = if let Ok(id) = base.get_op_id() {
-                    function.dfg.get(id).unwrap().unwrap()
-                } else if let Ok(id) = base.get_global_id() {
-                    ctx.program.globals.get(id).unwrap().unwrap()
-                } else {
-                    panic!("GEP base operand not found");
+                let ptr_ty = match base {
+                    Operand::Value(id) => {
+                        let mut t = Type::Pointer {
+                            base: Box::new(Type::Int),
+                        };
+                        if let Some(f) = ctx.function {
+                            if let Ok(Some(op)) = f.dfg.get(*id) {
+                                t = op.typ.clone();
+                            }
+                        }
+                        t
+                    }
+                    Operand::Global(id) => match ctx.program.globals.get(*id) {
+                        Ok(Some(op)) => op.typ.clone(),
+                        _ => Type::Pointer {
+                            base: Box::new(Type::Int),
+                        },
+                    },
+                    _ => Type::Pointer {
+                        base: Box::new(Type::Int),
+                    },
                 };
 
-                let ptr_ty = base_op.typ.clone();
                 let elem_ty = if let Type::Pointer { base } = &ptr_ty {
                     *(base.clone())
                 } else {
-                    panic!("GEP base is not a pointer, but {:?}", ptr_ty);
+                    Type::Int
                 };
 
                 write!(
@@ -96,22 +111,35 @@ impl DumpLlvm for Op {
             }
             OpData::Ret { value } => {
                 if let Some(val) = value {
-                    let ty = if val.get_op_id().is_ok() {
-                        let op = ctx.function.unwrap().dfg.get(val.get_op_id().unwrap()).unwrap().unwrap();
-                        op.typ.clone()
-                    } else {
-                        Type::Int // assume int for immediate
+                    let ty = match val {
+                        Operand::Value(id) => {
+                            let mut t = Type::Int;
+                            if let Some(f) = ctx.function {
+                                if let Ok(Some(op)) = f.dfg.get(*id) {
+                                    t = op.typ.clone();
+                                }
+                            }
+                            t
+                        }
+                        Operand::Int(_) => Type::Int,
+                        Operand::Float(_) => Type::Float,
+                        _ => Type::Int,
                     };
-                    write!(s, "ret {} {}", ty.dump_to_llvm(ctx)?, val.dump_to_llvm(ctx)?)?;
+                    write!(
+                        s,
+                        "ret {} {}",
+                        ty.dump_to_llvm(ctx)?,
+                        val.dump_to_llvm(ctx)?
+                    )?;
                 } else {
                     write!(s, "ret void")?;
                 }
             }
             OpData::Alloca(_) => {
-                if let Type::Pointer{ base } = &self.typ {
+                if let Type::Pointer { base } = &self.typ {
                     write!(s, "alloca {}", base.dump_to_llvm(ctx)?)?;
                 } else {
-                    panic!("Alloca type is not a pointer");
+                    write!(s, "alloca <invalid_type>")?;
                 }
             }
             OpData::GlobalAlloca(_) => {
@@ -121,7 +149,12 @@ impl DumpLlvm for Op {
                     .map(|attr| format!("{}", attr))
                     .collect::<Vec<String>>()
                     .join(", ");
-                write!(s, "global_alloca {} with attrs: {}", self.typ.dump_to_llvm(ctx)?, attrs)?;
+                write!(
+                    s,
+                    "global_alloca {} with attrs: {}",
+                    self.typ.dump_to_llvm(ctx)?,
+                    attrs
+                )?;
             }
             OpData::Declare { name, typ } => {
                 if let Type::Function {
@@ -138,78 +171,330 @@ impl DumpLlvm for Op {
                     }
                     write!(s, ")")?;
                 } else {
-                    // This indicates an invalid Declare op, which should have a function type.
-                    // Returning an error is appropriate.
                     return Err(std::fmt::Error);
                 }
             }
             OpData::Load { addr } => {
-                let ptr_ty = ctx.function.unwrap().dfg.get(addr.get_op_id().unwrap()).unwrap().unwrap().typ.clone();
+                let ptr_ty = match addr {
+                    Operand::Value(id) => {
+                        let mut t = Type::Pointer {
+                            base: Box::new(Type::Int),
+                        };
+                        if let Some(f) = ctx.function {
+                            if let Ok(Some(op)) = f.dfg.get(*id) {
+                                t = op.typ.clone();
+                            }
+                        }
+                        t
+                    }
+                    Operand::Global(id) => match ctx.program.globals.get(*id) {
+                        Ok(Some(op)) => op.typ.clone(),
+                        _ => Type::Pointer {
+                            base: Box::new(Type::Int),
+                        },
+                    },
+                    _ => Type::Pointer {
+                        base: Box::new(Type::Int),
+                    },
+                };
                 let ty = if let Type::Pointer { base } = &ptr_ty {
                     *base.clone()
                 } else {
-                    panic!("Load address is not a pointer");
+                    Type::Int
                 };
 
-                write!(s, "load {}, {} {}", ty.dump_to_llvm(ctx)?, ptr_ty.dump_to_llvm(ctx)?, addr.dump_to_llvm(ctx)?)?;
+                write!(
+                    s,
+                    "load {}, {} {}",
+                    ty.dump_to_llvm(ctx)?,
+                    ptr_ty.dump_to_llvm(ctx)?,
+                    addr.dump_to_llvm(ctx)?
+                )?;
             }
             OpData::Store { addr, value } => {
-                let val_ty = if let Ok(op_id) = value.get_op_id() {
-                    ctx.function.unwrap().dfg.get(op_id).unwrap().unwrap().typ.clone()
-                } else if value.get_int().is_ok() {
-                    Type::Int
-                } else if value.get_float().is_ok() {
-                    Type::Float
-                } else {
-                    panic!("Unsupported operand type for store value");
+                let val_ty = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Int;
+                        if let Some(f) = ctx.function {
+                            if let Ok(Some(op)) = f.dfg.get(*id) {
+                                t = op.typ.clone();
+                            }
+                        }
+                        t
+                    }
+                    Operand::Global(id) => match ctx.program.globals.get(*id) {
+                        Ok(Some(op)) => op.typ.clone(),
+                        _ => Type::Int,
+                    },
+                    Operand::Int(_) => Type::Int,
+                    Operand::Float(_) => Type::Float,
+                    _ => Type::Int,
                 };
-                let ptr_ty = ctx.function.unwrap().dfg.get(addr.get_op_id().unwrap()).unwrap().unwrap().typ.clone();
+                let ptr_ty = match addr {
+                    Operand::Value(id) => {
+                        let mut t = Type::Pointer {
+                            base: Box::new(Type::Int),
+                        };
+                        if let Some(f) = ctx.function {
+                            if let Ok(Some(op)) = f.dfg.get(*id) {
+                                t = op.typ.clone();
+                            }
+                        }
+                        t
+                    }
+                    Operand::Global(id) => match ctx.program.globals.get(*id) {
+                        Ok(Some(op)) => op.typ.clone(),
+                        _ => Type::Pointer {
+                            base: Box::new(Type::Int),
+                        },
+                    },
+                    _ => Type::Pointer {
+                        base: Box::new(Type::Int),
+                    },
+                };
 
-                write!(s, "store {} {}, {} {}", val_ty.dump_to_llvm(ctx)?, value.dump_to_llvm(ctx)?, ptr_ty.dump_to_llvm(ctx)?, addr.dump_to_llvm(ctx)?)?;
+                write!(
+                    s,
+                    "store {} {}, {} {}",
+                    val_ty.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    ptr_ty.dump_to_llvm(ctx)?,
+                    addr.dump_to_llvm(ctx)?
+                )?;
             }
-            OpData::AddI { lhs, rhs } => write!(s, "add i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SubI { lhs, rhs } => write!(s, "sub i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::MulI { lhs, rhs } => write!(s, "mul i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::DivI { lhs, rhs } => write!(s, "sdiv i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::ModI { lhs, rhs } => write!(s, "srem i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::AddF { lhs, rhs } => write!(s, "fadd float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SubF { lhs, rhs } => write!(s, "fsub float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::MulF { lhs, rhs } => write!(s, "fmul float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::DivF { lhs, rhs } => write!(s, "fdiv float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
+            OpData::AddI { lhs, rhs } => write!(
+                s,
+                "add i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SubI { lhs, rhs } => write!(
+                s,
+                "sub i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::MulI { lhs, rhs } => write!(
+                s,
+                "mul i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::DivI { lhs, rhs } => write!(
+                s,
+                "sdiv i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::ModI { lhs, rhs } => write!(
+                s,
+                "srem i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::AddF { lhs, rhs } => write!(
+                s,
+                "fadd float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SubF { lhs, rhs } => write!(
+                s,
+                "fsub float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::MulF { lhs, rhs } => write!(
+                s,
+                "fmul float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::DivF { lhs, rhs } => write!(
+                s,
+                "fdiv float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
 
-            OpData::SEq { lhs, rhs } => write!(s, "icmp eq i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SNe { lhs, rhs } => write!(s, "icmp ne i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SLt { lhs, rhs } => write!(s, "icmp slt i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SGt { lhs, rhs } => write!(s, "icmp sgt i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SLe { lhs, rhs } => write!(s, "icmp sle i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::SGe { lhs, rhs } => write!(s, "icmp sge i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::OEq { lhs, rhs } => write!(s, "fcmp oeq float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::ONe { lhs, rhs } => write!(s, "fcmp one float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::OLt { lhs, rhs } => write!(s, "fcmp olt float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::OGt { lhs, rhs } => write!(s, "fcmp ogt float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::OLe { lhs, rhs } => write!(s, "fcmp ole float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::OGe { lhs, rhs } => write!(s, "fcmp oge float {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
+            OpData::SEq { lhs, rhs } => write!(
+                s,
+                "icmp eq i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SNe { lhs, rhs } => write!(
+                s,
+                "icmp ne i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SLt { lhs, rhs } => write!(
+                s,
+                "icmp slt i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SGt { lhs, rhs } => write!(
+                s,
+                "icmp sgt i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SLe { lhs, rhs } => write!(
+                s,
+                "icmp sle i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::SGe { lhs, rhs } => write!(
+                s,
+                "icmp sge i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::OEq { lhs, rhs } => write!(
+                s,
+                "fcmp oeq float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::ONe { lhs, rhs } => write!(
+                s,
+                "fcmp one float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::OLt { lhs, rhs } => write!(
+                s,
+                "fcmp olt float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::OGt { lhs, rhs } => write!(
+                s,
+                "fcmp ogt float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::OLe { lhs, rhs } => write!(
+                s,
+                "fcmp ole float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::OGe { lhs, rhs } => write!(
+                s,
+                "fcmp oge float {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
 
             OpData::Sitofp { value } => {
-                let from_op = ctx.function.unwrap().dfg.get(value.get_op_id().unwrap()).unwrap().unwrap();
-                write!(s, "sitofp {} {} to {}", from_op.typ.dump_to_llvm(ctx)?, value.dump_to_llvm(ctx)?, self.typ.dump_to_llvm(ctx)?)?
+                let from_op_typ = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Int;
+                        if let Some(f) = ctx.function {
+                            if let Ok(Some(op)) = f.dfg.get(*id) {
+                                t = op.typ.clone();
+                            }
+                        }
+                        t
+                    }
+                    Operand::Global(id) => match ctx.program.globals.get(*id) {
+                        Ok(Some(op)) => op.typ.clone(),
+                        _ => Type::Int,
+                    },
+                    _ => Type::Int,
+                };
+                write!(
+                    s,
+                    "sitofp {} {} to {}",
+                    from_op_typ.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?
+                )?
             }
             OpData::Fptosi { value } => {
-                let from_op = ctx.function.unwrap().dfg.get(value.get_op_id().unwrap()).unwrap().unwrap();
-                write!(s, "fptosi {} {} to {}", from_op.typ.dump_to_llvm(ctx)?, value.dump_to_llvm(ctx)?, self.typ.dump_to_llvm(ctx)?)?
+                let from_op_typ = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Float;
+                        if let Some(f) = ctx.function {
+                            if let Ok(Some(op)) = f.dfg.get(*id) {
+                                t = op.typ.clone();
+                            }
+                        }
+                        t
+                    }
+                    Operand::Global(id) => match ctx.program.globals.get(*id) {
+                        Ok(Some(op)) => op.typ.clone(),
+                        _ => Type::Float,
+                    },
+                    _ => Type::Float,
+                };
+
+                write!(
+                    s,
+                    "fptosi {} {} to {}",
+                    from_op_typ.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?
+                )?
             }
-            
+
             OpData::Jump { target_bb } => write!(s, "br label {}", target_bb.dump_to_llvm(ctx)?)?,
-            OpData::Br { cond, then_bb, else_bb } => {
-                write!(s, "br i1 {}, label {}, label {}", cond.dump_to_llvm(ctx)?, then_bb.dump_to_llvm(ctx)?, else_bb.as_ref().unwrap().dump_to_llvm(ctx)?)?
+            OpData::Br {
+                cond,
+                then_bb,
+                else_bb,
+            } => {
+                let else_label = match else_bb {
+                    Some(bb) => bb.dump_to_llvm(ctx)?,
+                    None => "bb_unknown".to_string(),
+                };
+                write!(
+                    s,
+                    "br i1 {}, label {}, label {}",
+                    cond.dump_to_llvm(ctx)?,
+                    then_bb.dump_to_llvm(ctx)?,
+                    else_label
+                )?
             }
             OpData::Call { func, args } => {
-                let func_def = ctx.program.funcs.get(func.get_func_id().unwrap()).unwrap().unwrap();
+                let func_name = match func {
+                    Operand::Func(id) => match ctx.program.funcs.get(*id) {
+                        Ok(Some(f)) => f.name.clone(),
+                        _ => format!("func_{}", id),
+                    },
+                    _ => "unknown".to_string(),
+                };
                 // This is still a simplification, as we don't have full function type info.
-                write!(s, "call {} @{}(", "i32", func_def.name)?;
+                write!(s, "call {} @{}(", "i32", func_name)?;
                 for (i, arg) in args.iter().enumerate() {
-                    let arg_op = ctx.function.unwrap().dfg.get(arg.get_op_id().unwrap()).unwrap().unwrap();
-                    write!(s, "{} {}", arg_op.typ.dump_to_llvm(ctx)?, arg.dump_to_llvm(ctx)?)?;
+                    let arg_typ = match arg {
+                        Operand::Value(id) => {
+                            let mut t = Type::Int;
+                            if let Some(f) = ctx.function {
+                                if let Ok(Some(op)) = f.dfg.get(*id) {
+                                    t = op.typ.clone();
+                                }
+                            }
+                            t
+                        }
+                        Operand::Global(id) => match ctx.program.globals.get(*id) {
+                            Ok(Some(op)) => op.typ.clone(),
+                            _ => Type::Int,
+                        },
+                        Operand::Int(_) => Type::Int,
+                        Operand::Float(_) => Type::Float,
+                        _ => Type::Int,
+                    };
+                    write!(
+                        s,
+                        "{} {}",
+                        arg_typ.dump_to_llvm(ctx)?,
+                        arg.dump_to_llvm(ctx)?
+                    )?;
                     if i < args.len() - 1 {
                         write!(s, ", ")?;
                     }
@@ -219,23 +504,63 @@ impl DumpLlvm for Op {
             OpData::Phi { incoming } => {
                 write!(s, "phi {} ", self.typ.dump_to_llvm(ctx)?)?;
                 for (i, (val, bb)) in incoming.iter().enumerate() {
-                    write!(s, "[ {}, {} ]", val.dump_to_llvm(ctx)?, bb.dump_to_llvm(ctx)?)?;
+                    write!(
+                        s,
+                        "[ {}, {} ]",
+                        val.dump_to_llvm(ctx)?,
+                        bb.dump_to_llvm(ctx)?
+                    )?;
                     if i < incoming.len() - 1 {
                         write!(s, ", ")?;
                     }
                 }
             }
             OpData::GetArg(idx) => {
-                let id = idx.get_param_id().unwrap();
+                let id = match idx {
+                    Operand::ParamId(id) => *id,
+                    _ => 0,
+                };
                 write!(s, "add {} %arg{}, 0", self.typ.dump_to_llvm(ctx)?, id)?;
             }
-            OpData::Move { value, reg } => write!(s, "# move {} to reg {:?}", value.dump_to_llvm(ctx)?, reg)?,
-            OpData::And { lhs, rhs } => write!(s, "and i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::Or { lhs, rhs } => write!(s, "or i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::Xor { lhs, rhs } => write!(s, "xor i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::Shl { lhs, rhs } => write!(s, "shl i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::Shr { lhs, rhs } => write!(s, "lshr i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
-            OpData::Sar { lhs, rhs } => write!(s, "ashr i32 {}, {}", lhs.dump_to_llvm(ctx)?, rhs.dump_to_llvm(ctx)?)?,
+            OpData::Move { value, reg } => {
+                write!(s, "# move {} to reg {:?}", value.dump_to_llvm(ctx)?, reg)?
+            }
+            OpData::And { lhs, rhs } => write!(
+                s,
+                "and i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::Or { lhs, rhs } => write!(
+                s,
+                "or i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::Xor { lhs, rhs } => write!(
+                s,
+                "xor i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::Shl { lhs, rhs } => write!(
+                s,
+                "shl i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::Shr { lhs, rhs } => write!(
+                s,
+                "lshr i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
+            OpData::Sar { lhs, rhs } => write!(
+                s,
+                "ashr i32 {}, {}",
+                lhs.dump_to_llvm(ctx)?,
+                rhs.dump_to_llvm(ctx)?
+            )?,
         }
         Ok(s)
     }
@@ -244,14 +569,21 @@ impl DumpLlvm for Op {
 impl DumpLlvm for BasicBlock {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
-        let function = ctx.function.unwrap();
+        let dfg = match ctx.function {
+            Some(f) => &f.dfg,
+            None => return Ok(s),
+        };
         for inst_operand in &self.cur {
-            let inst_id = inst_operand.get_op_id().unwrap();
-            let inst = function.dfg.get(inst_id).unwrap().unwrap();
-            if inst.typ == Type::Void {
-                writeln!(s, "  {}", inst.dump_to_llvm(ctx)?)?;
-            } else {
-                writeln!(s, "  %{} = {}", inst_id, inst.dump_to_llvm(ctx)?)?;
+            let inst_id = match inst_operand {
+                Operand::Value(id) => *id,
+                _ => continue,
+            };
+            if let Ok(Some(inst)) = dfg.get(inst_id) {
+                if inst.typ == Type::Void {
+                    writeln!(s, "  {}", inst.dump_to_llvm(ctx)?)?;
+                } else {
+                    writeln!(s, "  %{} = {}", inst_id, inst.dump_to_llvm(ctx)?)?;
+                }
             }
         }
         Ok(s)
@@ -267,8 +599,10 @@ impl DumpLlvm for Function {
         let mut get_arg_ops = vec![];
         for (_id, op) in self.dfg.get_all_items() {
             if let Some(op) = op {
-                if let OpData::GetArg(param_id) = &op.data {
-                    get_arg_ops.push((param_id.get_param_id().unwrap(), op.typ.clone()));
+                if let OpData::GetArg(param_id_operand) = &op.data {
+                    if let Operand::ParamId(id) = param_id_operand {
+                        get_arg_ops.push((*id, op.typ.clone()));
+                    }
                 }
             }
         }
@@ -329,7 +663,13 @@ impl DumpLlvm for Program {
                     }
                 }
 
-                if let Some(Attr::GlobalArray { name, mutable, typ, values }) = global_array_attr {
+                if let Some(Attr::GlobalArray {
+                    name,
+                    mutable,
+                    typ,
+                    values,
+                }) = global_array_attr
+                {
                     let mut initializer_str = String::new();
                     if !values.is_empty() {
                         write!(initializer_str, "[")?;
@@ -358,12 +698,16 @@ impl DumpLlvm for Program {
                     )?;
                 } else if let Some(name) = name {
                     // Non-array global
-                    let pointee_type = if let Type::Pointer{ base } = &global_op.typ {
+                    let pointee_type = if let Type::Pointer { base } = &global_op.typ {
                         base.dump_to_llvm(&program_ctx)?
                     } else {
                         global_op.typ.dump_to_llvm(&program_ctx)?
                     };
-                    writeln!(s, "@{} = dso_local global {} zeroinitializer, align 4", name, pointee_type)?;
+                    writeln!(
+                        s,
+                        "@{} = dso_local global {} zeroinitializer, align 4",
+                        name, pointee_type
+                    )?;
                 }
             }
         }
@@ -381,12 +725,14 @@ impl DumpLlvm for Program {
     }
 }
 
-
 trait ArenaExt<T> {
     fn get_all_items(&self) -> Vec<(usize, Option<&T>)>;
 }
 
-impl<T> ArenaExt<T> for IndexedArena<T> where T: std::fmt::Debug {
+impl<T> ArenaExt<T> for IndexedArena<T>
+where
+    T: std::fmt::Debug,
+{
     fn get_all_items(&self) -> Vec<(usize, Option<&T>)> {
         self.storage
             .iter()
@@ -404,11 +750,12 @@ impl<T> ArenaExt<T> for IndexedArena<T> where T: std::fmt::Debug {
 
 pub struct DumpLlvmPass {
     program: Program,
+    filename: String,
 }
 
 impl DumpLlvmPass {
-    pub fn new(program: Program) -> Self {
-        Self { program }
+    pub fn new(program: Program, filename: String) -> Self {
+        Self { program, filename }
     }
 }
 
@@ -419,7 +766,14 @@ impl Pass<Program> for DumpLlvmPass {
             function: None,
         };
         match self.program.dump_to_llvm(&ctx) {
-            Ok(s) => info!("\n{}", s),
+            Ok(s) => {
+                let dump_dir = std::path::Path::new("dump_llvm");
+                if !dump_dir.exists() {
+                    std::fs::create_dir_all(dump_dir).map_err(|e| e.to_string())?;
+                }
+                let file_path = dump_dir.join(format!("{}.ll", self.filename));
+                std::fs::write(file_path, s).map_err(|e| e.to_string())?;
+            }
             Err(e) => info!("Error dumping LLVM IR: {}", e),
         }
         Ok(std::mem::take(&mut self.program))

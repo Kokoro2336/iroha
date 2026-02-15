@@ -113,6 +113,7 @@ def main():
     # Directories to manage
     logs_dir = "./logs"
     graphs_dir = "./graphs"
+    dump_llvm_dir = "./dump_llvm"
     test_output_base = "./test"
 
     # clean test/ first
@@ -130,6 +131,7 @@ def main():
             # Prepare directories
             clean_directory(logs_dir)
             clean_directory(graphs_dir)
+            clean_directory(dump_llvm_dir)
             
             # Expected output file (if any)
             # We specify an output file in CWD, then move it.
@@ -179,6 +181,11 @@ def main():
                 if os.path.exists(graphs_dir):
                     for f in os.listdir(graphs_dir):
                         shutil.move(os.path.join(graphs_dir, f), os.path.join(test_output_dir, f))
+
+                # Move dumped LLVM IR
+                if os.path.exists(dump_llvm_dir):
+                    for f in os.listdir(dump_llvm_dir):
+                        shutil.move(os.path.join(dump_llvm_dir, f), os.path.join(test_output_dir, f))
                 
                 # Move output file
                 if os.path.exists(output_file_name):

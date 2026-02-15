@@ -1,6 +1,6 @@
 use crate::base::ir::*;
 use crate::base::LoopInfo;
-use crate::utils::arena::ArenaItem;
+use crate::utils::arena::{ArenaItem, Arena};
 
 macro_rules! acquire_cfg {
     ($ctx:ident, $msg:expr) => {
@@ -530,12 +530,54 @@ impl Builder {
         old: Operand,
         new: Operand,
     ) -> Result<(), String> {
-        // TODO
-        todo!()
+        let dfg = acquire_dfg!(ctx, "Builder replace_all_uses: ctx.dfg is None");
+        let uses = dfg[old.get_op_id()?].uses.clone();
+        for use_op in uses {
+            dfg.replace_use(use_op, old.clone(), new.clone())?;
+        }
+        Ok(())
     }
 
     pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
-        // TODO
-        todo!()
+        let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
+        let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
+
+        let op_id = match op.get_op_id() {
+            Ok(id) => id,
+            Err(_) => return Err("Builder remove_op: operand is not an instruction".to_string()),
+        };
+        let bb_id = match op.get_bb_id() {
+            Ok(id) => id,
+            Err(_) => return Err("Builder remove_op: operand is not in a basic block".to_string()),
+        };
+        let bb = cfg.get_mut(bb_id)?;
+        let bb = if let Some(bb) = bb {
+            bb
+        } else {
+            return Err(format!(
+                "Builder remove_op: current_block {:?} points to None",
+                self.current_block
+            ));
+        };
+
+        // remove from bb
+        if let Some(pos) = bb.cur.iter().position(|id| {
+            let id = match id.get_op_id() {
+                Ok(id) => id,
+                Err(_) => return false,
+            };
+            id == op_id
+        }) {
+            bb.cur.remove(pos);
+        } else {
+            return Err(format!(
+                "Builder remove_op: instruction {:?} not found in current_block {:?}",
+                op, self.current_block
+            ));
+        }
+
+        // remove from dfg
+        dfg.remove(op_id)?;
+        Ok(())
     }
 }

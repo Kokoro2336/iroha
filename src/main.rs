@@ -74,15 +74,15 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse_from(args);
 
-    let input = cli.input;
+    let input_path = cli.input;
     let output = cli.output;
 
     // 读取输入文件
-    let input = read_to_string(input)?;
+    let input_str = read_to_string(&input_path)?;
 
     // 调用 lalrpop 生成的 parser 解析输入文件
     let result = sysy::CompUnitParser::new()
-        .parse(&mut parse::Parser::new(), &input)
+        .parse(&mut parse::Parser::new(), &input_str)
         .unwrap();
     // info!("\nParsed result: {:#?}", result);
 
@@ -130,7 +130,12 @@ fn main() -> Result<()> {
 
     info!("Start Dumping LLVM IR.");
     let ir = {
-        let mut pass = DumpLlvmPass::new(ir);
+        let filename = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+            .to_string();
+        let mut pass = DumpLlvmPass::new(ir, filename);
         match pass.run() {
             Ok(res) => res,
             Err(e) => {

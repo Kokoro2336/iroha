@@ -15,14 +15,6 @@ macro_rules! acquire_cur_func_id {
     };
 }
 
-macro_rules! validate_func {
-    ($self:ident, $func_id:ident) => {
-        if $self.program.funcs.get($func_id)?.is_none() {
-            return Err("Function not found".to_string());
-        }
-    };
-}
-
 /**
  * Building dominator tree based on Lengauer-Tarjan algorithm.
  * Reference: https://dl.acm.org/toc/toplas/1979/1/1
@@ -156,9 +148,7 @@ impl<'a> BuildDomTree<'a> {
         // Init dom trees first
         self.dom_trees = vec![vec![]; self.program.funcs.storage.len()];
 
-        for idx in 0..self.program.funcs.storage.len() {
-            info!("Building dominator tree for function {}", idx);
-            validate_func!(self, idx);
+        for idx in self.program.funcs.collect() {
             let func = &self.program.funcs[idx];
             let head = match func.cfg.entry {
                 Some(id) => id,
@@ -343,8 +333,7 @@ impl<'a> BuildDomFrontier<'a> {
         // Init frontiers first
         self.frontiers = vec![vec![]; self.program.funcs.storage.len()];
 
-        for idx in 0..self.program.funcs.storage.len() {
-            validate_func!(self, idx);
+        for idx in self.program.funcs.collect() {
             let func = &self.program.funcs[idx];
             let head = match func.cfg.entry {
                 Some(id) => id,
@@ -440,7 +429,7 @@ impl<'a> InsertPhi<'a> {
 
         // Compute defsites, origins and phis
         let func = &self.program.funcs[acquire_cur_func_id!(self)];
-        (0..func.cfg.storage.len()).try_for_each(|bb_id| {
+        func.cfg.collect().into_iter().try_for_each(|bb_id| {
             let block = &func.cfg[bb_id];
             block.cur.iter().try_for_each(|op_id| {
                 let op_id = match op_id {
@@ -511,7 +500,7 @@ impl<'a> InsertPhi<'a> {
     }
 
     pub fn run(&mut self) -> Result<(), String> {
-        (0..self.program.funcs.storage.len()).try_for_each(|idx| -> Result<(), String> {
+        self.program.funcs.collect().into_iter().try_for_each(|idx| -> Result<(), String> {
             self.current_function = Some(idx);
             self.init()?;
             self.insert()?;
@@ -615,9 +604,11 @@ impl<'a> Renaming<'a> {
             // We can't hold `op` borrow across replace_all_uses (which takes &mut ctx).
             // So we clone the necessary data or just check type first.
             let (is_store, is_load, is_phi, need_promotion) = {
-                let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                let op = &func.dfg[op_id];
+                let func = &mut self.program.funcs[acquire_cur_func_id!(self)];
+                let op = &mut func.dfg[op_id];
                 let need_promotion = op.attrs.iter().any(|attr| matches!(attr, Attr::Promotion));
+                // Remove promotion attribute to save space
+                op.attrs.retain(|attr| !matches!(attr, Attr::Promotion));
                 (
                     op.is(OpType::Store),
                     op.is(OpType::Load),
@@ -752,11 +743,9 @@ impl<'a> Renaming<'a> {
     }
 
     pub fn run(&mut self) -> Result<(), String> {
-        let func_len = self.program.funcs.storage.len();
         // remove load/store is done in rename
 
-        for idx in 0..func_len {
-            validate_func!(self, idx);
+        for idx in self.program.funcs.collect() {
             self.current_function = Some(idx);
             self.init()?;
             let head = {

@@ -9,7 +9,7 @@ pub trait Arena<T>
 where
     T: std::fmt::Debug,
 {
-    fn remove(&mut self, idx: usize) -> Result<usize, String>;
+    fn remove(&mut self, idx: usize) -> Result<T, String>;
     fn gc(&mut self) -> Result<Vec<ArenaItem<T>>, String>;
 }
 
@@ -131,6 +131,18 @@ where
             Some(ArenaItem::Data(node)) => Ok(Some(node)),
             _ => Ok(None),
         }
+    }
+
+    // Collect all the slots with data in the arena and return them as a vector. 
+    pub fn collect(&self) -> Vec<usize> {
+        self.storage
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| match item {
+                ArenaItem::Data(_) => Some(idx),
+                _ => None,
+            })
+            .collect()
     }
 }
 

@@ -65,9 +65,12 @@ impl BasicBlock {
 
 // impl cfg
 impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
-    fn remove(&mut self, idx: usize) -> Result<usize, String> {
-        // TODO
-        unimplemented!()
+    fn remove(&mut self, idx: usize) -> Result<BasicBlock, String> {
+        if let ArenaItem::Data(data) = std::mem::replace(&mut self.storage[idx], ArenaItem::None) {
+            Ok(data)
+        } else {
+            Err("ArenaItem is not BasicBlock Data".to_string())
+        }
     }
 
     fn gc(&mut self) -> Result<Vec<ArenaItem<BasicBlock>>, String> {
@@ -139,9 +142,12 @@ impl IndexedArena<BasicBlock> {
 }
 
 impl Arena<Function> for IndexedArena<Function> {
-    fn remove(&mut self, idx: usize) -> Result<usize, String> {
-        // TODO
-        todo!()
+    fn remove(&mut self, idx: usize) -> Result<Function, String> {
+        if let ArenaItem::Data(data) = std::mem::replace(&mut self.storage[idx], ArenaItem::None) {
+            Ok(data)
+        } else {
+            Err("ArenaItem is not Function Data".to_string())
+        }
     }
 
     fn gc(&mut self) -> Result<Vec<ArenaItem<Function>>, String> {

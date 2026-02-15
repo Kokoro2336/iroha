@@ -453,10 +453,14 @@ impl std::fmt::Display for Attr {
 
 // impl dfg
 impl Arena<Op> for IndexedArena<Op> {
-    fn remove(&mut self, idx: usize) -> Result<usize, String> {
+    fn remove(&mut self, idx: usize) -> Result<Op, String> {
         // mark this slot as deleted
-        self.storage[idx] = ArenaItem::None;
-        Ok(idx)
+        if let ArenaItem::Data(data) = std::mem::replace(&mut self.storage[idx], ArenaItem::None) {
+            // if the slot is occupied by data, mark it as deleted and return the data
+            Ok(data)
+        } else {
+            Err("ArenaItem is not Op Data".to_string())
+        }
     }
 
     fn gc(&mut self) -> Result<Vec<ArenaItem<Op>>, String> {
@@ -614,6 +618,30 @@ impl IndexedArena<Op> {
             Ok(())
         } else {
             Err("DFG add_use: op index not found".to_string())
+        }
+    }
+
+    // @param op_idx: the op whose uses we want to replace with new operand. e.g. "add %1, %2"
+    // @param old: the old use we want to replace with e.g. %1 in "add %1, %2"
+    // @param new: the new use we want to replace with e.g. %3 in "add %3, %2"
+    pub fn replace_use(&mut self, op_idx: Operand, old: Operand, new: Operand) -> Result<(), String> {
+        let op_id = match op_idx {
+            Operand::Value(op_id) => op_id,
+            // literals don't have uses in the DFG
+            // For global variables, we don't maintain uses in the DFG, so just return.
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return Ok(()),
+            _ => return Err("Operand is not a valid data".to_string()),
+        };
+
+        if let Some(node) = self.get_mut(op_id)? {
+            for use_idx in node.uses.iter_mut() {
+                if *use_idx == old {
+                    *use_idx = new.clone();
+                }
+            }
+            Ok(())
+        } else {
+            Err("DFG replace_use: op index not found".to_string())
         }
     }
 }

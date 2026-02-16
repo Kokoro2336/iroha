@@ -1,5 +1,5 @@
-use crate::base::SYSY_LIB;
 use crate::base::Type;
+use crate::base::SYSY_LIB;
 /**
  * Semantic analysis.
  * Performs type inference, add implicit cast and checks for semantic errors.
@@ -188,15 +188,8 @@ impl Semantic {
                     return Err("putf expects at least one argument".to_string());
                 }
 
-                let fmt_str = if let Some(lit) = cast::<Literal>(&*call.args[0]) {
-                    match lit {
-                        Literal::String(s) => s.clone(),
-                        _ => {
-                            return Err(
-                                "The first argument of putf must be a string literal".to_string()
-                            )
-                        }
-                    }
+                let fmt_str = if let Some(Literal::String(s)) = cast::<Literal>(&*call.args[0]) {
+                    s.clone()
                 } else {
                     return Err("The first argument of putf must be a string literal".to_string());
                 };
@@ -254,7 +247,16 @@ impl Semantic {
 
             // infer the access's typ
             array_access.typ = if let Type::Array { base, dims } = array_type {
-                let new_dims = dims.clone()[array_access.indices.len()..].to_vec();
+                let new_dims = if array_access.indices.len() > dims.len() {
+                    return Err(format!(
+                        "Too many indices for array access! Expected at most {}, got {}",
+                        dims.len(),
+                        array_access.indices.len()
+                    ));
+                } else {
+                    dims.clone()[array_access.indices.len()..].to_vec()
+                };
+
                 // if new_dims is empty, return base type; else decay it to pointer.
                 if new_dims.is_empty() {
                     base.as_ref().clone()
@@ -263,6 +265,32 @@ impl Semantic {
                         base: base.clone(),
                         dims: new_dims,
                     })?
+                }
+            } else if let Type::Pointer { .. } = array_type {
+                // raise the pointer type to array type for the convenience of indexing.
+                let raised = raise(array_type)?;
+                // after raising, the type must be array type, and we can do the same thing as above to get the access's type.
+                if let Type::Array { base, dims } = raised {
+                    let new_dims = if array_access.indices.len() > dims.len() {
+                        return Err(format!(
+                            "Too many indices for array access! Expected at most {}, got {}",
+                            dims.len(),
+                            array_access.indices.len()
+                        ));
+                    } else {
+                        dims.clone()[array_access.indices.len()..].to_vec()
+                    };
+
+                    if new_dims.is_empty() {
+                        base.as_ref().clone()
+                    } else {
+                        decay(Type::Array {
+                            base: base.clone(),
+                            dims: new_dims,
+                        })?
+                    }
+                } else {
+                    unreachable!("Raised pointer type is not array type!")
                 }
             } else {
                 return Err(format!(
@@ -311,8 +339,10 @@ impl Semantic {
             }
             Ok(Type::Void)
         } else if let Some(const_array) = cast_mut::<ConstArray>(&mut **node) {
+            // decay the array type to pointer type when inserting into symbol table
+            let decayed_type = decay(const_array.typ.clone())?;
             self.syms
-                .insert(const_array.name.clone(), const_array.typ.clone());
+                .insert(const_array.name.clone(), decayed_type);
             let base = match &const_array.typ {
                 Type::Array { base, .. } => base.as_ref().clone(),
                 _ => panic!("ConstArray must have array type!"),
@@ -340,8 +370,10 @@ impl Semantic {
             }
             Ok(Type::Void)
         } else if let Some(local_array) = cast_mut::<VarArray>(&mut **node) {
+            // decay the array type to pointer type when inserting into symbol table
+            let decayed_type = decay(local_array.typ.clone())?;
             self.syms
-                .insert(local_array.name.clone(), local_array.typ.clone());
+                .insert(local_array.name.clone(), decayed_type);
             if let Some(init_values) = &mut local_array.init_values {
                 for init_val in init_values {
                     let val_typ = self.analyze(init_val)?;
@@ -500,7 +532,7 @@ impl Pass<Box<dyn Node>> for Semantic {
 pub fn decay(typ: Type) -> Result<Type, String> {
     match typ {
         Type::Array { base, dims } => {
-            if dims.len() == 0 {
+            if dims.is_empty() {
                 return Err("Cannot decay array with zero dimensions!".to_string());
             }
             if dims.len() == 1 {
@@ -517,5 +549,36 @@ pub fn decay(typ: Type) -> Result<Type, String> {
         // do nothing for pointer type
         Type::Pointer { .. } => Ok(typ),
         _ => Err(format!("Cannot decay non-array type: {:?}", typ)),
+    }
+}
+
+pub fn raise(typ: Type) -> Result<Type, String> {
+    match typ {
+        Type::Pointer { base } => {
+            match *base {
+                Type::Array {
+                    base: array_base,
+                    dims,
+                } => {
+                    if dims.is_empty() {
+                        // It's impossible to have an array with zero dim here, since we've dealt with it in parsing.
+                        return Err(
+                            "Cannot raise pointer to array with zero dimensions!".to_string()
+                        );
+                    } else {
+                        Ok(Type::Array {
+                            base: array_base,
+                            // Add 1 to the front of dims.
+                            dims: std::iter::once(1).chain(dims).collect(),
+                        })
+                    }
+                }
+                _ => Ok(Type::Array {
+                    base,
+                    dims: vec![1],
+                }),
+            }
+        }
+        _ => Err(format!("Cannot raise non-pointer type: {:?}", typ)),
     }
 }

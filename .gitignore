@@ -9,3 +9,4 @@ gdb_log.txt
 graphs/
 functional_recover/
 perf/
+dump_llvm/

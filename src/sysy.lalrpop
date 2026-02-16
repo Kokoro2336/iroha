@@ -167,15 +167,20 @@ FuncFParams: Vec<(String, Type)> = {
 FuncFParam: (String, Type) = {
   <param_type: BType> <ident: Ident> => (ident, param_type),
   <param_type: BType> <ident: Ident> <first_const_exp: ("[" "]")> <other_const_exps: ("[" ConstExp "]")*> => {
+    // In FuncFParam, the first dimension should be treated as a pointer.
     let arr_type = Type::Pointer {
-      base: Box::new(Type::Array {
-        base: Box::new(param_type),
-        // fold dims here
-        dims: other_const_exps.into_iter().map(|(_, exp, _)| match cast::<Literal>(&*parser.fold(exp)).unwrap() {
-          Literal::Int(i) => *i as u32,
-          _ => panic!("Array dimension must be an integer literal"),
-        }).collect()
-      }),
+      base: if other_const_exps.is_empty() {
+        Box::new(param_type)
+      } else {
+        Box::new(Type::Array {
+          base: Box::new(param_type),
+          // fold dims here
+          dims: other_const_exps.into_iter().map(|(_, exp, _)| match cast::<Literal>(&*parser.fold(exp)).unwrap() {
+            Literal::Int(i) => *i as u32,
+            _ => panic!("Array dimension must be an integer literal"),
+          }).collect()
+        })
+      },
     };
     (ident, arr_type)
   }

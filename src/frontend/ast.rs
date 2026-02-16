@@ -151,6 +151,13 @@ impl Literal {
             panic!("Literal is not Float");
         }
     }
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Literal::Int(val) => *val == 0,
+            Literal::Float(val) => *val == 0.0,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]

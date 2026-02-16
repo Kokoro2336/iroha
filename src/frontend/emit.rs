@@ -325,6 +325,7 @@ impl<'a> Emit<'a> {
                 };
                 // insert the pointer of the array into symbol table
                 self.syms.insert(var_array.name.clone(), alloca.clone());
+
                 // if has init values, create stores
                 if let Some(init_values) = &var_array.init_values {
                     let (dims, base) = match &var_array.typ {
@@ -333,7 +334,17 @@ impl<'a> Emit<'a> {
                             return Err("VarArray typ is not Array".to_string());
                         }
                     };
-                    let ranges = MultiDimIter::new(dims.iter().map(|&d| d as usize).collect());
+
+                    // Find all the chunks with contiguous constant initial values.
+                    let chunks = find_chunks(init_values);
+                    // Remove all the ranges in chunks
+                    let mut ranges: Vec<_> =
+                        MultiDimIter::new(dims.iter().map(|&d| d as usize).collect()).collect();
+                    for (chunk_start, chunk_size, _) in chunks.iter().rev() {
+                        ranges.drain(*chunk_start..(*chunk_start + *chunk_size));
+                    }
+
+                    // Initialize the non-duplicated elements.
                     for range in ranges {
                         // evaluate the init value
                         let idx = range.iter().enumerate().fold(0usize, |acc, (i, &x)| {
@@ -345,9 +356,7 @@ impl<'a> Emit<'a> {
                         });
                         let op_id = self.emit(&init_values[idx])?;
 
-                        // Re-acquire ctx
                         let mut ctx = context_or_err!(self, "Local array init outside function");
-
                         // evaluate the address
                         let addr = self.builder.create(
                             &mut ctx,
@@ -377,7 +386,209 @@ impl<'a> Emit<'a> {
                             ),
                         )?;
                     }
-                    // TODO: when the trailing zeroes reach some kind of limit, we add a loop to init them.
+
+                    // Initialize the duplicated elements with loops.
+                    for (chunk_start, chunk_size, init_value) in chunks {
+                        let mut ctx = context_or_err!(self, "Local array init outside function");
+                        // Allocate spaces for the loop variables
+                        let loop_var = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Pointer {
+                                    base: Box::new(Type::Int),
+                                },
+                                vec![],
+                                OpData::Alloca(Type::Int.size_in_bytes()),
+                            ),
+                        )?;
+                        // store chunk_start to loop_var
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Store {
+                                    addr: loop_var.clone(),
+                                    value: Operand::Int(chunk_start as i32),
+                                },
+                            ),
+                        )?;
+                        let chuck_end_ptr = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Pointer {
+                                    base: Box::new(Type::Int),
+                                },
+                                vec![],
+                                OpData::Alloca(Type::Int.size_in_bytes()),
+                            ),
+                        )?;
+                        // store chunk_end to loop_var
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Store {
+                                    addr: chuck_end_ptr.clone(),
+                                    value: Operand::Int((chunk_start + chunk_size) as i32),
+                                },
+                            ),
+                        )?;
+
+                        // create loop to initialize the chunk_size elements starting from chunk_start with op_id
+                        let loop_entry = self.builder.create_new_block(&mut ctx)?;
+                        let loop_body = self.builder.create_new_block(&mut ctx)?;
+                        let loop_end = self.builder.create_new_block(&mut ctx)?;
+
+                        // jump to loop entry
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Jump {
+                                    target_bb: loop_entry.clone(),
+                                },
+                            ),
+                        )?;
+
+                        // loop entry block
+                        self.builder.set_current_block(loop_entry.clone())?;
+
+                        // load loop variable
+                        let current_idx = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Int,
+                                vec![],
+                                OpData::Load {
+                                    addr: loop_var.clone(),
+                                },
+                            ),
+                        )?;
+                        let limit_idx = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Int,
+                                vec![],
+                                OpData::Load {
+                                    addr: chuck_end_ptr.clone(),
+                                },
+                            ),
+                        )?;
+                        // compare loop_var with chunk_end
+                        let res = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Int,
+                                vec![],
+                                OpData::SLt {
+                                    lhs: current_idx.clone(),
+                                    rhs: limit_idx,
+                                },
+                            ),
+                        )?;
+                        // Br
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Br {
+                                    cond: res,
+                                    then_bb: loop_body.clone(),
+                                    else_bb: Some(loop_end.clone()),
+                                },
+                            ),
+                        )?;
+
+                        // loop body block
+                        self.builder.set_current_block(loop_body.clone())?;
+
+                        // evaluate the address of the current element to be initialized
+                        // We don't use GEP here, since using range here can introduce extra complexity.
+                        // Instead, we calculate the offset manually and add it to the base address, which can save some instructions.
+                        let offset = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Int,
+                                vec![],
+                                OpData::MulI {
+                                    lhs: current_idx.clone(),
+                                    rhs: Operand::Int(base.size_in_bytes() as i32),
+                                },
+                            ),
+                        )?;
+                        let addr = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Pointer {
+                                    base: Box::new(base.clone()),
+                                },
+                                vec![],
+                                OpData::AddI {
+                                    lhs: alloca.clone(),
+                                    rhs: offset,
+                                },
+                            ),
+                        )?;
+                        // store the init value to the current element
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Store {
+                                    addr,
+                                    value: match init_value.clone() {
+                                        Literal::Int(i) => Operand::Int(i),
+                                        Literal::Float(f) => Operand::Float(f),
+                                        Literal::String(_) => return Err("String literal is not supported in array initialization".to_string()),
+                                    },
+                                },
+                            ),
+                        )?;
+
+                        // increment loop variable
+                        let inc = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Int,
+                                vec![],
+                                OpData::AddI {
+                                    lhs: current_idx,
+                                    rhs: Operand::Int(1),
+                                },
+                            ),
+                        )?;
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Store {
+                                    addr: loop_var,
+                                    value: inc,
+                                },
+                            ),
+                        )?;
+
+                        // jump to loop entry
+                        self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                Type::Void,
+                                vec![],
+                                OpData::Jump {
+                                    target_bb: loop_entry.clone(),
+                                },
+                            ),
+                        )?;
+
+                        // loop end block
+                        self.builder.set_current_block(loop_end.clone())?;
+                    }
                 }
             }
         } else if let Some(const_array) = cast::<ConstArray>(&**node) {
@@ -1431,4 +1642,41 @@ impl Iterator for MultiDimIter {
 
         Some(result)
     }
+}
+
+pub fn find_chunks(init_values: &Vec<Box<dyn Node>>) -> Vec<(usize, usize, Literal)> {
+    // TODO: when the trailing zeroes reach some kind of limit, we add a loop to init them.
+    const MAX_INIT: usize = 16; // TODO: this is a magic number, we can tune it later. It means when the number of init values exceed this number, we will use loop to init.
+                                // Vec<(chunk_start_idx, chunk_size)>
+    let mut chunks: Vec<(usize, usize, Literal)> = vec![];
+    let mut current_lit: Option<Literal> = None;
+    let mut chunk_start = 0usize;
+    let mut chunk_size = 0usize;
+    for (i, init_value) in init_values.iter().enumerate() {
+        let lit = cast::<Literal>(&**init_value);
+        match (current_lit.as_ref(), lit) {
+            (Some(curr), Some(new_lit)) if curr == new_lit => {
+                chunk_size += 1;
+            }
+            (_, Some(new_lit)) => {
+                if chunk_size > 0 {
+                    chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
+                }
+                current_lit = Some(new_lit.clone());
+                chunk_start = i;
+                chunk_size = 1;
+            }
+            (_, None) => {
+                if chunk_size > 0 {
+                    chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
+                }
+                current_lit = None;
+                chunk_size = 0;
+            }
+        }
+        if i == init_values.len() - 1 && chunk_size > 0 {
+            chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
+        }
+    }
+    chunks
 }

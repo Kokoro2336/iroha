@@ -37,4 +37,8 @@ impl<T: std::hash::Hash + Eq, U> SymbolTable<T, U> {
         }
         None
     }
+    
+    pub fn current_scope(&self) -> usize {
+        self.tables.len()
+    }
 }

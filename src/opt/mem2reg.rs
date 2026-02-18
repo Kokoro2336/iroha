@@ -24,9 +24,10 @@ pub struct BuildDomTree<'a> {
     program: &'a mut Program,
     // Vertex number -> DFS number
     dfn: Vec<usize>,
+    dfn_cnt: usize,
     // DFS number -> Vertex number
     rev: Vec<usize>,
-    // Vertex number -> Semi-dominator
+    // Vertex number -> Semi-dominator DFS number
     sdom: Vec<usize>,
     // Vertex number -> vertices that this vertex semi-dominates
     bucket: Vec<Vec<usize>>,
@@ -55,8 +56,8 @@ impl<'a> BuildDomTree<'a> {
         let current_function = program.funcs.entry;
         Self {
             program,
-            // Take the 0th index as counter
-            dfn: vec![1],
+            dfn: vec![],
+            dfn_cnt: 0,
             rev: vec![],
             sdom: vec![],
             bucket: vec![],
@@ -74,19 +75,19 @@ impl<'a> BuildDomTree<'a> {
         self.current_function = Some(func);
         let func = &self.program.funcs[func];
 
-        self.dfn = vec![0; func.cfg.storage.len()];
-        self.dfn[0] = 1;
+        let n = func.cfg.storage.len();
+        self.dfn = vec![0; n];
+        self.dfn_cnt = 0;
 
-        // Initialize sdom to 0, which is greater than the max DFS number.
-        self.sdom = vec![0; func.cfg.storage.len()];
+        self.rev = vec![0; n];
 
-        self.rev = vec![0; func.cfg.storage.len()];
-        self.bucket = vec![vec![]; func.cfg.storage.len()];
-        self.father = vec![0; func.cfg.storage.len()];
+        self.bucket = vec![vec![]; n];
+        self.father = vec![0; n];
 
-        self.parent = (0..func.cfg.storage.len()).collect();
-        self.idom = (0..func.cfg.storage.len()).collect();
-        self.min = (0..func.cfg.storage.len()).collect();
+        self.parent = (0..n).collect();
+        self.sdom = (0..n).collect();
+        self.idom = (0..n).collect();
+        self.min = (0..n).collect();
 
         self.visited = BitSet::new();
         Ok(())
@@ -94,9 +95,10 @@ impl<'a> BuildDomTree<'a> {
 
     fn dfs(&mut self, src: usize) -> Result<(), String> {
         self.visited.insert(src);
-        self.dfn[src] = self.dfn[0];
-        self.dfn[0] += 1;
-        self.rev.push(src);
+        let dfs_num = self.dfn_cnt;
+        self.dfn[src] = dfs_num;
+        self.rev[dfs_num] = src;
+        self.dfn_cnt += 1;
 
         let func_idx = acquire_cur_func_id!(self);
 
@@ -159,8 +161,10 @@ impl<'a> BuildDomTree<'a> {
             self.dfs(head)?;
 
             info!("DFS traversal completed. Start computing dominators.");
-            for i in (1..self.rev.len()).rev() {
+            let num_visited = self.dfn_cnt;
+            for i in (1..num_visited).rev() {
                 let u = self.rev[i];
+
                 let preds_num = {
                     let func = &self.program.funcs[acquire_cur_func_id!(self)];
                     let block = &func.cfg[u];
@@ -178,6 +182,10 @@ impl<'a> BuildDomTree<'a> {
                         }
                     };
 
+                    if !self.visited.contains(pred) {
+                        continue;
+                    }
+
                     if self.dfn[pred] < self.dfn[u] {
                         self.sdom[u] = self.dfn_min(self.sdom[u], pred);
                     } else {
@@ -185,31 +193,28 @@ impl<'a> BuildDomTree<'a> {
                         self.sdom[u] = self.dfn_min(self.sdom[u], self.sdom[v]);
                     }
                 }
+
                 // push u to bucket of sdom[u]
                 self.bucket[self.sdom[u]].push(u);
 
+                // hang u to father[u] in DSU Forest
+                self.parent[u] = self.father[u];
+
                 // evaluate idom of vertices in bucket of father[u]
-                let father = self.father[u];
                 // Emm... I have to use a clone due to the bothering borrow checker.
+                let father = self.father[u];
                 let bucket_len = self.bucket[father].len();
                 for i in 0..bucket_len {
                     let v = self.bucket[father][i];
-                    let w = self.query(v);
-                    if self.dfn[self.sdom[w]] < self.dfn[self.sdom[v]] {
-                        self.idom[v] = w;
-                    } else {
-                        self.idom[v] = father;
-                    }
+                    self.idom[v] = self.query(v);
                 }
                 self.bucket[father].clear();
-
-                // hang u to father[u] in DSU Forest
-                self.parent[father] = father;
             }
 
             // Refine idom
+            // Refine idom
             info!("Dominator tree computed. Start refining immediate dominators.");
-            for i in 1..self.rev.len() {
+            for i in 0..self.rev.len() {
                 let v = self.rev[i];
                 let u = self.idom[v];
                 // If sdom[u] != sdom[v], then there's a vertex with lower dfn that dominates v, which is idom[u],
@@ -231,6 +236,7 @@ impl<'a> BuildDomTree<'a> {
     // FuncId -> DomTree
     pub fn export(&mut self) -> DomTree {
         let mut dom_tree = vec![vec![]; self.idom.len()];
+        crate::debug::info!("Immediate dominators: {:?}", self.idom);
         for idx in 0..self.idom.len() {
             let idom = self.idom[idx];
             if idom != idx {
@@ -566,7 +572,7 @@ pub struct Renaming<'a> {
     // Record the previous "frame pointer" of the version stack
     records: Vec<Vec<usize>>,
     // version stack
-    versions: Vec<Vec<usize>>,
+    versions: Vec<Vec<Operand>>,
 
     // State field
     current_function: Option<usize>,
@@ -626,12 +632,6 @@ impl<'a> Renaming<'a> {
         self.records = vec![vec![]; self.var_counter];
         self.versions = vec![vec![]; self.var_counter];
 
-        // Add the initial version (the alloca itself) to the version stack
-        for var_id in 0..self.var_counter {
-            let op_id = self.var_to_op[&var_id];
-            self.versions[var_id].push(op_id);
-        }
-
         Ok(())
     }
 
@@ -660,54 +660,39 @@ impl<'a> Renaming<'a> {
             // We need to access op data.
             // We can't hold `op` borrow across replace_all_uses (which takes &mut ctx).
             // So we clone the necessary data or just check type first.
-            let func = &mut self.program.funcs[acquire_cur_func_id!(self)];
-            let op = &mut func.dfg[op_id];
+            let (op_data, op_attrs) = {
+                let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                let op = &func.dfg[op_id];
+                (op.data.clone(), op.attrs.clone())
+            };
 
-            match &op.data {
-                OpData::Store { addr, .. } => {
+            match op_data {
+                OpData::Store { addr, value } => {
                     let addr_id = match addr {
-                        Operand::Value(id) => *id,
+                        Operand::Value(id) => id,
                         // We won't promote global variables.
                         Operand::Global(_) => continue,
                         _ => return Err("Renaming: store address is not an op".to_string()),
                     };
 
-                    // If the store is not to a promotable variable, we skip it.
-                    let addr = &func.dfg[addr_id];
-                    if !addr
-                        .attrs
-                        .iter()
-                        .any(|attr| matches!(attr, Attr::Promotion))
-                    {
-                        continue;
-                    }
-
                     if let Some(&var_id) = self.op_to_var.get(&addr_id) {
-                        self.versions[var_id].push(op_id);
+                        // Push the OpId which produces the new value.
+                        self.versions[var_id].push(value.clone());
                         self.removed
                             .push((Operand::Value(op_id), Operand::BB(bb_id)));
                     }
                 }
                 OpData::Load { addr } => {
                     let addr_id = match addr {
-                        Operand::Value(id) => *id,
+                        Operand::Value(id) => id,
                         Operand::Global(_) => continue,
                         _ => return Err("Renaming: load address is not an op".to_string()),
                     };
 
-                    let addr = &func.dfg[addr_id];
-                    if !addr
-                        .attrs
-                        .iter()
-                        .any(|attr| matches!(attr, Attr::Promotion))
-                    {
-                        continue;
-                    }
-
                     if let Some(&var_id) = self.op_to_var.get(&addr_id) {
                         if let Some(version) = self.versions[var_id].last() {
                             // Replace the load with the current version
-                            let new_op_id = *version;
+                            let new_val = version.clone();
                             let mut ctx = context_or_err!(
                                 self,
                                 "Renaming: No current function context found".to_string()
@@ -715,7 +700,7 @@ impl<'a> Renaming<'a> {
                             self.builder.replace_all_uses(
                                 &mut ctx,
                                 Operand::Value(op_id),
-                                Operand::Value(new_op_id),
+                                new_val,
                             )?;
                             self.removed
                                 .push((Operand::Value(op_id), Operand::BB(bb_id)));
@@ -728,8 +713,17 @@ impl<'a> Renaming<'a> {
                     }
                 }
                 OpData::Phi { .. } => {
-                    if let Some(&var_id) = self.op_to_var.get(&op_id) {
-                        self.versions[var_id].push(op_id);
+                    let var_op = op_attrs.iter().find_map(|attr| {
+                        if let Attr::OldIdx(Operand::Value(id)) = attr {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(var_op_id) = var_op {
+                        if let Some(&var_id) = self.op_to_var.get(&var_op_id) {
+                            self.versions[var_id].push(Operand::Value(op_id));
+                        }
                     }
                 }
                 _ => { /*do nothing*/ }
@@ -797,7 +791,7 @@ impl<'a> Renaming<'a> {
                         match &mut phi_op.data {
                             OpData::Phi { incoming } => {
                                 // Ensure incoming is large enough (it should be)
-                                incoming[k] = (Operand::Value(*version), Operand::BB(bb_id));
+                                incoming[k] = (version.clone(), Operand::BB(bb_id));
                             }
                             _ => return Err("Renaming: expected phi op".to_string()),
                         }

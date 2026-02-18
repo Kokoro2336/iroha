@@ -446,10 +446,7 @@ impl DumpLlvm for Op {
                 then_bb,
                 else_bb,
             } => {
-                let else_label = match else_bb {
-                    Some(bb) => bb.dump_to_llvm(ctx)?,
-                    None => "bb_unknown".to_string(),
-                };
+                let else_label = else_bb.dump_to_llvm(ctx)?; // Ensure else_bb is valid
                 write!(
                     s,
                     "br i1 {}, label {}, label {}",
@@ -682,23 +679,85 @@ impl DumpLlvm for Program {
                     values,
                 }) = global_array_attr
                 {
-                    let mut initializer_str = String::new();
-                    if !values.is_empty() {
-                        write!(initializer_str, "[")?;
-                        for (i, v) in values.iter().enumerate() {
-                            match v {
-                                ast::Literal::Int(x) => write!(initializer_str, "i32 {}", x)?,
-                                ast::Literal::Float(x) => write!(initializer_str, "float {}", x)?,
-                                _ => {}
+                    fn format_initializer(
+                        typ: &Type,
+                        values: &[ast::Literal],
+                        ctx: &DumpContext,
+                    ) -> Result<String, std::fmt::Error> {
+                        match typ {
+                            Type::Array { base, dims } => {
+                                if dims.is_empty() {
+                                    return Ok("zeroinitializer".to_string());
+                                }
+                                let current_dim = dims[0] as usize;
+                                if dims.len() == 1 {
+                                    let mut s = String::new();
+                                    write!(s, "[")?;
+                                    for i in 0..current_dim {
+                                        let v = &values[i];
+                                        match v {
+                                            ast::Literal::Int(x) => write!(s, "i32 {}", x)?,
+                                            ast::Literal::Float(x) => write!(s, "float {}", x)?,
+                                            _ => {}
+                                        }
+                                        if i < current_dim - 1 {
+                                            write!(s, ", ")?;
+                                        }
+                                    }
+                                    write!(s, "]")?;
+                                    Ok(s)
+                                } else {
+                                    let mut s = String::new();
+                                    write!(s, "[")?;
+                                    let sub_array_size = values.len() / current_dim;
+                                    let sub_type = Type::Array {
+                                        base: base.clone(),
+                                        dims: dims[1..].to_vec(),
+                                    };
+                                    for i in 0..current_dim {
+                                        write!(
+                                            s,
+                                            "{} {}",
+                                            sub_type.dump_to_llvm(ctx)?,
+                                            format_initializer(
+                                                &sub_type,
+                                                &values
+                                                    [i * sub_array_size..(i + 1) * sub_array_size],
+                                                ctx
+                                            )?
+                                        )?;
+                                        if i < current_dim - 1 {
+                                            write!(s, ", ")?;
+                                        }
+                                    }
+                                    write!(s, "]")?;
+                                    Ok(s)
+                                }
                             }
-                            if i < values.len() - 1 {
-                                write!(initializer_str, ", ")?;
+                            _ => {
+                                // Scalar type
+                                if let Some(v) = values.get(0) {
+                                    match v {
+                                        ast::Literal::Int(x) => Ok(x.to_string()),
+                                        ast::Literal::Float(x) => Ok(x.to_string()),
+                                        _ => Ok("zeroinitializer".to_string()),
+                                    }
+                                } else {
+                                    Ok("zeroinitializer".to_string())
+                                }
                             }
                         }
-                        write!(initializer_str, "]")?;
-                    } else {
-                        initializer_str = "zeroinitializer".to_string();
                     }
+
+                    let initializer_str = if let Some(values) = values {
+                        if !values.is_empty() {
+                            format_initializer(typ, values, &program_ctx)?
+                        } else {
+                            "zeroinitializer".to_string()
+                        }
+                    } else {
+                        "zeroinitializer".to_string()
+                    };
 
                     writeln!(
                         s,

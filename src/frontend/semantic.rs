@@ -341,43 +341,49 @@ impl Semantic {
         } else if let Some(const_array) = cast_mut::<ConstArray>(&mut **node) {
             // decay the array type to pointer type when inserting into symbol table
             let decayed_type = decay(const_array.typ.clone())?;
-            self.syms
-                .insert(const_array.name.clone(), decayed_type);
+            self.syms.insert(const_array.name.clone(), decayed_type);
             let base = match &const_array.typ {
                 Type::Array { base, .. } => base.as_ref().clone(),
                 _ => panic!("ConstArray must have array type!"),
             };
 
-            for init_val in &mut const_array.init_values {
-                let val_type = self.analyze(init_val)?;
-                // We don't insert cast node for ConstArray, we directly modify the init_val node.
-                if val_type != base {
-                    let literal = cast_mut::<Literal>(init_val).unwrap();
-                    match val_type {
-                        // if val_typ == Type::Int and val_typ != base, then base must be Float
-                        Type::Int => {
-                            *literal = Literal::Float(literal.get_int() as f32);
+            // If the init_values is None, it means it's a zeroinitializer, which is always valid.
+            // So we only need to check the init_values when it's Some.
+            if let Some(init_values) = &mut const_array.init_values {
+                for init_val in init_values {
+                    let val_type = self.analyze(init_val)?;
+                    // We don't insert cast node for ConstArray, we directly modify the init_val node.
+                    if val_type != base {
+                        let literal = cast_mut::<Literal>(init_val).unwrap();
+                        match val_type {
+                            // if val_typ == Type::Int and val_typ != base, then base must be Float
+                            Type::Int => {
+                                *literal = Literal::Float(literal.get_int() as f32);
+                            }
+                            Type::Float => {
+                                *literal = Literal::Float(literal.get_float());
+                            }
+                            _ => unreachable!(
+                                "ConstArray can only be initialized with Int or Float literals: {:?}",
+                                val_type
+                            ),
                         }
-                        Type::Float => {
-                            *literal = Literal::Float(literal.get_float());
-                        }
-                        _ => unreachable!(
-                            "ConstArray can only be initialized with Int or Float literals: {:?}",
-                            val_type
-                        ),
                     }
                 }
             }
             Ok(Type::Void)
-        } else if let Some(local_array) = cast_mut::<VarArray>(&mut **node) {
+        } else if let Some(var_array) = cast_mut::<VarArray>(&mut **node) {
             // decay the array type to pointer type when inserting into symbol table
-            let decayed_type = decay(local_array.typ.clone())?;
-            self.syms
-                .insert(local_array.name.clone(), decayed_type);
-            if let Some(init_values) = &mut local_array.init_values {
+            let decayed_type = decay(var_array.typ.clone())?;
+            self.syms.insert(var_array.name.clone(), decayed_type);
+
+            // If the init_values is Some, check the type of each init value and insert implicit cast if necessary.
+            // If the init_values is None and it's a global variable, it means it's a zeroinitializer, which is always valid.
+            // If the init_values is None and it's not a global variable, it means it's uninitialized, which is also valid.
+            if let Some(init_values) = &mut var_array.init_values {
                 for init_val in init_values {
                     let val_typ = self.analyze(init_val)?;
-                    let base_typ = match &local_array.typ {
+                    let base_typ = match &var_array.typ {
                         Type::Array { base, .. } => base.as_ref().clone(),
                         _ => panic!("VarArray must have array type!"),
                     };
@@ -392,16 +398,17 @@ impl Semantic {
                                     op: Op::Cast(Type::Int, base_typ.clone()),
                                     operand: take(init_val),
                                 });
-                            },
+                            }
                             Type::Float => {
                                 *init_val = Box::new(UnaryOp {
                                     typ: base_typ.clone(),
                                     op: Op::Cast(Type::Float, base_typ.clone()),
                                     operand: take(init_val),
                                 });
-                            },
+                            }
                             _ => unreachable!(
-                                "LocalArray can only be initialized with Int or Float literals: {:?}", val_typ
+                                "VarArray can only be initialized with Int or Float literals: {:?}",
+                                val_typ
                             ),
                         }
                     } else if val_typ != base_typ {

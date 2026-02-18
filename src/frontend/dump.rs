@@ -469,7 +469,14 @@ impl GraphNode for ConstArray {
             graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
             vec![
                 attr!("label", {
-                    format!("\"ConstArray: {} | Type: {}\"", self.name, self.typ)
+                    if self.init_values.is_some() {
+                        format!("\"ConstArray: {} | Type: {}\"", self.name, self.typ)
+                    } else {
+                        format!(
+                            "\"ConstArray: {} | Type: {} | zeroinitializer\"",
+                            self.name, self.typ
+                        )
+                    }
                 }),
                 attr!("shape", "box"),
             ],
@@ -477,21 +484,23 @@ impl GraphNode for ConstArray {
         // Add to visited
         visited.insert(ptr);
 
-        for init_value in &self.init_values {
-            let to_init = (&**init_value as *const dyn Node) as *const () as usize;
-            if visited.contains(&to_init) {
-                continue;
+        if let Some(init_values) = &self.init_values {
+            for init_value in init_values {
+                let to_init = (&**init_value as *const dyn Node) as *const () as usize;
+                if visited.contains(&to_init) {
+                    continue;
+                }
+
+                stmts.push(Stmt::Edge(Edge {
+                    ty: EdgeTy::Pair(
+                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
+                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_init)), None)),
+                    ),
+                    attributes: vec![],
+                }));
+
+                init_value.visit(stmts, visited);
             }
-
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_init)), None)),
-                ),
-                attributes: vec![],
-            }));
-
-            init_value.visit(stmts, visited);
         }
     }
 }
@@ -507,10 +516,17 @@ impl GraphNode for VarArray {
             graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
             vec![
                 attr!("label", {
-                    format!(
-                        "\"VarArray: {} | Type: {} | is_global: {}\"",
-                        self.name, self.typ, self.is_global
-                    )
+                    if self.init_values.is_some() {
+                        format!(
+                            "\"VarArray: {} | Type: {} | is_global: {}\"",
+                            self.name, self.typ, self.is_global
+                        )
+                    } else {
+                        format!(
+                            "\"VarArray: {} | Type: {} | is_global: {} | zeroinitializer\"",
+                            self.name, self.typ, self.is_global
+                        )
+                    }
                 }),
                 attr!("shape", "box"),
             ],

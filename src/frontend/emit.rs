@@ -118,12 +118,12 @@ impl<'a> Emit<'a> {
                 // enter function scope
                 self.syms.enter_scope();
 
-                for (i, arg) in fn_decl.params.iter().enumerate() {
+                for (i, (arg_name, arg_typ)) in fn_decl.params.iter().enumerate() {
                     let get_arg = self.builder.create(
                         &mut ctx,
                         ir::Op::new(
-                            arg.1.clone(),
-                            vec![Attr::Name(arg.0.clone())],
+                            arg_typ.clone(),
+                            vec![Attr::Name(arg_name.clone())],
                             OpData::GetArg(Operand::ParamId(i as u32)),
                         ),
                     )?;
@@ -131,10 +131,14 @@ impl<'a> Emit<'a> {
                         &mut ctx,
                         ir::Op::new(
                             Type::Pointer {
-                                base: Box::new(arg.1.clone()),
+                                base: Box::new(arg_typ.clone()),
                             },
-                            vec![Attr::Name(arg.0.clone())],
-                            OpData::Alloca(arg.1.size_in_bytes()),
+                            if arg_typ.is_scalar() {
+                                vec![Attr::Name(arg_name.clone()), Attr::Promotion]
+                            } else {
+                                vec![Attr::Name(arg_name.clone())]
+                            },
+                            OpData::Alloca(arg_typ.size_in_bytes()),
                         ),
                     )?;
                     self.builder.create(
@@ -149,7 +153,7 @@ impl<'a> Emit<'a> {
                         ),
                     )?;
                     // insert into symbol table
-                    self.syms.insert(arg.0.clone(), alloca);
+                    self.syms.insert(arg_name.clone(), alloca);
                 }
 
                 // create new block for body
@@ -204,22 +208,16 @@ impl<'a> Emit<'a> {
                                 mutable: var_decl.mutable,
                                 // cast to pointer typ
                                 typ: var_decl.typ.clone(),
-                                values: if let Some(init_value) = &var_decl.init_value {
+                                values: var_decl.init_value.as_ref().map(|init_value| {
                                     if let Some(lit) = cast::<Literal>(&**init_value) {
                                         vec![lit.clone()]
                                     } else {
-                                        return Err(format!(
+                                        panic!(
                                             "Global VarDecl init_value is not Literal. Varname: {}",
                                             var_decl.name
-                                        ));
+                                        );
                                     }
-                                } else {
-                                    // Global values' initializer can't be None here(initializer added in Parse)
-                                    return Err(format!(
-                                        "Global VarDecl has no init_value. Varname: {}",
-                                        var_decl.name
-                                    ));
-                                },
+                                }),
                             },
                             Attr::Name(var_decl.name.clone()),
                         ],
@@ -285,7 +283,7 @@ impl<'a> Emit<'a> {
                                 name: var_array.name.clone(),
                                 mutable: true,
                                 typ: var_array.typ.clone(),
-                                values: if let Some(init_values) = &var_array.init_values {
+                                values: var_array.init_values.as_ref().map(|init_values| {
                                     init_values
                                         .iter()
                                         .map(|v| {
@@ -296,10 +294,7 @@ impl<'a> Emit<'a> {
                                             }
                                         })
                                         .collect()
-                                } else {
-                                    // panic
-                                    return Err(format!("Global VarArray has no init_values. Varname: {}", var_array.name));
-                                },
+                                }),
                             },
                             Attr::Name(var_array.name.clone()),
                         ],
@@ -397,7 +392,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -419,7 +414,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -498,7 +493,7 @@ impl<'a> Emit<'a> {
                                 OpData::Br {
                                     cond: res,
                                     then_bb: loop_body.clone(),
-                                    else_bb: Some(loop_end.clone()),
+                                    else_bb: loop_end.clone(),
                                 },
                             ),
                         )?;
@@ -630,20 +625,21 @@ impl<'a> Emit<'a> {
                             name: name.clone(),
                             mutable: false,
                             typ: const_array.typ.clone(),
-                            values: const_array
-                                .init_values
-                                .iter()
-                                .map(|v| {
-                                    if let Some(lit) = cast::<Literal>(&**v) {
-                                        lit.clone()
-                                    } else {
-                                        panic!(
-                                            "ConstArray init_values contain non-Literal: {:?}",
-                                            v
-                                        );
-                                    }
-                                })
-                                .collect(),
+                            values: const_array.init_values.as_ref().map(|init_values| {
+                                init_values
+                                    .iter()
+                                    .map(|v| {
+                                        if let Some(lit) = cast::<Literal>(&**v) {
+                                            lit.clone()
+                                        } else {
+                                            panic!(
+                                                "ConstArray init_values contain non-Literal: {:?}",
+                                                v
+                                            );
+                                        }
+                                    })
+                                    .collect()
+                            }),
                         },
                         Attr::Name(name.clone()),
                     ],
@@ -705,7 +701,11 @@ impl<'a> Emit<'a> {
                         OpData::Br {
                             cond: cond_op.unwrap(),
                             then_bb: then_block.clone(),
-                            else_bb: else_block.clone(),
+                            else_bb: if let Some(else_blk) = &else_block {
+                                else_blk.clone()
+                            } else {
+                                end_block.clone()
+                            },
                         },
                     ),
                 )?;
@@ -795,7 +795,7 @@ impl<'a> Emit<'a> {
                         OpData::Br {
                             cond: cond_op.unwrap(),
                             then_bb: while_body.clone(),
-                            else_bb: Some(while_end.clone()),
+                            else_bb: while_end.clone(),
                         },
                     ),
                 )?;
@@ -1008,7 +1008,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -1045,7 +1045,7 @@ impl<'a> Emit<'a> {
                                 OpData::Br {
                                     cond: lhs_op.unwrap(),
                                     then_bb: rhs_block.clone(),
-                                    else_bb: Some(end_block.clone()),
+                                    else_bb: end_block.clone(),
                                 },
                             ),
                         )?;
@@ -1106,7 +1106,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -1143,7 +1143,7 @@ impl<'a> Emit<'a> {
                                 OpData::Br {
                                     cond: lhs_op.unwrap(),
                                     then_bb: end_block.clone(),
-                                    else_bb: Some(rhs_block.clone()),
+                                    else_bb: rhs_block.clone(),
                                 },
                             ),
                         )?;
@@ -1515,12 +1515,14 @@ impl<'a> Emit<'a> {
                                 name: "".to_string(),
                                 typ: typ.clone(),
                                 mutable: false,
-                                values: string
-                                    .chars()
-                                    .map(|c| Literal::Int(c as i32))
-                                    // This chain adds the null terminator
-                                    .chain(std::iter::once(Literal::Int(0)))
-                                    .collect(),
+                                values: Some(
+                                    string
+                                        .chars()
+                                        .map(|c| Literal::Int(c as i32))
+                                        // This chain adds the null terminator
+                                        .chain(std::iter::once(Literal::Int(0)))
+                                        .collect(),
+                                ),
                             }],
                             OpData::GlobalAlloca(typ.size_in_bytes()),
                         ),
@@ -1659,7 +1661,7 @@ pub fn find_chunks(init_values: &Vec<Box<dyn Node>>) -> Vec<(usize, usize, Liter
                 chunk_size += 1;
             }
             (_, Some(new_lit)) => {
-                if chunk_size > 0 {
+                if chunk_size >= MAX_INIT {
                     chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
                 }
                 current_lit = Some(new_lit.clone());
@@ -1667,14 +1669,14 @@ pub fn find_chunks(init_values: &Vec<Box<dyn Node>>) -> Vec<(usize, usize, Liter
                 chunk_size = 1;
             }
             (_, None) => {
-                if chunk_size > 0 {
+                if chunk_size >= MAX_INIT {
                     chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
                 }
                 current_lit = None;
                 chunk_size = 0;
             }
         }
-        if i == init_values.len() - 1 && chunk_size > 0 {
+        if i == init_values.len() - 1 && chunk_size >= MAX_INIT {
             chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
         }
     }

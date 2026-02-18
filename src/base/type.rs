@@ -69,4 +69,7 @@ impl Type {
             Type::Char => 1,
         }
     }
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Type::Int | Type::Float | Type::Char)
+    }
 }

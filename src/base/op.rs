@@ -185,7 +185,7 @@ pub enum OpData {
     Br {
         cond: Operand,
         then_bb: Operand,
-        else_bb: Option<Operand>,
+        else_bb: Operand,
     },
     Jump {
         target_bb: Operand,
@@ -298,10 +298,7 @@ impl std::fmt::Display for Op {
                 cond,
                 then_bb,
                 else_bb,
-            } => match else_bb {
-                Some(else_bb) => write!(f, "br {}, {}, {}", cond, then_bb, else_bb),
-                None => write!(f, "br {}, {}", cond, then_bb),
-            },
+            } => write!(f, "br {}, {}, {}", cond, then_bb, else_bb),
             OpData::Jump { target_bb } => write!(f, "jump {}", target_bb),
             OpData::Ret { value } => write!(f, "ret {:?}", value),
         }
@@ -426,7 +423,8 @@ pub enum Attr {
         name: String,
         mutable: bool,
         typ: Type,
-        values: Vec<Literal>,
+        // None: zeroinitializer; Some: initializer list
+        values: Option<Vec<Literal>>,
     },
     Promotion,
     // Name
@@ -626,7 +624,12 @@ impl IndexedArena<Op> {
     // @param op_idx: the op whose uses we want to replace with new operand. e.g. "add %1, %2"
     // @param old: the old use we want to replace with e.g. %1 in "add %1, %2"
     // @param new: the new use we want to replace with e.g. %3 in "add %3, %2"
-    pub fn replace_use(&mut self, op_idx: Operand, old: Operand, new: Operand) -> Result<(), String> {
+    pub fn replace_use(
+        &mut self,
+        op_idx: Operand,
+        old: Operand,
+        new: Operand,
+    ) -> Result<(), String> {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
@@ -635,11 +638,107 @@ impl IndexedArena<Op> {
             _ => return Err("Operand is not a valid data".to_string()),
         };
 
-        if let Some(node) = self.get_mut(op_id)? {
-            for use_idx in node.uses.iter_mut() {
-                if *use_idx == old {
-                    *use_idx = new.clone();
+        if let Some(op) = self.get_mut(op_id)? {
+            match &mut op.data {
+                OpData::AddI { lhs, rhs }
+                | OpData::SubI { lhs, rhs }
+                | OpData::MulI { lhs, rhs }
+                | OpData::DivI { lhs, rhs }
+                | OpData::ModI { lhs, rhs }
+                | OpData::SNe { lhs, rhs }
+                | OpData::SEq { lhs, rhs }
+                | OpData::SGt { lhs, rhs }
+                | OpData::SLt { lhs, rhs }
+                | OpData::SGe { lhs, rhs }
+                | OpData::SLe { lhs, rhs }
+                | OpData::And { lhs, rhs }
+                | OpData::Or { lhs, rhs }
+                | OpData::Xor { lhs, rhs }
+                | OpData::Shl { lhs, rhs }
+                | OpData::Shr { lhs, rhs }
+                | OpData::Sar { lhs, rhs }
+                | OpData::AddF { lhs, rhs }
+                | OpData::SubF { lhs, rhs }
+                | OpData::MulF { lhs, rhs }
+                | OpData::DivF { lhs, rhs }
+                | OpData::ONe { lhs, rhs }
+                | OpData::OEq { lhs, rhs }
+                | OpData::OGt { lhs, rhs }
+                | OpData::OLt { lhs, rhs }
+                | OpData::OGe { lhs, rhs }
+                | OpData::OLe { lhs, rhs } => {
+                    if *lhs == old {
+                        *lhs = new.clone();
+                    };
+                    if *rhs == old {
+                        *rhs = new.clone();
+                    };
                 }
+
+                OpData::Sitofp { value: value } | OpData::Fptosi { value: value } => {
+                    if *value == old {
+                        *value = new.clone();
+                    };
+                }
+                OpData::Store { addr, value } => {
+                    if *addr == old {
+                        *addr = new.clone();
+                    };
+                    if *value == old {
+                        *value = new.clone();
+                    };
+                }
+                OpData::Load { addr } => {
+                    if *addr == old {
+                        *addr = new.clone();
+                    };
+                }
+                OpData::Call { args, .. } => {
+                    for arg in args.iter_mut() {
+                        if *arg == old {
+                            *arg = new.clone();
+                        };
+                    }
+                }
+                OpData::Br { cond, .. } => {
+                    if *cond == old {
+                        *cond = new.clone();
+                    };
+                }
+                OpData::Ret { value } => {
+                    if let Some(val) = value {
+                        if *val == old {
+                            *val = new.clone();
+                        };
+                    }
+                }
+                OpData::GEP { base, indices } => {
+                    if *base == old {
+                        *base = new.clone();
+                    };
+                    for index in indices.iter_mut() {
+                        if *index == old {
+                            *index = new.clone();
+                        };
+                    }
+                }
+                OpData::Move { value, .. } => {
+                    if *value == old {
+                        *value = new.clone();
+                    };
+                }
+                OpData::Phi { incoming } => {
+                    for (value, _bb_id) in incoming.iter_mut() {
+                        if *value == old {
+                            *value = new.clone();
+                        };
+                    }
+                }
+                OpData::GlobalAlloca { .. }
+                | OpData::GetArg { .. }
+                | OpData::Alloca(_)
+                | OpData::Jump { .. }
+                | OpData::Declare { .. } => { /* no operands to replace */ }
             }
             Ok(())
         } else {

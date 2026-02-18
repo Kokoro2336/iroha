@@ -263,10 +263,8 @@ impl Builder {
             } => {
                 cfg.add_pred(then_bb.clone(), current_bb.clone())?;
                 cfg.add_succ(current_bb.clone(), then_bb)?;
-                if let Some(else_bb) = else_bb {
-                    cfg.add_pred(else_bb.clone(), current_bb.clone())?;
-                    cfg.add_succ(current_bb, else_bb)?;
-                }
+                cfg.add_pred(else_bb.clone(), current_bb.clone())?;
+                cfg.add_succ(current_bb, else_bb)?;
             }
             OpData::Jump { target_bb } => {
                 cfg.add_pred(target_bb.clone(), current_bb.clone())?;

@@ -246,7 +246,36 @@ impl<'a> Emit<'a> {
                 self.syms.insert(var_decl.name.clone(), alloca.clone());
                 // if has init value, create store
                 if let Some(init_val) = &var_decl.init_value {
-                    let op_id = self.emit(init_val)?;
+                    let mut op_id = self.emit(init_val)?;
+                    if is::<VarAccess>(&*init_val) || is::<ArrayAccess>(&*init_val) {
+                        let typ = if let Some(var_access) = cast::<VarAccess>(&*init_val) {
+                            var_access.typ.clone()
+                        } else if let Some(array_access) = cast::<ArrayAccess>(&*init_val) {
+                            array_access.typ.clone()
+                        } else {
+                            unreachable!(
+                                "The init_val is guaranteed to be either VarAccess or ArrayAccess"
+                            );
+                        };
+                        let mut ctx = context_or_err!(self, "Local variable init outside function");
+                        let load_op = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                typ,
+                                vec![],
+                                OpData::Load {
+                                    addr: op_id.unwrap(),
+                                },
+                            ),
+                        )?;
+                        // replace op_id with loaded value
+                        crate::debug::info!(
+                            "Loading init value for variable {}: {:?}",
+                            var_decl.name,
+                            load_op
+                        );
+                        op_id = Some(load_op);
+                    }
                     // Re-acquire ctx after emit
                     let mut ctx = context_or_err!(self, "Local variable init outside function");
 
@@ -650,7 +679,31 @@ impl<'a> Emit<'a> {
             self.globals.insert(name, alloca);
         } else if let Some(ret) = cast::<Return>(&**node) {
             if let Some(ret_val) = &ret.0 {
-                let op_id = self.emit(ret_val)?;
+                let mut op_id = self.emit(ret_val)?;
+                if is::<VarAccess>(&*ret_val) || is::<ArrayAccess>(&*ret_val) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&*ret_val) {
+                        var_access.typ.clone()
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&*ret_val) {
+                        array_access.typ.clone()
+                    } else {
+                        unreachable!(
+                            "The ret_val is guaranteed to be either VarAccess or ArrayAccess"
+                        );
+                    };
+                    let mut ctx = context_or_err!(self, "Return value load outside function");
+                    let load_op = self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(
+                            typ,
+                            vec![],
+                            OpData::Load {
+                                addr: op_id.unwrap(),
+                            },
+                        ),
+                    )?;
+                    // replace op_id with loaded value
+                    op_id = Some(load_op);
+                }
                 let mut ctx = context_or_err!(self, "Return outside function");
 
                 self.builder.create(
@@ -869,12 +922,36 @@ impl<'a> Emit<'a> {
         } else if let Some(assign_stmt) = cast::<Assign>(&**node) {
             crate::debug::info!("Emitting assignment statement: {:?}", assign_stmt);
             // emit rhs first
-            let rhs_op = self.emit(&assign_stmt.rhs)?;
+            let mut rhs_op = self.emit(&assign_stmt.rhs)?;
+            // Add necessary load if rhs is VarAccess or ArrayAccess, since the value stored in them is the address.
+            if is::<VarAccess>(&*assign_stmt.rhs) || is::<ArrayAccess>(&*assign_stmt.rhs) {
+                let typ = if let Some(var_access) = cast::<VarAccess>(&*assign_stmt.rhs) {
+                    var_access.typ.clone()
+                } else if let Some(array_access) = cast::<ArrayAccess>(&*assign_stmt.rhs) {
+                    array_access.typ.clone()
+                } else {
+                    unreachable!("The rhs is guaranteed to be either VarAccess or ArrayAccess");
+                };
+                let mut ctx = context_or_err!(self, "Assign rhs load outside function");
+                let load_rhs = self.builder.create(
+                    &mut ctx,
+                    ir::Op::new(
+                        typ,
+                        vec![],
+                        OpData::Load {
+                            addr: rhs_op.unwrap(),
+                        },
+                    ),
+                )?;
+                // replace rhs_op with loaded value
+                crate::debug::info!("Loading rhs for assignment: {:?}", load_rhs);
+                rhs_op = Some(load_rhs);
+            }
             // emit lhs
             let lhs_op = self.emit(&assign_stmt.lhs)?;
 
             // create store
-            let mut ctx = context!(self);
+            let mut ctx = context_or_err!(self, "Store outside function");
             self.builder.create(
                 &mut ctx,
                 ir::Op::new(
@@ -975,7 +1052,28 @@ impl<'a> Emit<'a> {
             // evaluate arguments
             let mut arg_ops: Vec<Operand> = vec![];
             for arg in &call.args {
-                let arg_op = self.emit(arg)?;
+                let mut arg_op = self.emit(arg)?;
+                if is::<VarAccess>(&*arg) || is::<ArrayAccess>(&*arg) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&*arg) {
+                        var_access.typ.clone()
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&*arg) {
+                        array_access.typ.clone()
+                    } else {
+                        unreachable!("The arg is guaranteed to be either VarAccess or ArrayAccess");
+                    };
+                    let mut ctx = context_or_err!(self, "Call arg load outside function");
+                    let load_arg = self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(
+                            typ,
+                            vec![],
+                            OpData::Load {
+                                addr: arg_op.unwrap(),
+                            },
+                        ),
+                    )?;
+                    arg_op = Some(load_arg);
+                }
                 arg_ops.push(arg_op.unwrap());
             }
 
@@ -1451,8 +1549,8 @@ impl<'a> Emit<'a> {
                 }
                 ast::Op::Not => {
                     if typ == Type::Int {
-                        // 1 - rhs
-                        OpData::SNe {
+                        // rhs == 0 ? 1 : 0
+                        OpData::SEq {
                             lhs: operand.unwrap(),
                             rhs: Operand::Int(0),
                         }

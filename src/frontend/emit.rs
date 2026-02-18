@@ -93,7 +93,6 @@ impl<'a> Emit<'a> {
 
     pub fn emit(&mut self, node: &Box<dyn Node>) -> Result<Option<Operand>, String> {
         if let Some(fn_decl) = cast::<FnDecl>(&**node) {
-            crate::debug::info!("Emitting function: {}", fn_decl.name);
             // create new function
             self.current_function = Some(self.program.funcs.add(Function::new(
                 fn_decl.name.clone(),
@@ -118,12 +117,12 @@ impl<'a> Emit<'a> {
                 // enter function scope
                 self.syms.enter_scope();
 
-                for (i, arg) in fn_decl.params.iter().enumerate() {
+                for (i, (arg_name, arg_typ)) in fn_decl.params.iter().enumerate() {
                     let get_arg = self.builder.create(
                         &mut ctx,
                         ir::Op::new(
-                            arg.1.clone(),
-                            vec![Attr::Name(arg.0.clone())],
+                            arg_typ.clone(),
+                            vec![Attr::Name(arg_name.clone())],
                             OpData::GetArg(Operand::ParamId(i as u32)),
                         ),
                     )?;
@@ -131,10 +130,14 @@ impl<'a> Emit<'a> {
                         &mut ctx,
                         ir::Op::new(
                             Type::Pointer {
-                                base: Box::new(arg.1.clone()),
+                                base: Box::new(arg_typ.clone()),
                             },
-                            vec![Attr::Name(arg.0.clone())],
-                            OpData::Alloca(arg.1.size_in_bytes()),
+                            if arg_typ.is_scalar() {
+                                vec![Attr::Name(arg_name.clone()), Attr::Promotion]
+                            } else {
+                                vec![Attr::Name(arg_name.clone())]
+                            },
+                            OpData::Alloca(arg_typ.size_in_bytes()),
                         ),
                     )?;
                     self.builder.create(
@@ -149,7 +152,7 @@ impl<'a> Emit<'a> {
                         ),
                     )?;
                     // insert into symbol table
-                    self.syms.insert(arg.0.clone(), alloca);
+                    self.syms.insert(arg_name.clone(), alloca);
                 }
 
                 // create new block for body
@@ -204,22 +207,54 @@ impl<'a> Emit<'a> {
                                 mutable: var_decl.mutable,
                                 // cast to pointer typ
                                 typ: var_decl.typ.clone(),
-                                values: if let Some(init_value) = &var_decl.init_value {
+                                values: var_decl.init_value.as_ref().map(|init_value| {
                                     if let Some(lit) = cast::<Literal>(&**init_value) {
                                         vec![lit.clone()]
-                                    } else {
-                                        return Err(format!(
-                                            "Global VarDecl init_value is not Literal. Varname: {}",
-                                            var_decl.name
-                                        ));
+                                    } else if let Some(un_op) = cast::<UnaryOp>(&**init_value) {
+                                        match &un_op.op {
+                                            ast::Op::Cast(from, to) => {
+                                                match (from, to) {
+                                                    (Type::Int, Type::Float) => {
+                                                        if let Some(lit) = cast::<Literal>(&*un_op.operand) {
+                                                            if let Literal::Int(i) = lit {
+                                                                vec![Literal::Float(*i as f32)]
+                                                            } else {
+                                                                panic!("Unsupported literal type in global VarDecl init_value unary op Cast. expected Int, got: {:?}", lit);
+                                                            }
+                                                        } else {
+                                                            panic!("Unsupported operand in global VarDecl init_value unary op Cast. expected Literal, got: {:?}", un_op.operand);
+                                                        }
+                                                    },
+                                                    (Type::Float, Type::Int) => {
+                                                        if let Some(lit) = cast::<Literal>(&*un_op.operand) {
+                                                            if let Literal::Float(f) = lit {
+                                                                vec![Literal::Int(*f as i32)]
+                                                            } else {
+                                                                panic!("Unsupported literal type in global VarDecl init_value unary op Cast. expected Float, got: {:?}", lit);
+                                                            }
+                                                        } else {
+                                                            panic!("Unsupported operand in global VarDecl init_value unary op Cast. expected Literal, got: {:?}", un_op.operand);
+                                                        }
+                                                    },
+                                                    _ => unreachable!(
+                                                        "Unsupported types in global VarDecl init_value unary op Cast. from: {:?}, to: {:?}",
+                                                        from, to
+                                                    ),
+                                                }
+                                            }
+                                            _ => unreachable!(
+                                                "Unsupported unary operator in global VarDecl init_value. un_op: {:?}",
+                                                un_op
+                                            ),
+                                        }
+                                    } 
+                                    else {
+                                        panic!(
+                                            "Global VarDecl init_value is not Literal. Var: {:?}",
+                                            var_decl
+                                        );
                                     }
-                                } else {
-                                    // Global values' initializer can't be None here(initializer added in Parse)
-                                    return Err(format!(
-                                        "Global VarDecl has no init_value. Varname: {}",
-                                        var_decl.name
-                                    ));
-                                },
+                                }),
                             },
                             Attr::Name(var_decl.name.clone()),
                         ],
@@ -248,7 +283,31 @@ impl<'a> Emit<'a> {
                 self.syms.insert(var_decl.name.clone(), alloca.clone());
                 // if has init value, create store
                 if let Some(init_val) = &var_decl.init_value {
-                    let op_id = self.emit(init_val)?;
+                    let mut op_id = self.emit(init_val)?;
+                    if is::<VarAccess>(&**init_val) || is::<ArrayAccess>(&**init_val) {
+                        let typ = if let Some(var_access) = cast::<VarAccess>(&**init_val) {
+                            var_access.typ.clone()
+                        } else if let Some(array_access) = cast::<ArrayAccess>(&**init_val) {
+                            array_access.typ.clone()
+                        } else {
+                            unreachable!(
+                                "The init_val is guaranteed to be either VarAccess or ArrayAccess"
+                            );
+                        };
+                        let mut ctx = context_or_err!(self, "Local variable init outside function");
+                        let load_op = self.builder.create(
+                            &mut ctx,
+                            ir::Op::new(
+                                typ,
+                                vec![],
+                                OpData::Load {
+                                    addr: op_id.unwrap(),
+                                },
+                            ),
+                        )?;
+                        // replace op_id with loaded value
+                        op_id = Some(load_op);
+                    }
                     // Re-acquire ctx after emit
                     let mut ctx = context_or_err!(self, "Local variable init outside function");
 
@@ -285,7 +344,7 @@ impl<'a> Emit<'a> {
                                 name: var_array.name.clone(),
                                 mutable: true,
                                 typ: var_array.typ.clone(),
-                                values: if let Some(init_values) = &var_array.init_values {
+                                values: var_array.init_values.as_ref().map(|init_values| {
                                     init_values
                                         .iter()
                                         .map(|v| {
@@ -296,10 +355,7 @@ impl<'a> Emit<'a> {
                                             }
                                         })
                                         .collect()
-                                } else {
-                                    // panic
-                                    return Err(format!("Global VarArray has no init_values. Varname: {}", var_array.name));
-                                },
+                                }),
                             },
                             Attr::Name(var_array.name.clone()),
                         ],
@@ -397,7 +453,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -419,7 +475,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -498,7 +554,7 @@ impl<'a> Emit<'a> {
                                 OpData::Br {
                                     cond: res,
                                     then_bb: loop_body.clone(),
-                                    else_bb: Some(loop_end.clone()),
+                                    else_bb: loop_end.clone(),
                                 },
                             ),
                         )?;
@@ -630,20 +686,21 @@ impl<'a> Emit<'a> {
                             name: name.clone(),
                             mutable: false,
                             typ: const_array.typ.clone(),
-                            values: const_array
-                                .init_values
-                                .iter()
-                                .map(|v| {
-                                    if let Some(lit) = cast::<Literal>(&**v) {
-                                        lit.clone()
-                                    } else {
-                                        panic!(
-                                            "ConstArray init_values contain non-Literal: {:?}",
-                                            v
-                                        );
-                                    }
-                                })
-                                .collect(),
+                            values: const_array.init_values.as_ref().map(|init_values| {
+                                init_values
+                                    .iter()
+                                    .map(|v| {
+                                        if let Some(lit) = cast::<Literal>(&**v) {
+                                            lit.clone()
+                                        } else {
+                                            panic!(
+                                                "ConstArray init_values contain non-Literal: {:?}",
+                                                v
+                                            );
+                                        }
+                                    })
+                                    .collect()
+                            }),
                         },
                         Attr::Name(name.clone()),
                     ],
@@ -654,13 +711,46 @@ impl<'a> Emit<'a> {
             self.globals.insert(name, alloca);
         } else if let Some(ret) = cast::<Return>(&**node) {
             if let Some(ret_val) = &ret.0 {
-                let op_id = self.emit(ret_val)?;
+                let mut op_id = self.emit(ret_val)?;
+                if is::<VarAccess>(&**ret_val) || is::<ArrayAccess>(&**ret_val) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&**ret_val) {
+                        var_access.typ.clone()
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&**ret_val) {
+                        array_access.typ.clone()
+                    } else {
+                        unreachable!(
+                            "The ret_val is guaranteed to be either VarAccess or ArrayAccess"
+                        );
+                    };
+                    let mut ctx = context_or_err!(self, "Return value load outside function");
+                    let load_op = self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(
+                            typ,
+                            vec![],
+                            OpData::Load {
+                                addr: op_id.unwrap(),
+                            },
+                        ),
+                    )?;
+                    // replace op_id with loaded value
+                    op_id = Some(load_op);
+                }
+                let ret_typ = {
+                    if let Some(current_func) = self.current_function {
+                        match &self.program.funcs[current_func].typ {
+                            Type::Function { return_type, .. } => *return_type.clone(),
+                            _ => return Err("Current function has non-function type".to_string()),
+                        }
+                    } else {
+                        return Err("Return statement outside function".to_string());
+                    }
+                };
                 let mut ctx = context_or_err!(self, "Return outside function");
-
                 self.builder.create(
                     &mut ctx,
                     ir::Op::new(
-                        Type::Void,
+                        ret_typ,
                         vec![],
                         OpData::Ret {
                             value: Some(op_id.unwrap()),
@@ -705,7 +795,11 @@ impl<'a> Emit<'a> {
                         OpData::Br {
                             cond: cond_op.unwrap(),
                             then_bb: then_block.clone(),
-                            else_bb: else_block.clone(),
+                            else_bb: if let Some(else_blk) = &else_block {
+                                else_blk.clone()
+                            } else {
+                                end_block.clone()
+                            },
                         },
                     ),
                 )?;
@@ -795,7 +889,7 @@ impl<'a> Emit<'a> {
                         OpData::Br {
                             cond: cond_op.unwrap(),
                             then_bb: while_body.clone(),
-                            else_bb: Some(while_end.clone()),
+                            else_bb: while_end.clone(),
                         },
                     ),
                 )?;
@@ -867,14 +961,36 @@ impl<'a> Emit<'a> {
                 ),
             )?;
         } else if let Some(assign_stmt) = cast::<Assign>(&**node) {
-            crate::debug::info!("Emitting assignment statement: {:?}", assign_stmt);
             // emit rhs first
-            let rhs_op = self.emit(&assign_stmt.rhs)?;
+            let mut rhs_op = self.emit(&assign_stmt.rhs)?;
+            // Add necessary load if rhs is VarAccess or ArrayAccess, since the value stored in them is the address.
+            if is::<VarAccess>(&*assign_stmt.rhs) || is::<ArrayAccess>(&*assign_stmt.rhs) {
+                let typ = if let Some(var_access) = cast::<VarAccess>(&*assign_stmt.rhs) {
+                    var_access.typ.clone()
+                } else if let Some(array_access) = cast::<ArrayAccess>(&*assign_stmt.rhs) {
+                    array_access.typ.clone()
+                } else {
+                    unreachable!("The rhs is guaranteed to be either VarAccess or ArrayAccess");
+                };
+                let mut ctx = context_or_err!(self, "Assign rhs load outside function");
+                let load_rhs = self.builder.create(
+                    &mut ctx,
+                    ir::Op::new(
+                        typ,
+                        vec![],
+                        OpData::Load {
+                            addr: rhs_op.unwrap(),
+                        },
+                    ),
+                )?;
+                // replace rhs_op with loaded value
+                rhs_op = Some(load_rhs);
+            }
             // emit lhs
             let lhs_op = self.emit(&assign_stmt.lhs)?;
 
             // create store
-            let mut ctx = context!(self);
+            let mut ctx = context_or_err!(self, "Store outside function");
             self.builder.create(
                 &mut ctx,
                 ir::Op::new(
@@ -902,7 +1018,25 @@ impl<'a> Emit<'a> {
             // emit indices first
             let mut index_ops = vec![];
             for index in &array_access.indices {
-                let op = self.emit(index)?;
+                let mut op = self.emit(index)?;
+                if is::<VarAccess>(&**index) || is::<ArrayAccess>(&**index) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&**index) {
+                        var_access.typ.clone()
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&**index) {
+                        array_access.typ.clone()
+                    } else {
+                        unreachable!(
+                            "The index is guaranteed to be either VarAccess or ArrayAccess"
+                        );
+                    };
+                    let mut ctx = context_or_err!(self, "Array index load outside function");
+                    let load_op = self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(typ, vec![], OpData::Load { addr: op.unwrap() }),
+                    )?;
+                    // replace op with loaded value
+                    op = Some(load_op);
+                }
                 index_ops.push(op.unwrap());
             }
 
@@ -925,8 +1059,8 @@ impl<'a> Emit<'a> {
                         vec![],
                         OpData::GEP {
                             base: global_id.clone(),
-                            indices: index_ops
-                                .splice(0..0, std::iter::once(Operand::Int(0)))
+                            indices: std::iter::once(Operand::Index(0))
+                                .chain(index_ops.into_iter())
                                 .collect(),
                         },
                     ),
@@ -944,8 +1078,8 @@ impl<'a> Emit<'a> {
                         vec![],
                         OpData::GEP {
                             base: global_id.clone(),
-                            indices: index_ops
-                                .splice(0..0, std::iter::once(Operand::Int(0)))
+                            indices: std::iter::once(Operand::Index(0))
+                                .chain(index_ops.into_iter())
                                 .collect(),
                         },
                     ),
@@ -963,8 +1097,8 @@ impl<'a> Emit<'a> {
                         vec![],
                         OpData::GEP {
                             base: ptr_addr.clone(),
-                            indices: index_ops
-                                .splice(0..0, std::iter::once(Operand::Int(0)))
+                            indices: std::iter::once(Operand::Index(0))
+                                .chain(index_ops.into_iter())
                                 .collect(),
                         },
                     ),
@@ -975,7 +1109,28 @@ impl<'a> Emit<'a> {
             // evaluate arguments
             let mut arg_ops: Vec<Operand> = vec![];
             for arg in &call.args {
-                let arg_op = self.emit(arg)?;
+                let mut arg_op = self.emit(arg)?;
+                if is::<VarAccess>(&**arg) || is::<ArrayAccess>(&**arg) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&**arg) {
+                        var_access.typ.clone()
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&**arg) {
+                        array_access.typ.clone()
+                    } else {
+                        unreachable!("The arg is guaranteed to be either VarAccess or ArrayAccess");
+                    };
+                    let mut ctx = context_or_err!(self, "Call arg load outside function");
+                    let load_arg = self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(
+                            typ,
+                            vec![],
+                            OpData::Load {
+                                addr: arg_op.unwrap(),
+                            },
+                        ),
+                    )?;
+                    arg_op = Some(load_arg);
+                }
                 arg_ops.push(arg_op.unwrap());
             }
 
@@ -995,7 +1150,6 @@ impl<'a> Emit<'a> {
             )?;
             return Ok(Some(call_op));
         } else if let Some(binary_op) = cast::<BinaryOp>(&**node) {
-            crate::debug::info!("Emitting binary operation: {:?}", binary_op);
             // And & Or need short-circuit evaluation, so we handle them separately.
             match &binary_op.op {
                 ast::Op::And => {
@@ -1008,7 +1162,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -1045,7 +1199,7 @@ impl<'a> Emit<'a> {
                                 OpData::Br {
                                     cond: lhs_op.unwrap(),
                                     then_bb: rhs_block.clone(),
-                                    else_bb: Some(end_block.clone()),
+                                    else_bb: end_block.clone(),
                                 },
                             ),
                         )?;
@@ -1106,7 +1260,7 @@ impl<'a> Emit<'a> {
                                 Type::Pointer {
                                     base: Box::new(Type::Int),
                                 },
-                                vec![],
+                                vec![Attr::Promotion],
                                 OpData::Alloca(Type::Int.size_in_bytes()),
                             ),
                         )?;
@@ -1143,7 +1297,7 @@ impl<'a> Emit<'a> {
                                 OpData::Br {
                                     cond: lhs_op.unwrap(),
                                     then_bb: end_block.clone(),
-                                    else_bb: Some(rhs_block.clone()),
+                                    else_bb: rhs_block.clone(),
                                 },
                             ),
                         )?;
@@ -1451,8 +1605,8 @@ impl<'a> Emit<'a> {
                 }
                 ast::Op::Not => {
                     if typ == Type::Int {
-                        // 1 - rhs
-                        OpData::SNe {
+                        // rhs == 0 ? 1 : 0
+                        OpData::SEq {
                             lhs: operand.unwrap(),
                             rhs: Operand::Int(0),
                         }
@@ -1515,12 +1669,14 @@ impl<'a> Emit<'a> {
                                 name: "".to_string(),
                                 typ: typ.clone(),
                                 mutable: false,
-                                values: string
-                                    .chars()
-                                    .map(|c| Literal::Int(c as i32))
-                                    // This chain adds the null terminator
-                                    .chain(std::iter::once(Literal::Int(0)))
-                                    .collect(),
+                                values: Some(
+                                    string
+                                        .chars()
+                                        .map(|c| Literal::Int(c as i32))
+                                        // This chain adds the null terminator
+                                        .chain(std::iter::once(Literal::Int(0)))
+                                        .collect(),
+                                ),
                             }],
                             OpData::GlobalAlloca(typ.size_in_bytes()),
                         ),
@@ -1659,7 +1815,7 @@ pub fn find_chunks(init_values: &Vec<Box<dyn Node>>) -> Vec<(usize, usize, Liter
                 chunk_size += 1;
             }
             (_, Some(new_lit)) => {
-                if chunk_size > 0 {
+                if chunk_size >= MAX_INIT {
                     chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
                 }
                 current_lit = Some(new_lit.clone());
@@ -1667,14 +1823,14 @@ pub fn find_chunks(init_values: &Vec<Box<dyn Node>>) -> Vec<(usize, usize, Liter
                 chunk_size = 1;
             }
             (_, None) => {
-                if chunk_size > 0 {
+                if chunk_size >= MAX_INIT {
                     chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
                 }
                 current_lit = None;
                 chunk_size = 0;
             }
         }
-        if i == init_values.len() - 1 && chunk_size > 0 {
+        if i == init_values.len() - 1 && chunk_size >= MAX_INIT {
             chunks.push((chunk_start, chunk_size, current_lit.clone().unwrap()));
         }
     }

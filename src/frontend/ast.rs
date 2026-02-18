@@ -108,7 +108,8 @@ pub struct VarAccess {
 pub struct ConstArray {
     pub name: String,
     pub typ: Type,
-    pub init_values: Vec<Box<dyn Node>>,
+    // None: zeroinitializer
+    pub init_values: Option<Vec<Box<dyn Node>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +117,7 @@ pub struct VarArray {
     pub name: String,
     pub is_global: bool,
     pub typ: Type,
+    // None: If is_global then zeroinitializer, else uninitialized
     pub init_values: Option<Vec<Box<dyn Node>>>,
 }
 

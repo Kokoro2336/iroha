@@ -31,24 +31,25 @@ pub CompUnit: Box<dyn Node> = {
               for mut decl in decl_aggr.decls.into_iter() {
                 // overwrite is_global field
                 if let Some(var_array) = cast_mut::<VarArray>(&mut *decl) {
-                  var_array.is_global = true;
-
                   if var_array.init_values.is_none() {
                     // if no initializer, set to zero
                     let len = match &var_array.typ {
                       Type::Array { dims, .. } => dims.iter().product::<u32>(),
                       _ => 0,
                     };
-                    var_array.init_values = Some(vec![Box::new(Literal::Int(0)); len as usize]);
+                    var_array.init_values = None;
 
                   } else if var_array.init_values.is_some() {
                     let init_vals = var_array.init_values.take().unwrap();
-                    // fold the initializer
-                    var_array.init_values = Some(init_vals.into_iter().map(|init_val| parser.fold(init_val)).collect());
+                    if init_vals.is_empty() {
+                      // handle empty init val
+                      var_array.init_values = None;
+                    } else {
+                      // fold the initializer
+                      var_array.init_values = Some(init_vals.into_iter().map(|init_val| parser.fold(init_val)).collect());
+                    }
                   }
                 } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut *decl) {
-                  var_decl.is_global = true;
-
                   if var_decl.mutable {
                     // if no initializer, set to zero
                     if var_decl.init_value.is_none() {

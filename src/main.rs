@@ -114,7 +114,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    info!("Finish Emitting. IR generated.");
+    info!("Finish Emitting.");
 
     info!("Start Running Mem2Reg.");
     let ir = {

@@ -24,6 +24,11 @@ impl Parser {
         }
     }
 
+    // Check if we are currently in the global scope.
+    pub fn is_global(&self) -> bool {
+        self.syms.current_scope() == 1
+    }
+
     // early constant folding optimization
     pub fn fold(&mut self, mut node: Box<dyn Node>) -> Box<dyn Node> {
         if is::<BinaryOp>(&*node) {
@@ -218,13 +223,18 @@ impl Parser {
                             panic!("Array index must be a constant literal for folding");
                         }
                     }
-                    match const_array.init_values.get(flat_index) {
-                        Some(val) => return val.clone(),
-                        None => panic!(
-                            "Array index out of bounds for folding: index {}, size {}",
-                            flat_index,
-                            const_array.init_values.len()
-                        ),
+                    if let Some(init_values) = &const_array.init_values {
+                        match init_values.get(flat_index) {
+                            Some(val) => return val.clone(),
+                            None => panic!(
+                                "Array index out of bounds for folding: index {}, size {}",
+                                flat_index,
+                                init_values.len()
+                            ),
+                        }
+                    } else {
+                        // Else return 0
+                        return Box::new(Literal::Int(0));
                     }
                 } else {
                     panic!("ArrayAccess value is not ConstArray for folding");
@@ -248,7 +258,7 @@ impl Parser {
                 let mut var_decl = Box::new(VarDecl {
                     name: raw_decl.ident,
                     // this will be overwritten later.
-                    is_global: false,
+                    is_global: self.is_global(),
                     typ: aggr_typ.clone(),
                     mutable: node.mutable,
                     init_value: raw_decl.init_val,
@@ -294,23 +304,26 @@ impl Parser {
                 if node.mutable {
                     new_nodes.push(Box::new(VarArray {
                         name: raw_decl.ident,
-                        is_global: false,
+                        is_global: self.is_global(),
                         typ: Type::Array {
                             base: Box::new(aggr_typ.clone()),
                             dims: dims.clone(),
                         },
-                        init_values: if raw_decl.init_val.is_none() {
-                            None
+                        // None: zeroinitializer
+                        init_values: if let Some(init_val) = raw_decl.init_val {
+                            crate::debug::info!("Flattening array: {:?}", &*init_val);
+                            flatten(aggr_typ.clone(), dims, init_val)
                         } else {
-                            Some(flatten(aggr_typ.clone(), dims, raw_decl.init_val.unwrap()))
+                            None
                         },
                     }));
                 } else {
                     // fold the initial values
-                    let init_val =
-                        self.fold(raw_decl.init_val.expect(
-                            "ConstArray should have an initial value for constant folding!",
-                        ));
+                    let init_val = self.fold(raw_decl.init_val.expect(
+                        // Validate the existence of initial value for constant array here.
+                        // In the future, ConstArray.init_values == None represents zeroinitializer.
+                        "ConstArray should have an initial value for constant folding!",
+                    ));
                     let const_array = Box::new(ConstArray {
                         name: raw_decl.ident,
                         typ: Type::Array {
@@ -330,11 +343,16 @@ impl Parser {
     }
 }
 
-fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Vec<Box<dyn Node>> {
+fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Option<Vec<Box<dyn Node>>> {
     if !is::<ArrayInitVal>(&*node) {
         panic!("flatten can only process ArrayInitVal nodes");
+    } else if let Some(array_init_val) = cast::<ArrayInitVal>(&*node) {
+        if array_init_val.init_vals.is_empty() {
+            return None;
+        }
     }
     let new_vals: RefCell<Vec<Box<dyn Node>>> = RefCell::new(vec![]);
+    let has_non_zero = RefCell::new(false);
 
     {
         // flatten origin array
@@ -382,6 +400,23 @@ fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Vec<Box<dy
 
                 filled_size += to_be_filled;
             } else {
+                if let Some(val) = cast::<Literal>(&*val) {
+                    match val {
+                        Literal::Int(val) => {
+                            if *val != 0 {
+                                *has_non_zero.borrow_mut() = true;
+                            }
+                        }
+                        Literal::Float(val) => {
+                            if *val != 0.0 {
+                                *has_non_zero.borrow_mut() = true;
+                            }
+                        }
+                        _ => unreachable!(
+                            "Only Int and Float literals are supported in array initialization"
+                        ),
+                    }
+                }
                 new_vals.borrow_mut().push(val);
                 filled_size += 1;
             }
@@ -389,7 +424,7 @@ fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Vec<Box<dy
             filled_size
         });
 
-        info!("\nOrigial ArrayInitVal: {:?}", &node);
+        info!("\nOrigial ArrayInitVal: {:?}", &*node);
         rec((node, 0));
     }
 
@@ -404,5 +439,9 @@ fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Vec<Box<dy
     }
 
     info!("Successfully flattened array: {:?}", new_vals.borrow());
-    new_vals.into_inner()
+    if !*has_non_zero.borrow() {
+        None
+    } else {
+        Some(new_vals.into_inner())
+    }
 }

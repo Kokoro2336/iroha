@@ -9,9 +9,11 @@ use crate::frontend::ast::*;
 use crate::utils::{cast, cast_mut, replace, take};
 
 use regex::Regex;
+use std::collections::HashMap;
 
 pub struct Semantic {
     pub node: Option<Box<dyn Node>>,
+    funcs: HashMap<String, Type>,
     syms: SymbolTable<String, Type>,
     // func_name: String, param_names: Vec<String>, param_added: bool
     current_func: Option<String>,
@@ -22,6 +24,7 @@ impl Semantic {
         // Add SysY lib functions
         Self {
             syms: SymbolTable::new(),
+            funcs: HashMap::new(),
             current_func: None,
             node: Some(node),
         }
@@ -139,7 +142,7 @@ impl Semantic {
                 Err(format!("Undefined variable: {}", var_access.name))
             }
         } else if let Some(call) = cast_mut::<Call>(&mut **node) {
-            let (fn_params, return_typ) = if let Some(func_typ) = self.syms.get(&call.func_name) {
+            let (fn_params, return_typ) = if let Some(func_typ) = self.funcs.get(&call.func_name) {
                 if let Type::Function {
                     return_type,
                     param_types,
@@ -302,7 +305,7 @@ impl Semantic {
 
         // Declarations
         } else if let Some(func) = cast_mut::<FnDecl>(&mut **node) {
-            self.syms.insert(func.name.clone(), func.typ.clone());
+            self.funcs.insert(func.name.clone(), func.typ.clone());
             // enter the scope created for function itself, which is 1 level higher than the function body scope
             self.syms.enter_scope();
 
@@ -341,43 +344,49 @@ impl Semantic {
         } else if let Some(const_array) = cast_mut::<ConstArray>(&mut **node) {
             // decay the array type to pointer type when inserting into symbol table
             let decayed_type = decay(const_array.typ.clone())?;
-            self.syms
-                .insert(const_array.name.clone(), decayed_type);
+            self.syms.insert(const_array.name.clone(), decayed_type);
             let base = match &const_array.typ {
                 Type::Array { base, .. } => base.as_ref().clone(),
                 _ => panic!("ConstArray must have array type!"),
             };
 
-            for init_val in &mut const_array.init_values {
-                let val_type = self.analyze(init_val)?;
-                // We don't insert cast node for ConstArray, we directly modify the init_val node.
-                if val_type != base {
-                    let literal = cast_mut::<Literal>(init_val).unwrap();
-                    match val_type {
-                        // if val_typ == Type::Int and val_typ != base, then base must be Float
-                        Type::Int => {
-                            *literal = Literal::Float(literal.get_int() as f32);
+            // If the init_values is None, it means it's a zeroinitializer, which is always valid.
+            // So we only need to check the init_values when it's Some.
+            if let Some(init_values) = &mut const_array.init_values {
+                for init_val in init_values {
+                    let val_type = self.analyze(init_val)?;
+                    // We don't insert cast node for ConstArray, we directly modify the init_val node.
+                    if val_type != base {
+                        let literal = cast_mut::<Literal>(init_val).unwrap();
+                        match val_type {
+                            // if val_typ == Type::Int and val_typ != base, then base must be Float
+                            Type::Int => {
+                                *literal = Literal::Float(literal.get_int() as f32);
+                            }
+                            Type::Float => {
+                                *literal = Literal::Float(literal.get_float());
+                            }
+                            _ => unreachable!(
+                                "ConstArray can only be initialized with Int or Float literals: {:?}",
+                                val_type
+                            ),
                         }
-                        Type::Float => {
-                            *literal = Literal::Float(literal.get_float());
-                        }
-                        _ => unreachable!(
-                            "ConstArray can only be initialized with Int or Float literals: {:?}",
-                            val_type
-                        ),
                     }
                 }
             }
             Ok(Type::Void)
-        } else if let Some(local_array) = cast_mut::<VarArray>(&mut **node) {
+        } else if let Some(var_array) = cast_mut::<VarArray>(&mut **node) {
             // decay the array type to pointer type when inserting into symbol table
-            let decayed_type = decay(local_array.typ.clone())?;
-            self.syms
-                .insert(local_array.name.clone(), decayed_type);
-            if let Some(init_values) = &mut local_array.init_values {
+            let decayed_type = decay(var_array.typ.clone())?;
+            self.syms.insert(var_array.name.clone(), decayed_type);
+
+            // If the init_values is Some, check the type of each init value and insert implicit cast if necessary.
+            // If the init_values is None and it's a global variable, it means it's a zeroinitializer, which is always valid.
+            // If the init_values is None and it's not a global variable, it means it's uninitialized, which is also valid.
+            if let Some(init_values) = &mut var_array.init_values {
                 for init_val in init_values {
                     let val_typ = self.analyze(init_val)?;
-                    let base_typ = match &local_array.typ {
+                    let base_typ = match &var_array.typ {
                         Type::Array { base, .. } => base.as_ref().clone(),
                         _ => panic!("VarArray must have array type!"),
                     };
@@ -392,16 +401,17 @@ impl Semantic {
                                     op: Op::Cast(Type::Int, base_typ.clone()),
                                     operand: take(init_val),
                                 });
-                            },
+                            }
                             Type::Float => {
                                 *init_val = Box::new(UnaryOp {
                                     typ: base_typ.clone(),
                                     op: Op::Cast(Type::Float, base_typ.clone()),
                                     operand: take(init_val),
                                 });
-                            },
+                            }
                             _ => unreachable!(
-                                "LocalArray can only be initialized with Int or Float literals: {:?}", val_typ
+                                "VarArray can only be initialized with Int or Float literals: {:?}",
+                                val_typ
                             ),
                         }
                     } else if val_typ != base_typ {
@@ -457,13 +467,18 @@ impl Semantic {
             if let Some(expr) = &mut ret.0 {
                 let ret_typ = self.analyze(expr)?;
                 let func_typ = self
-                    .syms
-                    .get(&self.current_func.as_ref().unwrap())
+                    .funcs
+                    .get(self.current_func.as_ref().unwrap())
                     .unwrap()
                     .clone();
                 let func_ret_typ = match func_typ {
                     Type::Function { return_type, .. } => *return_type,
-                    _ => panic!("Current function is not a function type!"),
+                    _ => {
+                        return Err(format!(
+                            "Current function {} does not have a valid function type!",
+                            self.current_func.as_ref().unwrap()
+                        ))
+                    }
                 };
 
                 if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
@@ -519,7 +534,7 @@ impl Pass<Box<dyn Node>> for Semantic {
         // insert SysY lib functions into symbol table
         SYSY_LIB.with(|lib| {
             for (name, typ) in lib.iter() {
-                self.syms.insert(name.to_string(), typ.clone());
+                self.funcs.insert(name.to_string(), typ.clone());
             }
         });
         self.analyze(&mut node)?;

@@ -239,22 +239,18 @@ impl Arena<Function> for IndexedArena<Function> {
                                                 );
                                             }
                                         };
-                                        if let Some(else_bb) = else_bb {
-                                            *else_bb = match old_arena_cfg
-                                                .get(else_bb.get_bb_id()?)
-                                                .unwrap()
-                                            {
-                                                ArenaItem::NewIndex(new_idx) => {
-                                                    Operand::BB(*new_idx)
-                                                }
-                                                _ => {
-                                                    return Err(
-                                                        "Compaction gc: BB index in Op not found"
-                                                            .to_string(),
-                                                    );
-                                                }
-                                            };
-                                        }
+                                        *else_bb = match old_arena_cfg
+                                            .get(else_bb.get_bb_id()?)
+                                            .unwrap()
+                                        {
+                                            ArenaItem::NewIndex(new_idx) => Operand::BB(*new_idx),
+                                            _ => {
+                                                return Err(
+                                                    "Compaction gc: BB index in Op not found"
+                                                        .to_string(),
+                                                );
+                                            }
+                                        };
                                     }
 
                                     OpData::Phi { incoming } => {

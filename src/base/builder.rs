@@ -130,9 +130,60 @@ impl Builder {
         Ok(())
     }
 
+    pub fn set_after_inst(
+        &mut self,
+        ctx: &mut BuilderContext,
+        inst_id: Option<Operand>,
+    ) -> Result<(), String> {
+        let cfg = acquire_cfg!(ctx, "Builder set_after_inst: ctx.cfg is None");
+        if self.current_block.is_none() {
+            return Err("Builder set_after_inst: current_block is None".to_string());
+        };
+
+        let current_block = self.current_block.as_ref().unwrap().get_bb_id()?;
+        let bb = cfg.get_mut(current_block)?;
+        let bb = if bb.is_none() {
+            return Err(format!(
+                "Builder set_after_inst: current_block {:?} points to None",
+                self.current_block
+            ));
+        } else {
+            bb.unwrap()
+        };
+        if inst_id.is_none() {
+            // set to the end of the block
+            self.current_inst = None;
+            return Ok(());
+        }
+        if bb.cur.contains(&inst_id.clone().unwrap()) {
+            // set to after the instruction, which means the next instruction is current_inst
+            let pos = bb
+                .cur
+                .iter()
+                .position(|id| id == &inst_id.clone().unwrap())
+                .ok_or_else(|| {
+                    format!(
+                        "Builder set_after_inst: inst {:?} not found in current_block {:?}",
+                        inst_id, self.current_block
+                    )
+                })?;
+            if pos + 1 < bb.cur.len() {
+                self.current_inst = Some(bb.cur[pos + 1].clone());
+            } else {
+                // set to the end of the block
+                self.current_inst = None;
+            }
+        } else {
+            return Err(format!(
+                "Builder set_after_inst: inst {:?} not in current_block {:?}",
+                inst_id, self.current_block
+            ));
+        }
+        Ok(())
+    }
+
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
-        crate::debug::info!("Adding uses for instruction: {:?}", op);
         let dfg = acquire_dfg!(ctx, "Builder add_uses: ctx.dfg is None");
         let data = dfg.get(op.get_op_id()?)?;
 
@@ -234,7 +285,6 @@ impl Builder {
         ctx: &mut BuilderContext,
         op: Operand,
     ) -> Result<(), String> {
-        crate::debug::info!("Adding control flow for instruction: {:?}", op);
         let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
@@ -263,10 +313,8 @@ impl Builder {
             } => {
                 cfg.add_pred(then_bb.clone(), current_bb.clone())?;
                 cfg.add_succ(current_bb.clone(), then_bb)?;
-                if let Some(else_bb) = else_bb {
-                    cfg.add_pred(else_bb.clone(), current_bb.clone())?;
-                    cfg.add_succ(current_bb, else_bb)?;
-                }
+                cfg.add_pred(else_bb.clone(), current_bb.clone())?;
+                cfg.add_succ(current_bb, else_bb)?;
             }
             OpData::Jump { target_bb } => {
                 cfg.add_pred(target_bb.clone(), current_bb.clone())?;
@@ -321,7 +369,6 @@ impl Builder {
 
     // create an instruction after current instruction
     pub fn create(&mut self, ctx: &mut BuilderContext, op: Op) -> Result<Operand, String> {
-        crate::debug::info!("Creating new instruction: {:?}", op);
         let is_inner_control_flow = op.is_inner_control_flow();
         let op_id = match op.data {
             OpData::GlobalAlloca(_) => {
@@ -585,6 +632,93 @@ impl Builder {
 
         // remove from dfg
         dfg.remove(op_id)?;
+        Ok(())
+    }
+
+    // Move the instruction to the front of specific position(operantion) in another basic block.
+    pub fn move_op_to_bb_at(
+        &mut self,
+        ctx: &mut BuilderContext,
+        op: Operand,
+        old_bb: Operand,
+        new_bb: Operand,
+        pos: Option<Operand>,
+    ) -> Result<(), String> {
+        let dfg = acquire_dfg!(ctx, "Builder move_op_to_bb_at: ctx.dfg is None");
+        let cfg = acquire_cfg!(ctx, "Builder move_op_to_bb_at: ctx.cfg is None");
+
+        let op_id = match op.get_op_id() {
+            Ok(id) => id,
+            Err(_) => {
+                return Err("Builder move_op_to_bb_at: operand is not an instruction".to_string())
+            }
+        };
+        let old_bb_id = match old_bb.get_bb_id() {
+            Ok(id) => id,
+            Err(_) => {
+                return Err("Builder move_op_to_bb_at: old_bb is not a basic block".to_string())
+            }
+        };
+
+        // remove from old bb
+        let old_bb = cfg.get_mut(old_bb_id)?.ok_or_else(|| {
+            format!(
+                "Builder move_op_to_bb_at: old_bb {:?} points to None",
+                old_bb
+            )
+        })?;
+        if let Some(pos) = old_bb.cur.iter().position(|id| {
+            let id = match id.get_op_id() {
+                Ok(id) => id,
+                Err(_) => return false,
+            };
+            id == op_id
+        }) {
+            old_bb.cur.remove(pos);
+        } else {
+            return Err(format!(
+                "Builder move_op_to_bb_at: instruction {:?} not found in old_bb {:?}",
+                op, old_bb
+            ));
+        }
+
+        let new_bb_id = match new_bb.get_bb_id() {
+            Ok(id) => id,
+            Err(_) => {
+                return Err("Builder move_op_to_bb_at: new_bb is not a basic block".to_string())
+            }
+        };
+        // insert into new bb at pos
+        let new_bb = cfg.get_mut(new_bb_id)?.ok_or_else(|| {
+            format!(
+                "Builder move_op_to_bb_at: new_bb {:?} points to None",
+                new_bb
+            )
+        })?;
+        if let Some(pos) = pos {
+            let pos_id = match pos.get_op_id() {
+                Ok(id) => id,
+                Err(_) => {
+                    return Err("Builder move_op_to_bb_at: pos is not an instruction".to_string())
+                }
+            };
+            if let Some(pos) = new_bb.cur.iter().position(|id| {
+                let id = match id.get_op_id() {
+                    Ok(id) => id,
+                    Err(_) => return false,
+                };
+                id == pos_id
+            }) {
+                new_bb.cur.insert(pos, op.clone());
+            } else {
+                return Err(format!(
+                    "Builder move_op_to_bb_at: instruction {:?} not found in new_bb {:?}",
+                    pos, new_bb
+                ));
+            }
+        } else {
+            new_bb.cur.push(op.clone());
+        }
         Ok(())
     }
 }

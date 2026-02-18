@@ -9,9 +9,11 @@ use crate::frontend::ast::*;
 use crate::utils::{cast, cast_mut, replace, take};
 
 use regex::Regex;
+use std::collections::HashMap;
 
 pub struct Semantic {
     pub node: Option<Box<dyn Node>>,
+    funcs: HashMap<String, Type>,
     syms: SymbolTable<String, Type>,
     // func_name: String, param_names: Vec<String>, param_added: bool
     current_func: Option<String>,
@@ -22,6 +24,7 @@ impl Semantic {
         // Add SysY lib functions
         Self {
             syms: SymbolTable::new(),
+            funcs: HashMap::new(),
             current_func: None,
             node: Some(node),
         }
@@ -139,7 +142,7 @@ impl Semantic {
                 Err(format!("Undefined variable: {}", var_access.name))
             }
         } else if let Some(call) = cast_mut::<Call>(&mut **node) {
-            let (fn_params, return_typ) = if let Some(func_typ) = self.syms.get(&call.func_name) {
+            let (fn_params, return_typ) = if let Some(func_typ) = self.funcs.get(&call.func_name) {
                 if let Type::Function {
                     return_type,
                     param_types,
@@ -302,7 +305,7 @@ impl Semantic {
 
         // Declarations
         } else if let Some(func) = cast_mut::<FnDecl>(&mut **node) {
-            self.syms.insert(func.name.clone(), func.typ.clone());
+            self.funcs.insert(func.name.clone(), func.typ.clone());
             // enter the scope created for function itself, which is 1 level higher than the function body scope
             self.syms.enter_scope();
 
@@ -464,13 +467,18 @@ impl Semantic {
             if let Some(expr) = &mut ret.0 {
                 let ret_typ = self.analyze(expr)?;
                 let func_typ = self
-                    .syms
-                    .get(&self.current_func.as_ref().unwrap())
+                    .funcs
+                    .get(self.current_func.as_ref().unwrap())
                     .unwrap()
                     .clone();
                 let func_ret_typ = match func_typ {
                     Type::Function { return_type, .. } => *return_type,
-                    _ => panic!("Current function is not a function type!"),
+                    _ => {
+                        return Err(format!(
+                            "Current function {} does not have a valid function type!",
+                            self.current_func.as_ref().unwrap()
+                        ))
+                    }
                 };
 
                 if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
@@ -526,7 +534,7 @@ impl Pass<Box<dyn Node>> for Semantic {
         // insert SysY lib functions into symbol table
         SYSY_LIB.with(|lib| {
             for (name, typ) in lib.iter() {
-                self.syms.insert(name.to_string(), typ.clone());
+                self.funcs.insert(name.to_string(), typ.clone());
             }
         });
         self.analyze(&mut node)?;

@@ -37,12 +37,17 @@ pub CompUnit: Box<dyn Node> = {
                       Type::Array { dims, .. } => dims.iter().product::<u32>(),
                       _ => 0,
                     };
-                    var_array.init_values = None
+                    var_array.init_values = None;
 
                   } else if var_array.init_values.is_some() {
                     let init_vals = var_array.init_values.take().unwrap();
-                    // fold the initializer
-                    var_array.init_values = Some(init_vals.into_iter().map(|init_val| parser.fold(init_val)).collect());
+                    if init_vals.is_empty() {
+                      // handle empty init val
+                      var_array.init_values = None;
+                    } else {
+                      // fold the initializer
+                      var_array.init_values = Some(init_vals.into_iter().map(|init_val| parser.fold(init_val)).collect());
+                    }
                   }
                 } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut *decl) {
                   if var_decl.mutable {

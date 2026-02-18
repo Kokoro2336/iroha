@@ -346,9 +346,13 @@ impl Parser {
 fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Option<Vec<Box<dyn Node>>> {
     if !is::<ArrayInitVal>(&*node) {
         panic!("flatten can only process ArrayInitVal nodes");
+    } else if let Some(array_init_val) = cast::<ArrayInitVal>(&*node) {
+        if array_init_val.init_vals.is_empty() {
+            return None;
+        }
     }
     let new_vals: RefCell<Vec<Box<dyn Node>>> = RefCell::new(vec![]);
-    let mut has_non_zero = RefCell::new(false);
+    let has_non_zero = RefCell::new(false);
 
     {
         // flatten origin array

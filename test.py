@@ -50,7 +50,7 @@ def main():
     parser.add_argument('--trace', action='store_true', help='Enable trace logging')
     args = parser.parse_args()
 
-    if args.clean and not (args.test or args.test_all):
+    if args.clean and not (args.test or args.test_all or args.hidden):
         clean_directory("./test")
         print("Cleaned test directory.")
         sys.exit(0)
@@ -73,9 +73,12 @@ def main():
     functional_dir = os.path.join(base_dir, "functional")
     h_functional_dir = os.path.join(base_dir, "h_functional")
 
-    search_dirs = [functional_dir]
-    if args.hidden:
-        search_dirs.append(h_functional_dir)
+    if args.test_all and args.hidden:
+        search_dirs = [functional_dir, h_functional_dir]
+    elif args.hidden:
+        search_dirs = [h_functional_dir]
+    else:
+        search_dirs = [functional_dir]
 
     if args.test:
         # Find specific test file
@@ -100,7 +103,7 @@ def main():
         if not found:
             print(f"Test file {args.test} not found.")
             sys.exit(1)
-    elif args.test_all:
+    elif args.test_all or args.hidden:
         # Find all test files
         for d in search_dirs:
             test_files.extend(find_files(d, ".sy"))
@@ -117,7 +120,7 @@ def main():
     test_output_base = "./test"
 
     # clean test/ first
-    if args.test_all or args.clean:
+    if args.test_all or args.hidden or args.clean:
         clean_directory(test_output_base)
     passed = 0
     failed = 0

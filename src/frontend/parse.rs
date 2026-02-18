@@ -311,6 +311,7 @@ impl Parser {
                         },
                         // None: zeroinitializer
                         init_values: if let Some(init_val) = raw_decl.init_val {
+                            crate::debug::info!("Flattening array: {:?}", &*init_val);
                             flatten(aggr_typ.clone(), dims, init_val)
                         } else {
                             None
@@ -419,7 +420,7 @@ fn flatten(base_typ: Type, indices: Vec<u32>, node: Box<dyn Node>) -> Option<Vec
             filled_size
         });
 
-        info!("\nOrigial ArrayInitVal: {:?}", &node);
+        info!("\nOrigial ArrayInitVal: {:?}", &*node);
         rec((node, 0));
     }
 

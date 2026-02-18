@@ -84,7 +84,7 @@ fn main() -> Result<()> {
     let result = sysy::CompUnitParser::new()
         .parse(&mut parse::Parser::new(), &input_str)
         .unwrap();
-    // info!("\nParsed result: {:#?}", result);
+    info!("\nParsed result: {:#?}", result);
 
     info!("Start Semantic Analysis.");
     let result = {
@@ -114,7 +114,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    info!("Finish Emitting. IR generated: \n{:#?}", ir);
+    info!("Finish Emitting.");
 
     info!("Start Running Mem2Reg.");
     let ir = {

@@ -406,10 +406,10 @@ impl std::fmt::Display for Operand {
             Operand::Global(global_id) => write!(f, "@{}", global_id),
             Operand::Int(value) => write!(f, "{}", value),
             Operand::Float(value) => write!(f, "{}", value),
-            Operand::Index(index) => write!(f, "<index = {}>", index),
-            Operand::ParamId(param_id) => write!(f, "<param_idx = {}>", param_id),
+            Operand::Index(index) => write!(f, "{}", index),
+            Operand::ParamId(param_id) => write!(f, "{}", param_id),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
-            Operand::Reg(reg) => write!(f, "<reg = {}>", reg),
+            Operand::Reg(reg) => write!(f, "{}", reg),
         }
     }
 }

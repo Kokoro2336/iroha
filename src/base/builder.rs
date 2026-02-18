@@ -184,7 +184,6 @@ impl Builder {
 
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) -> Result<(), String> {
-        crate::debug::info!("Adding uses for instruction: {:?}", op);
         let dfg = acquire_dfg!(ctx, "Builder add_uses: ctx.dfg is None");
         let data = dfg.get(op.get_op_id()?)?;
 
@@ -286,7 +285,6 @@ impl Builder {
         ctx: &mut BuilderContext,
         op: Operand,
     ) -> Result<(), String> {
-        crate::debug::info!("Adding control flow for instruction: {:?}", op);
         let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
@@ -371,7 +369,6 @@ impl Builder {
 
     // create an instruction after current instruction
     pub fn create(&mut self, ctx: &mut BuilderContext, op: Op) -> Result<Operand, String> {
-        crate::debug::info!("Creating new instruction: {:?}", op);
         let is_inner_control_flow = op.is_inner_control_flow();
         let op_id = match op.data {
             OpData::GlobalAlloca(_) => {

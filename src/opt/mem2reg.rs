@@ -241,7 +241,6 @@ impl<'a> BuildDomTree<'a> {
     // FuncId -> DomTree
     pub fn export(&mut self) -> DomTree {
         let mut dom_tree = vec![vec![]; self.idom.len()];
-        crate::debug::info!("Immediate dominators: {:?}", self.idom);
         for idx in 0..self.idom.len() {
             let idom = self.idom[idx];
             if idom != idx {
@@ -336,11 +335,6 @@ impl<'a> BuildDomFrontier<'a> {
                 }
             }
         }
-        crate::debug::info!(
-            "Computed frontier for block {}: {:?}",
-            bb_id,
-            self.frontiers[func_id][bb_id]
-        );
         Ok(())
     }
 

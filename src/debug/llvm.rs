@@ -53,9 +53,9 @@ impl DumpLlvm for Operand {
                 Ok(Some(func)) => write!(s, "@{}", func.name)?,
                 _ => write!(s, "@func_{}", id)?,
             },
-            Operand::ParamId(id) => write!(s, "<param_idx = {}>", id)?,
-            Operand::Index(id) => write!(s, "<index = {}>", id)?,
-            Operand::Reg(reg) => write!(s, "<reg = {:?}>", reg)?,
+            Operand::ParamId(id) => write!(s, "{}", id)?,
+            Operand::Index(id) => write!(s, "{}", id)?,
+            Operand::Reg(reg) => write!(s, "{:?}", reg)?,
         }
         Ok(s)
     }
@@ -89,16 +89,10 @@ impl DumpLlvm for Op {
                     },
                 };
 
-                let elem_ty = if let Type::Pointer { base } = &ptr_ty {
-                    *(base.clone())
-                } else {
-                    Type::Int
-                };
-
                 write!(
                     s,
                     "getelementptr inbounds {}, {} {}",
-                    elem_ty.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?,
                     ptr_ty.dump_to_llvm(ctx)?,
                     base.dump_to_llvm(ctx)?
                 )?;
@@ -109,24 +103,10 @@ impl DumpLlvm for Op {
             }
             OpData::Ret { value } => {
                 if let Some(val) = value {
-                    let ty = match val {
-                        Operand::Value(id) => {
-                            let mut t = Type::Int;
-                            if let Some(f) = ctx.function {
-                                if let Ok(Some(op)) = f.dfg.get(*id) {
-                                    t = op.typ.clone();
-                                }
-                            }
-                            t
-                        }
-                        Operand::Int(_) => Type::Int,
-                        Operand::Float(_) => Type::Float,
-                        _ => Type::Int,
-                    };
                     write!(
                         s,
                         "ret {} {}",
-                        ty.dump_to_llvm(ctx)?,
+                        self.typ.dump_to_llvm(ctx)?,
                         val.dump_to_llvm(ctx)?
                     )?;
                 } else {
@@ -134,11 +114,7 @@ impl DumpLlvm for Op {
                 }
             }
             OpData::Alloca(_) => {
-                if let Type::Pointer { base } = &self.typ {
-                    write!(s, "alloca {}", base.dump_to_llvm(ctx)?)?;
-                } else {
-                    write!(s, "alloca <invalid_type>")?;
-                }
+                write!(s, "alloca {}", self.typ.dump_to_llvm(ctx)?)?;
             }
             OpData::GlobalAlloca(_) => {
                 let attrs: String = self
@@ -195,16 +171,11 @@ impl DumpLlvm for Op {
                         base: Box::new(Type::Int),
                     },
                 };
-                let ty = if let Type::Pointer { base } = &ptr_ty {
-                    *base.clone()
-                } else {
-                    Type::Int
-                };
 
                 write!(
                     s,
                     "load {}, {} {}",
-                    ty.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?,
                     ptr_ty.dump_to_llvm(ctx)?,
                     addr.dump_to_llvm(ctx)?
                 )?;
@@ -262,128 +233,149 @@ impl DumpLlvm for Op {
             }
             OpData::AddI { lhs, rhs } => write!(
                 s,
-                "add i32 {}, {}",
+                "add {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SubI { lhs, rhs } => write!(
                 s,
-                "sub i32 {}, {}",
+                "sub {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::MulI { lhs, rhs } => write!(
                 s,
-                "mul i32 {}, {}",
+                "mul {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::DivI { lhs, rhs } => write!(
                 s,
-                "sdiv i32 {}, {}",
+                "sdiv {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::ModI { lhs, rhs } => write!(
                 s,
-                "srem i32 {}, {}",
+                "srem {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::AddF { lhs, rhs } => write!(
                 s,
-                "fadd float {}, {}",
+                "fadd {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SubF { lhs, rhs } => write!(
                 s,
-                "fsub float {}, {}",
+                "fsub {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::MulF { lhs, rhs } => write!(
                 s,
-                "fmul float {}, {}",
+                "fmul {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::DivF { lhs, rhs } => write!(
                 s,
-                "fdiv float {}, {}",
+                "fdiv {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
 
             OpData::SEq { lhs, rhs } => write!(
                 s,
-                "icmp eq i32 {}, {}",
+                "icmp eq {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SNe { lhs, rhs } => write!(
                 s,
-                "icmp ne i32 {}, {}",
+                "icmp ne {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SLt { lhs, rhs } => write!(
                 s,
-                "icmp slt i32 {}, {}",
+                "icmp slt {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SGt { lhs, rhs } => write!(
                 s,
-                "icmp sgt i32 {}, {}",
+                "icmp sgt {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SLe { lhs, rhs } => write!(
                 s,
-                "icmp sle i32 {}, {}",
+                "icmp sle {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::SGe { lhs, rhs } => write!(
                 s,
-                "icmp sge i32 {}, {}",
+                "icmp sge {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::OEq { lhs, rhs } => write!(
                 s,
-                "fcmp oeq float {}, {}",
+                "fcmp oeq {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::ONe { lhs, rhs } => write!(
                 s,
-                "fcmp one float {}, {}",
+                "fcmp one {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::OLt { lhs, rhs } => write!(
                 s,
-                "fcmp olt float {}, {}",
+                "fcmp olt {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::OGt { lhs, rhs } => write!(
                 s,
-                "fcmp ogt float {}, {}",
+                "fcmp ogt {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::OLe { lhs, rhs } => write!(
                 s,
-                "fcmp ole float {}, {}",
+                "fcmp ole {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::OGe { lhs, rhs } => write!(
                 s,
-                "fcmp oge float {}, {}",
+                "fcmp oge {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
@@ -463,8 +455,7 @@ impl DumpLlvm for Op {
                     },
                     _ => "unknown".to_string(),
                 };
-                // This is still a simplification, as we don't have full function type info.
-                write!(s, "call {} @{}(", "i32", func_name)?;
+                write!(s, "call {} @{}(", self.typ.dump_to_llvm(ctx)?, func_name)?;
                 for (i, arg) in args.iter().enumerate() {
                     let arg_typ = match arg {
                         Operand::Value(id) => {
@@ -522,37 +513,43 @@ impl DumpLlvm for Op {
             }
             OpData::And { lhs, rhs } => write!(
                 s,
-                "and i32 {}, {}",
+                "and {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::Or { lhs, rhs } => write!(
                 s,
-                "or i32 {}, {}",
+                "or {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::Xor { lhs, rhs } => write!(
                 s,
-                "xor i32 {}, {}",
+                "xor {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::Shl { lhs, rhs } => write!(
                 s,
-                "shl i32 {}, {}",
+                "shl {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::Shr { lhs, rhs } => write!(
                 s,
-                "lshr i32 {}, {}",
+                "lshr {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,
             OpData::Sar { lhs, rhs } => write!(
                 s,
-                "ashr i32 {}, {}",
+                "ashr {} {}, {}",
+                self.typ.dump_to_llvm(ctx)?,
                 lhs.dump_to_llvm(ctx)?,
                 rhs.dump_to_llvm(ctx)?
             )?,

@@ -93,7 +93,6 @@ impl<'a> Emit<'a> {
 
     pub fn emit(&mut self, node: &Box<dyn Node>) -> Result<Option<Operand>, String> {
         if let Some(fn_decl) = cast::<FnDecl>(&**node) {
-            crate::debug::info!("Emitting function: {}", fn_decl.name);
             // create new function
             self.current_function = Some(self.program.funcs.add(Function::new(
                 fn_decl.name.clone(),
@@ -211,10 +210,48 @@ impl<'a> Emit<'a> {
                                 values: var_decl.init_value.as_ref().map(|init_value| {
                                     if let Some(lit) = cast::<Literal>(&**init_value) {
                                         vec![lit.clone()]
-                                    } else {
+                                    } else if let Some(un_op) = cast::<UnaryOp>(&**init_value) {
+                                        match &un_op.op {
+                                            ast::Op::Cast(from, to) => {
+                                                match (from, to) {
+                                                    (Type::Int, Type::Float) => {
+                                                        if let Some(lit) = cast::<Literal>(&*un_op.operand) {
+                                                            if let Literal::Int(i) = lit {
+                                                                vec![Literal::Float(*i as f32)]
+                                                            } else {
+                                                                panic!("Unsupported literal type in global VarDecl init_value unary op Cast. expected Int, got: {:?}", lit);
+                                                            }
+                                                        } else {
+                                                            panic!("Unsupported operand in global VarDecl init_value unary op Cast. expected Literal, got: {:?}", un_op.operand);
+                                                        }
+                                                    },
+                                                    (Type::Float, Type::Int) => {
+                                                        if let Some(lit) = cast::<Literal>(&*un_op.operand) {
+                                                            if let Literal::Float(f) = lit {
+                                                                vec![Literal::Int(*f as i32)]
+                                                            } else {
+                                                                panic!("Unsupported literal type in global VarDecl init_value unary op Cast. expected Float, got: {:?}", lit);
+                                                            }
+                                                        } else {
+                                                            panic!("Unsupported operand in global VarDecl init_value unary op Cast. expected Literal, got: {:?}", un_op.operand);
+                                                        }
+                                                    },
+                                                    _ => unreachable!(
+                                                        "Unsupported types in global VarDecl init_value unary op Cast. from: {:?}, to: {:?}",
+                                                        from, to
+                                                    ),
+                                                }
+                                            }
+                                            _ => unreachable!(
+                                                "Unsupported unary operator in global VarDecl init_value. un_op: {:?}",
+                                                un_op
+                                            ),
+                                        }
+                                    } 
+                                    else {
                                         panic!(
-                                            "Global VarDecl init_value is not Literal. Varname: {}",
-                                            var_decl.name
+                                            "Global VarDecl init_value is not Literal. Var: {:?}",
+                                            var_decl
                                         );
                                     }
                                 }),
@@ -247,10 +284,10 @@ impl<'a> Emit<'a> {
                 // if has init value, create store
                 if let Some(init_val) = &var_decl.init_value {
                     let mut op_id = self.emit(init_val)?;
-                    if is::<VarAccess>(&*init_val) || is::<ArrayAccess>(&*init_val) {
-                        let typ = if let Some(var_access) = cast::<VarAccess>(&*init_val) {
+                    if is::<VarAccess>(&**init_val) || is::<ArrayAccess>(&**init_val) {
+                        let typ = if let Some(var_access) = cast::<VarAccess>(&**init_val) {
                             var_access.typ.clone()
-                        } else if let Some(array_access) = cast::<ArrayAccess>(&*init_val) {
+                        } else if let Some(array_access) = cast::<ArrayAccess>(&**init_val) {
                             array_access.typ.clone()
                         } else {
                             unreachable!(
@@ -269,11 +306,6 @@ impl<'a> Emit<'a> {
                             ),
                         )?;
                         // replace op_id with loaded value
-                        crate::debug::info!(
-                            "Loading init value for variable {}: {:?}",
-                            var_decl.name,
-                            load_op
-                        );
                         op_id = Some(load_op);
                     }
                     // Re-acquire ctx after emit
@@ -680,10 +712,10 @@ impl<'a> Emit<'a> {
         } else if let Some(ret) = cast::<Return>(&**node) {
             if let Some(ret_val) = &ret.0 {
                 let mut op_id = self.emit(ret_val)?;
-                if is::<VarAccess>(&*ret_val) || is::<ArrayAccess>(&*ret_val) {
-                    let typ = if let Some(var_access) = cast::<VarAccess>(&*ret_val) {
+                if is::<VarAccess>(&**ret_val) || is::<ArrayAccess>(&**ret_val) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&**ret_val) {
                         var_access.typ.clone()
-                    } else if let Some(array_access) = cast::<ArrayAccess>(&*ret_val) {
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&**ret_val) {
                         array_access.typ.clone()
                     } else {
                         unreachable!(
@@ -704,12 +736,21 @@ impl<'a> Emit<'a> {
                     // replace op_id with loaded value
                     op_id = Some(load_op);
                 }
+                let ret_typ = {
+                    if let Some(current_func) = self.current_function {
+                        match &self.program.funcs[current_func].typ {
+                            Type::Function { return_type, .. } => *return_type.clone(),
+                            _ => return Err("Current function has non-function type".to_string()),
+                        }
+                    } else {
+                        return Err("Return statement outside function".to_string());
+                    }
+                };
                 let mut ctx = context_or_err!(self, "Return outside function");
-
                 self.builder.create(
                     &mut ctx,
                     ir::Op::new(
-                        Type::Void,
+                        ret_typ,
                         vec![],
                         OpData::Ret {
                             value: Some(op_id.unwrap()),
@@ -920,7 +961,6 @@ impl<'a> Emit<'a> {
                 ),
             )?;
         } else if let Some(assign_stmt) = cast::<Assign>(&**node) {
-            crate::debug::info!("Emitting assignment statement: {:?}", assign_stmt);
             // emit rhs first
             let mut rhs_op = self.emit(&assign_stmt.rhs)?;
             // Add necessary load if rhs is VarAccess or ArrayAccess, since the value stored in them is the address.
@@ -944,7 +984,6 @@ impl<'a> Emit<'a> {
                     ),
                 )?;
                 // replace rhs_op with loaded value
-                crate::debug::info!("Loading rhs for assignment: {:?}", load_rhs);
                 rhs_op = Some(load_rhs);
             }
             // emit lhs
@@ -979,7 +1018,25 @@ impl<'a> Emit<'a> {
             // emit indices first
             let mut index_ops = vec![];
             for index in &array_access.indices {
-                let op = self.emit(index)?;
+                let mut op = self.emit(index)?;
+                if is::<VarAccess>(&**index) || is::<ArrayAccess>(&**index) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&**index) {
+                        var_access.typ.clone()
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&**index) {
+                        array_access.typ.clone()
+                    } else {
+                        unreachable!(
+                            "The index is guaranteed to be either VarAccess or ArrayAccess"
+                        );
+                    };
+                    let mut ctx = context_or_err!(self, "Array index load outside function");
+                    let load_op = self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(typ, vec![], OpData::Load { addr: op.unwrap() }),
+                    )?;
+                    // replace op with loaded value
+                    op = Some(load_op);
+                }
                 index_ops.push(op.unwrap());
             }
 
@@ -1002,8 +1059,8 @@ impl<'a> Emit<'a> {
                         vec![],
                         OpData::GEP {
                             base: global_id.clone(),
-                            indices: index_ops
-                                .splice(0..0, std::iter::once(Operand::Int(0)))
+                            indices: std::iter::once(Operand::Index(0))
+                                .chain(index_ops.into_iter())
                                 .collect(),
                         },
                     ),
@@ -1021,8 +1078,8 @@ impl<'a> Emit<'a> {
                         vec![],
                         OpData::GEP {
                             base: global_id.clone(),
-                            indices: index_ops
-                                .splice(0..0, std::iter::once(Operand::Int(0)))
+                            indices: std::iter::once(Operand::Index(0))
+                                .chain(index_ops.into_iter())
                                 .collect(),
                         },
                     ),
@@ -1040,8 +1097,8 @@ impl<'a> Emit<'a> {
                         vec![],
                         OpData::GEP {
                             base: ptr_addr.clone(),
-                            indices: index_ops
-                                .splice(0..0, std::iter::once(Operand::Int(0)))
+                            indices: std::iter::once(Operand::Index(0))
+                                .chain(index_ops.into_iter())
                                 .collect(),
                         },
                     ),
@@ -1053,10 +1110,10 @@ impl<'a> Emit<'a> {
             let mut arg_ops: Vec<Operand> = vec![];
             for arg in &call.args {
                 let mut arg_op = self.emit(arg)?;
-                if is::<VarAccess>(&*arg) || is::<ArrayAccess>(&*arg) {
-                    let typ = if let Some(var_access) = cast::<VarAccess>(&*arg) {
+                if is::<VarAccess>(&**arg) || is::<ArrayAccess>(&**arg) {
+                    let typ = if let Some(var_access) = cast::<VarAccess>(&**arg) {
                         var_access.typ.clone()
-                    } else if let Some(array_access) = cast::<ArrayAccess>(&*arg) {
+                    } else if let Some(array_access) = cast::<ArrayAccess>(&**arg) {
                         array_access.typ.clone()
                     } else {
                         unreachable!("The arg is guaranteed to be either VarAccess or ArrayAccess");
@@ -1093,7 +1150,6 @@ impl<'a> Emit<'a> {
             )?;
             return Ok(Some(call_op));
         } else if let Some(binary_op) = cast::<BinaryOp>(&**node) {
-            crate::debug::info!("Emitting binary operation: {:?}", binary_op);
             // And & Or need short-circuit evaluation, so we handle them separately.
             match &binary_op.op {
                 ast::Op::And => {

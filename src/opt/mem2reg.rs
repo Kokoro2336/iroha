@@ -1,3 +1,7 @@
+/**
+ * SSA construction & Mem2Reg based on Cytron et al.'s algorithm.
+ * Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
+ */
 use crate::base::ir::{Attr, Op, OpData, OpType, Operand, Program};
 use crate::base::{Builder, BuilderContext, BuilderGuard, Pass, Type};
 use crate::debug::info;
@@ -17,7 +21,7 @@ macro_rules! acquire_cur_func_id {
 
 /**
  * Building dominator tree based on Lengauer-Tarjan algorithm.
- * Reference: https://dl.acm.org/toc/toplas/1979/1/1
+ * Reference: https://dl.acm.org/doi/10.1145/357062.357071
  */
 pub type DomTree = Vec<Vec<usize>>;
 pub struct BuildDomTree<'a> {
@@ -216,7 +220,6 @@ impl<'a> BuildDomTree<'a> {
                 self.bucket[father].clear();
             }
 
-            // Refine idom
             // Refine idom
             info!("Dominator tree computed. Start refining immediate dominators.");
             for i in 0..self.rev.len() {

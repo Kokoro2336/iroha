@@ -137,7 +137,7 @@ impl<'a> Emit<'a> {
                             } else {
                                 vec![Attr::Name(arg_name.clone())]
                             },
-                            OpData::Alloca(arg_typ.size_in_bytes()),
+                            OpData::Alloca(arg_typ.clone()),
                         ),
                     )?;
                     self.builder.create(
@@ -275,7 +275,7 @@ impl<'a> Emit<'a> {
                                 base: Box::new(var_decl.typ.clone()),
                             },
                             vec![Attr::Name(var_decl.name.clone()), Attr::Promotion],
-                            OpData::Alloca(var_decl.typ.size_in_bytes()),
+                            OpData::Alloca(var_decl.typ.clone()),
                         ),
                     )?
                 };
@@ -375,7 +375,7 @@ impl<'a> Emit<'a> {
                                 base: Box::new(var_array.typ.clone()),
                             },
                             vec![Attr::Name(var_array.name.clone())],
-                            OpData::Alloca(total_size),
+                            OpData::Alloca(var_array.typ.clone()),
                         ),
                     )?
                 };
@@ -454,7 +454,7 @@ impl<'a> Emit<'a> {
                                     base: Box::new(Type::Int),
                                 },
                                 vec![Attr::Promotion],
-                                OpData::Alloca(Type::Int.size_in_bytes()),
+                                OpData::Alloca(Type::Int),
                             ),
                         )?;
                         // store chunk_start to loop_var
@@ -476,7 +476,7 @@ impl<'a> Emit<'a> {
                                     base: Box::new(Type::Int),
                                 },
                                 vec![Attr::Promotion],
-                                OpData::Alloca(Type::Int.size_in_bytes()),
+                                OpData::Alloca(Type::Int),
                             ),
                         )?;
                         // store chunk_end to loop_var
@@ -736,21 +736,11 @@ impl<'a> Emit<'a> {
                     // replace op_id with loaded value
                     op_id = Some(load_op);
                 }
-                let ret_typ = {
-                    if let Some(current_func) = self.current_function {
-                        match &self.program.funcs[current_func].typ {
-                            Type::Function { return_type, .. } => *return_type.clone(),
-                            _ => return Err("Current function has non-function type".to_string()),
-                        }
-                    } else {
-                        return Err("Return statement outside function".to_string());
-                    }
-                };
                 let mut ctx = context_or_err!(self, "Return outside function");
                 self.builder.create(
                     &mut ctx,
                     ir::Op::new(
-                        ret_typ,
+                        Type::Void,
                         vec![],
                         OpData::Ret {
                             value: Some(op_id.unwrap()),
@@ -1163,7 +1153,7 @@ impl<'a> Emit<'a> {
                                     base: Box::new(Type::Int),
                                 },
                                 vec![Attr::Promotion],
-                                OpData::Alloca(Type::Int.size_in_bytes()),
+                                OpData::Alloca(Type::Int),
                             ),
                         )?;
                         // store 0 first
@@ -1261,7 +1251,7 @@ impl<'a> Emit<'a> {
                                     base: Box::new(Type::Int),
                                 },
                                 vec![Attr::Promotion],
-                                OpData::Alloca(Type::Int.size_in_bytes()),
+                                OpData::Alloca(Type::Int),
                             ),
                         )?;
                         // store 1 first

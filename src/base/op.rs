@@ -175,7 +175,7 @@ pub enum OpData {
     Phi {
         incoming: Vec<(Operand, Operand)>, // Vec<(value, bb_id)>
     },
-    Alloca(u32),
+    Alloca(Type),
 
     /// Control flow
     Call {

@@ -327,7 +327,7 @@ impl Arena<Function> for IndexedArena<Function> {
 impl IndexedArena<Function> {
     pub fn add(&mut self, func: Function) -> Result<usize, String> {
         let name = func.name.clone();
-        let func_id = self.alloc(func)?;
+        let func_id = self.alloc(func);
         self.add_name(name, func_id)?;
         Ok(func_id)
     }

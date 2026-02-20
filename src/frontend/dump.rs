@@ -1,650 +1,194 @@
-use crate::base::Type;
 use crate::debug::graph::{
-    self, attr, id, Attribute, Edge, EdgeTy, GraphNode, Id, NodeId, Stmt, Vertex,
+    self, attr, id, Attribute, Edge, EdgeTy, GraphNode, Id, NodeId as GraphNodeId, Stmt, Vertex,
 };
-use crate::frontend::ast::*;
+use crate::frontend::ast::{Literal, Node, Op, AST};
 
-/* GraphNode implementations for AST nodes */
-impl GraphNode for FnDecl {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
+fn node_name(node_id: usize) -> String {
+    format!("\"n{}\"", node_id)
+}
+
+fn node_label(node: &Node) -> String {
+    match node {
+        Node::FnDecl {
+            name, params, typ, ..
+        } => format!(
+            "FnDecl: {}() | Params: [{}] | Type: {}",
+            name,
+            params
+                .iter()
+                .map(|(n, t)| format!("{} {}", t, n))
+                .collect::<Vec<_>>()
+                .join("; "),
+            typ
+        ),
+        Node::Break => "Break".to_string(),
+        Node::Continue => "Continue".to_string(),
+        Node::Return(_) => "Return".to_string(),
+        Node::Block { .. } => "Block".to_string(),
+        Node::Assign { .. } => "Assign".to_string(),
+        Node::If { .. } => "If".to_string(),
+        Node::While { .. } => "While".to_string(),
+        Node::BinaryOp { op, typ, .. } => format!("BinaryOp: {:?} | {}", op, typ),
+        Node::UnaryOp { op, typ, .. } => format!("UnaryOp: {:?} | {}", op, typ),
+        Node::Call { func_name, typ, .. } => format!("Call: {}() | {}", func_name, typ),
+        Node::VarDecl {
+            name,
+            typ,
+            mutable,
+            is_global,
+            ..
+        } => format!(
+            "VarDecl: {} | {} | mutable: {} | global: {}",
+            name, typ, mutable, is_global
+        ),
+        Node::VarAccess { name, typ } => format!("VarAccess: {} | {}", name, typ),
+        Node::ConstArray {
+            name,
+            typ,
+            init_values,
+        } => {
+            if init_values.is_some() {
+                format!("ConstArray: {} | {}", name, typ)
+            } else {
+                format!("ConstArray: {} | {} | zeroinitializer", name, typ)
+            }
         }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", {
-                    format!(
-                        "\"FnDecl: {}() | Params: [{}] | Return Type: {:?}\"",
-                        self.name,
-                        self.params
-                            .iter()
-                            .map(|x| format!("{} {}", x.1, x.0))
-                            .collect::<Vec<String>>()
-                            .join("; "),
-                        match self.typ {
-                            Type::Function {
-                                ref return_type, ..
-                            } => return_type.as_ref(),
-                            _ => &Type::Void,
-                        }
-                    )
-                }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        let to = (&*self.body as *const dyn Node) as *const () as usize;
-        if visited.contains(&to) {
-            return;
+        Node::VarArray {
+            name,
+            typ,
+            is_global,
+            init_values,
+        } => {
+            if init_values.is_some() {
+                format!("VarArray: {} | {} | global: {}", name, typ, is_global)
+            } else {
+                format!(
+                    "VarArray: {} | {} | global: {} | zeroinitializer",
+                    name, typ, is_global
+                )
+            }
         }
-
-        stmts.push(Stmt::Edge(Edge {
-            ty: EdgeTy::Pair(
-                Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to)), None)),
-            ),
-            attributes: vec![],
-        }));
-
-        self.body.visit(stmts, visited);
+        Node::ArrayAccess { name, typ, .. } => format!("ArrayAccess: {} | {}", name, typ),
+        Node::Empty => "Empty".to_string(),
+        Node::Literal(Literal::Int(v)) => format!("Literal: Int({})", v),
+        Node::Literal(Literal::Float(v)) => format!("Literal: Float({})", v),
+        Node::Literal(Literal::String(v)) => format!("Literal: String({})", v),
+        Node::DeclAggr { .. } => "DeclAggr".to_string(),
+        Node::RawDecl { typ, mutable, .. } => format!("RawDecl: {} | mutable: {}", typ, mutable),
+        Node::RawDef {
+            ident,
+            const_exps,
+            init_val,
+        } => format!(
+            "RawDef: {} | dims: {} | has_init: {}",
+            ident,
+            const_exps.len(),
+            init_val.is_some()
+        ),
+        Node::ArrayInitVal { init_vals } => format!("ArrayInitVal: {} vals", init_vals.len()),
     }
 }
 
-impl GraphNode for Break {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"Break\""), attr!("shape", "diamond")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
+fn node_shape(node: &Node) -> &'static str {
+    match node {
+        Node::If { .. } | Node::While { .. } => "diamond",
+        Node::Break | Node::Continue => "diamond",
+        Node::VarAccess { .. } | Node::ArrayAccess { .. } => "ellipse",
+        Node::Literal(_) | Node::Return(_) => "oval",
+        _ => "box",
     }
 }
 
-impl GraphNode for Continue {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
+fn children(node: &Node) -> Vec<usize> {
+    match node {
+        Node::FnDecl { body, .. } => vec![*body],
+        Node::Return(expr) => expr.iter().copied().collect(),
+        Node::Block { statements } => statements.clone(),
+        Node::Assign { lhs, rhs } => vec![*lhs, *rhs],
+        Node::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            let mut out = vec![*condition, *then_block];
+            if let Some(else_id) = else_block {
+                out.push(*else_id);
+            }
+            out
         }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"Continue\""), attr!("shape", "diamond")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
+        Node::While { condition, body } => vec![*condition, *body],
+        Node::BinaryOp { lhs, rhs, op, .. } => {
+            if matches!(op, Op::And | Op::Or) {
+                vec![*lhs, *rhs]
+            } else {
+                vec![*lhs, *rhs]
+            }
+        }
+        Node::UnaryOp { operand, .. } => vec![*operand],
+        Node::Call { args, .. } => args.clone(),
+        Node::VarDecl { init_value, .. } => init_value.iter().copied().collect(),
+        Node::ConstArray { init_values, .. } | Node::VarArray { init_values, .. } => {
+            init_values.clone().unwrap_or_default()
+        }
+        Node::ArrayAccess { indices, .. } => indices.clone(),
+        Node::DeclAggr { decls } => decls.clone(),
+        Node::RawDef {
+            const_exps,
+            init_val,
+            ..
+        } => {
+            let mut out = const_exps.clone();
+            if let Some(init_id) = init_val {
+                out.push(*init_id);
+            }
+            out
+        }
+        Node::ArrayInitVal { init_vals } => init_vals.clone(),
+        _ => vec![],
     }
 }
 
-impl GraphNode for Return {
+impl GraphNode for AST {
     fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"Return\""), attr!("shape", "oval")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        if let Some(val) = &self.0 {
-            let to = (&**val as *const dyn Node) as *const () as usize;
-            if visited.contains(&to) {
+        fn dfs(
+            ast: &AST,
+            node_id: usize,
+            stmts: &mut Vec<Stmt>,
+            visited: &mut std::collections::HashSet<usize>,
+        ) {
+            if !visited.insert(node_id) {
                 return;
             }
 
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to)), None)),
-                ),
-                attributes: vec![],
-            }));
+            let node = &ast[node_id];
+            let from = node_name(node_id);
 
-            val.visit(stmts, visited);
-        }
-    }
-}
+            stmts.push(Stmt::Node(graph::Node::new(
+                graph::NodeId(Id::Plain(from.clone()), None),
+                vec![
+                    attr!("label", { format!("\"{}\"", node_label(node)) }),
+                    attr!("shape", { node_shape(node) }),
+                ],
+            )));
 
-impl GraphNode for Block {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"Block\""), attr!("shape", "box")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        for stmt in &self.statements {
-            let to = (&**stmt as *const dyn Node) as *const () as usize;
-            if visited.contains(&to) {
-                continue;
-            }
-
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to)), None)),
-                ),
-                attributes: vec![],
-            }));
-
-            stmt.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for Assign {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"Assign\""), attr!("shape", "box")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        let to_lhs = (&*self.lhs as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_lhs) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_lhs)), None)),
-                ),
-                attributes: vec![],
-            }));
-
-            self.lhs.visit(stmts, visited);
-        }
-
-        let to_rhs = (&*self.rhs as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_rhs) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_rhs)), None)),
-                ),
-                attributes: vec![],
-            }));
-
-            self.rhs.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for If {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"If\""), attr!("shape", "diamond")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        let to_cond = (&*self.condition as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_cond) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_cond)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.condition.visit(stmts, visited);
-        }
-
-        let to_then = (&*self.then_block as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_then) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_then)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.then_block.visit(stmts, visited);
-        }
-
-        if let Some(else_block) = &self.else_block {
-            let to_else = (&**else_block as *const dyn Node) as *const () as usize;
-            if !visited.contains(&to_else) {
-                stmts.push(Stmt::Edge(Edge {
-                    ty: EdgeTy::Pair(
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_else)), None)),
-                    ),
-                    attributes: vec![],
-                }));
-                else_block.visit(stmts, visited);
-            }
-        }
-    }
-}
-
-impl GraphNode for While {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"While\""), attr!("shape", "diamond")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        let to_cond = (&*self.condition as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_cond) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_cond)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.condition.visit(stmts, visited);
-        }
-
-        let to_body = (&*self.body as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_body) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_body)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.body.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for BinaryOp {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", { format!("\"BinaryOp: {:?}\"", self.op) }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        let to_lhs = (&*self.lhs as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_lhs) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_lhs)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.lhs.visit(stmts, visited);
-        }
-
-        let to_rhs = (&*self.rhs as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_rhs) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_rhs)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.rhs.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for UnaryOp {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", { format!("\"UnaryOp: {:?}\"", self.op) }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        let to_operand = (&*self.operand as *const dyn Node) as *const () as usize;
-        if !visited.contains(&to_operand) {
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_operand)), None)),
-                ),
-                attributes: vec![],
-            }));
-            self.operand.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for Call {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", { format!("\"Call: {}()\"", self.func_name) }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        for arg in &self.args {
-            let to_arg = (&**arg as *const dyn Node) as *const () as usize;
-            if visited.contains(&to_arg) {
-                continue;
-            }
-
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_arg)), None)),
-                ),
-                attributes: vec![],
-            }));
-
-            arg.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for VarDecl {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", {
-                    format!(
-                        "\"VarDecl: {} | Type: {} | Mutable: {}\"",
-                        self.name, self.typ, self.mutable
-                    )
-                }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        if let Some(init_value) = &self.init_value {
-            let to_init = (&**init_value as *const dyn Node) as *const () as usize;
-            if !visited.contains(&to_init) {
-                stmts.push(Stmt::Edge(Edge {
-                    ty: EdgeTy::Pair(
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_init)), None)),
-                    ),
-                    attributes: vec![],
-                }));
-                init_value.visit(stmts, visited);
-            }
-        }
-    }
-}
-
-impl GraphNode for VarAccess {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", {
-                    format!("\"VarAccess: {} | Type: {}\"", self.name, self.typ)
-                }),
-                attr!("shape", "ellipse"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-    }
-}
-
-impl GraphNode for ConstArray {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", {
-                    if self.init_values.is_some() {
-                        format!("\"ConstArray: {} | Type: {}\"", self.name, self.typ)
-                    } else {
-                        format!(
-                            "\"ConstArray: {} | Type: {} | zeroinitializer\"",
-                            self.name, self.typ
-                        )
-                    }
-                }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        if let Some(init_values) = &self.init_values {
-            for init_value in init_values {
-                let to_init = (&**init_value as *const dyn Node) as *const () as usize;
-                if visited.contains(&to_init) {
+            for child in children(node) {
+                if child >= ast.storage.len() {
                     continue;
                 }
-
+                let to = node_name(child);
                 stmts.push(Stmt::Edge(Edge {
                     ty: EdgeTy::Pair(
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_init)), None)),
+                        Vertex::N(GraphNodeId(Id::Plain(from.clone()), None)),
+                        Vertex::N(GraphNodeId(Id::Plain(to.clone()), None)),
                     ),
                     attributes: vec![],
                 }));
-
-                init_value.visit(stmts, visited);
+                dfs(ast, child, stmts, visited);
             }
         }
-    }
-}
 
-impl GraphNode for VarArray {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", {
-                    if self.init_values.is_some() {
-                        format!(
-                            "\"VarArray: {} | Type: {} | is_global: {}\"",
-                            self.name, self.typ, self.is_global
-                        )
-                    } else {
-                        format!(
-                            "\"VarArray: {} | Type: {} | is_global: {} | zeroinitializer\"",
-                            self.name, self.typ, self.is_global
-                        )
-                    }
-                }),
-                attr!("shape", "box"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        if let Some(init_values) = &self.init_values {
-            for init_value in init_values {
-                let to_init = (&**init_value as *const dyn Node) as *const () as usize;
-                if visited.contains(&to_init) {
-                    continue;
-                }
-
-                stmts.push(Stmt::Edge(Edge {
-                    ty: EdgeTy::Pair(
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                        Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_init)), None)),
-                    ),
-                    attributes: vec![],
-                }));
-
-                init_value.visit(stmts, visited);
-            }
+        if let Some(entry) = self.entry {
+            dfs(self, entry, stmts, visited);
         }
     }
 }
-
-impl GraphNode for ArrayAccess {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![
-                attr!("label", {
-                    format!("\"ArrayAccess: {} | Type: {}\"", self.name, self.typ)
-                }),
-                attr!("shape", "ellipse"),
-            ],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-
-        for index in &self.indices {
-            let to_index = (&**index as *const dyn Node) as *const () as usize;
-            if visited.contains(&to_index) {
-                continue;
-            }
-
-            stmts.push(Stmt::Edge(Edge {
-                ty: EdgeTy::Pair(
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", ptr)), None)),
-                    Vertex::N(NodeId(Id::Plain(format!("\"{}\"", to_index)), None)),
-                ),
-                attributes: vec![],
-            }));
-
-            index.visit(stmts, visited);
-        }
-    }
-}
-
-impl GraphNode for Empty {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", "\"Empty\""), attr!("shape", "box")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-    }
-}
-
-impl GraphNode for Literal {
-    fn visit(&self, stmts: &mut Vec<Stmt>, visited: &mut std::collections::HashSet<usize>) {
-        let ptr = self as *const _ as usize;
-        if visited.contains(&ptr) {
-            return;
-        }
-
-        let label = match self {
-            Literal::Int(val) => format!("\"Literal: Int({})\"", val),
-            Literal::Float(val) => format!("\"Literal: Float({})\"", val),
-            Literal::String(val) => format!("\"Literal: String({})\"", val),
-        };
-
-        stmts.push(Stmt::Node(graph::Node::new(
-            graph::NodeId(Id::Plain(format!("\"{}\"", ptr)), None),
-            vec![attr!("label", label), attr!("shape", "oval")],
-        )));
-        // Add to visited
-        visited.insert(ptr);
-    }
-}
-
-macro_rules! impl_graph_node_for_raw_node {
-    ($($t:ty),*) => {
-        $(
-            impl GraphNode for $t {
-                fn visit(
-                    &self,
-                    _stmts: &mut Vec<Stmt>,
-                    _visited: &mut std::collections::HashSet<usize>,
-                ) {
-                    panic!(concat!(stringify!($t), " should not be visited in graph dump"));
-                }
-            }
-        )*
-    };
-}
-
-impl_graph_node_for_raw_node!(DeclAggr, RawDecl, RawDef, ArrayInitVal);

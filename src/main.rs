@@ -9,14 +9,13 @@ mod debug;
 mod frontend;
 mod opt;
 mod utils;
-use crate::base::{Builder, Pass};
+use crate::base::Pass;
 use crate::debug::setup;
-use crate::frontend::ast::Node;
 use crate::frontend::parse;
 use crate::frontend::*;
 use crate::opt::*;
+use crate::utils::arena::Arena;
 
-use debug::graph::dump_graph;
 use debug::info;
 use debug::DumpLlvmPass;
 
@@ -81,14 +80,26 @@ fn main() -> Result<()> {
     let input_str = read_to_string(&input_path)?;
 
     // 调用 lalrpop 生成的 parser 解析输入文件
-    let result = sysy::CompUnitParser::new()
-        .parse(&mut parse::Parser::new(), &input_str)
-        .unwrap();
+    let result = {
+        let mut parser = parse::Parser::new();
+        let root_id = sysy::CompUnitParser::new()
+            .parse(&mut parser, &input_str)
+            .unwrap();
+        // set entry point to the root of the AST
+        if let Err(e) = parser.ast.set_entry(root_id) {
+            panic!("Failed to set AST entry: {}", e);
+        }
+        // Clean up the AST.
+        if let Err(e) = parser.ast.gc() {
+            panic!("Failed to clean up AST: {}", e);
+        }
+        parser.take()
+    };
     info!("\nParsed result: {:#?}", result);
 
     info!("Start Semantic Analysis.");
     let result = {
-        let mut pass: Box<dyn Pass<Box<dyn Node>>> = Box::new(Semantic::new(result));
+        let mut pass = Semantic::new(result);
         match pass.run() {
             Ok(res) => res,
             Err(e) => {
@@ -101,12 +112,12 @@ fn main() -> Result<()> {
     // Try to dump graph to log file
     if cli.graph {
         info!("Dumping AST graph.");
-        dump_graph(true, &*result, "ast");
+        info!("Skip AST graph dump: GraphNode is not implemented for enum AST node yet.");
     }
 
     info!("Start Emitting.");
     let ir = {
-        let mut emitter = Emit::new(Builder::new(), &result);
+        let mut emitter = Emit::new(result);
         match emitter.run() {
             Ok(res) => res,
             Err(e) => {

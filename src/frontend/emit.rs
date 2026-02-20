@@ -185,7 +185,7 @@ impl Emit {
 
         match &self.ast[node_id] {
             Node::DeclAggr { decls } => {
-                let ids: Vec<NodeId> = decls.iter().copied().collect();
+                let ids: Vec<NodeId> = decls.clone();
                 for id in ids {
                     self.emit(id)?;
                 }
@@ -274,7 +274,7 @@ impl Emit {
                 Ok(None)
             }
             Node::Block { statements } => {
-                let ids: Vec<NodeId> = statements.iter().copied().collect();
+                let ids: Vec<NodeId> = statements.clone();
                 self.syms.enter_scope();
                 for stmt in ids {
                     self.emit(stmt)?;
@@ -729,7 +729,7 @@ impl Emit {
             }
             Node::ArrayAccess { name, indices, typ } => {
                 let name = name.clone();
-                let indices: Vec<NodeId> = indices.iter().copied().collect();
+                let indices: Vec<NodeId> = indices.clone();
                 let typ = typ.clone();
 
                 let mut index_ops = vec![];
@@ -801,7 +801,7 @@ impl Emit {
             } => {
                 let typ = typ.clone();
                 let func_name = func_name.clone();
-                let args: Vec<NodeId> = args.iter().copied().collect();
+                let args: Vec<NodeId> = args.clone();
 
                 let mut arg_ops = vec![];
                 for arg in args {

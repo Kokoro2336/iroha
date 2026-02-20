@@ -90,12 +90,14 @@ fn main() -> Result<()> {
             panic!("Failed to set AST entry: {}", e);
         }
         // Clean up the AST.
+        info!("Start collecting garbage in AST. Total slot num: {}", parser.ast.storage.len());
         if let Err(e) = parser.ast.gc() {
             panic!("Failed to clean up AST: {}", e);
         }
+        info!("Finish collecting garbage in AST. Slot num after gc: {}", parser.ast.storage.len());
         parser.take()
     };
-    info!("\nParsed result: {:#?}", result);
+    // info!("\nParsed result: {:#?}", result);
 
     info!("Start Semantic Analysis.");
     let result = {

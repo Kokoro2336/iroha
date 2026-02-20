@@ -18,6 +18,39 @@ pub struct DumpContext<'a> {
     pub function: Option<&'a Function>,
 }
 
+fn op_name_attr(op: &Op) -> Option<&str> {
+    op.attrs.iter().find_map(|attr| match attr {
+        Attr::Name(name) => Some(name.as_str()),
+        _ => None,
+    })
+}
+
+fn value_operand_name(id: usize, ctx: &DumpContext) -> String {
+    if let Some(func) = ctx.function {
+        if let Ok(Some(op)) = func.dfg.get(id) {
+            if let Some(name) = op_name_attr(op) {
+                if matches!(op.data, OpData::Alloca(_)) {
+                    return format!("@{}", name);
+                }
+                return format!("%{}", name);
+            }
+            if matches!(op.data, OpData::Alloca(_)) {
+                return format!("@{}", id);
+            }
+        }
+    }
+    format!("%{}", id)
+}
+
+fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
+    if let Ok(Some(op)) = ctx.program.globals.get(id) {
+        if let Some(name) = op_name_attr(op) {
+            return format!("@{}", name);
+        }
+    }
+    format!("@{}", id)
+}
+
 impl DumpLlvm for Type {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
@@ -44,8 +77,8 @@ impl DumpLlvm for Operand {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
-            Operand::Value(id) => write!(s, "%{}", id)?,
-            Operand::Global(id) => write!(s, "@{}", id)?,
+            Operand::Value(id) => write!(s, "{}", value_operand_name(*id, ctx))?,
+            Operand::Global(id) => write!(s, "{}", global_operand_name(*id, ctx))?,
             Operand::Int(val) => write!(s, "{}", val)?,
             Operand::Float(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
@@ -103,18 +136,41 @@ impl DumpLlvm for Op {
             }
             OpData::Ret { value } => {
                 if let Some(val) = value {
+                    let typ = match val {
+                        Operand::Value(id) => {
+                            let mut t = Type::Int;
+                            if let Some(f) = ctx.function {
+                                if let Ok(Some(op)) = f.dfg.get(*id) {
+                                    t = op.typ.clone();
+                                }
+                            }
+                            t
+                        }
+                        Operand::Global(id) => match ctx.program.globals.get(*id) {
+                            Ok(Some(op)) => op.typ.clone(),
+                            _ => Type::Int,
+                        },
+                        Operand::Int(_) => Type::Int,
+                        Operand::Float(_) => Type::Float,
+                        _ => Type::Int,
+                    };
                     write!(
                         s,
                         "ret {} {}",
-                        self.typ.dump_to_llvm(ctx)?,
+                        typ.dump_to_llvm(ctx)?,
                         val.dump_to_llvm(ctx)?
                     )?;
                 } else {
                     write!(s, "ret void")?;
                 }
             }
-            OpData::Alloca(_) => {
-                write!(s, "alloca {}", self.typ.dump_to_llvm(ctx)?)?;
+            OpData::Alloca(typ) => {
+                write!(
+                    s,
+                    "alloca {}, align {}",
+                    typ.dump_to_llvm(ctx)?,
+                    typ.size_in_bytes()
+                )?;
             }
             OpData::GlobalAlloca(_) => {
                 let attrs: String = self
@@ -574,7 +630,12 @@ impl DumpLlvm for BasicBlock {
                 if inst.typ == Type::Void {
                     writeln!(s, "  {}", inst.dump_to_llvm(ctx)?)?;
                 } else {
-                    writeln!(s, "  %{} = {}", inst_id, inst.dump_to_llvm(ctx)?)?;
+                    writeln!(
+                        s,
+                        "  {} = {}",
+                        value_operand_name(inst_id, ctx),
+                        inst.dump_to_llvm(ctx)?
+                    )?;
                 }
             }
         }

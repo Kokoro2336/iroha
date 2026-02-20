@@ -57,14 +57,14 @@ where
         }
     }
 
-    pub fn alloc(&mut self, data: T) -> Result<usize, String> {
+    pub fn alloc(&mut self, data: T) -> usize {
         let index = self.storage.len();
         // if it's the first element, set it as head.
         if self.entry.is_none() {
             self.entry = Some(index);
         }
         self.storage.push(ArenaItem::Data(data));
-        Ok(index)
+        index
     }
 
     pub fn add_name(&mut self, name: String, idx: usize) -> Result<(), String> {
@@ -146,6 +146,24 @@ where
                 _ => None,
             })
             .collect()
+    }
+
+    // Replace the data at idx with new_item.
+    pub fn replace(&mut self, idx: usize, new_item: T) -> Result<(), String> {
+        if idx >= self.storage.len() {
+            return Err(format!("IndexedArena replace: index {} out of bounds", idx));
+        }
+        if matches!(
+            self.storage.get(idx),
+            Some(ArenaItem::None) | Some(ArenaItem::NewIndex(_))
+        ) {
+            return Err(format!(
+                "IndexedArena replace: index {} points to None or NewIndex",
+                idx
+            ));
+        }
+        self.storage[idx] = ArenaItem::Data(new_item);
+        Ok(())
     }
 }
 

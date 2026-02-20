@@ -1,83 +1,87 @@
 use crate::base::Type;
 use crate::frontend::ast::*;
 use crate::frontend::parse::*;
-use crate::utils::{is, cast_deref, cast_mut, cast};
 use std::ffi::CString;
 
-// lalrpop 里的约定
 grammar(parser: &mut Parser);
 
-// 约束 lexer 的行为
 match {
-  // 跳过空白符和注释
   r"\s*" => {},
   r"//[^\n\r]*[\n\r]*" => {},
   r"/\*([^*]|\*+[^/*])*\*+/" => {},
-  // 剩下的情况采用默认方式处理
   _
 }
 
-// 定义 CompUnit, 其返回值类型为 String
-// parser 在解析完成后的行为是返回 FuncDef 的值
-pub CompUnit: Box<dyn Node> = {
+pub CompUnit: NodeId = {
   <enter_scope: EnterScope> <global_objs: (GlobalObj)*> <exit_scope: ExitScope> => {
-    Box::new(
-      Block {
-        statements: {
-          let mut vec = vec![];
-          for obj in global_objs {
-            if is::<DeclAggr>(&*obj) {
-              let decl_aggr = cast_deref::<DeclAggr>(obj).unwrap();
-              for mut decl in decl_aggr.decls.into_iter() {
-                // overwrite is_global field
-                if let Some(var_array) = cast_mut::<VarArray>(&mut *decl) {
-                  if var_array.init_values.is_none() {
-                    // if no initializer, set to zero
-                    let len = match &var_array.typ {
-                      Type::Array { dims, .. } => dims.iter().product::<u32>(),
-                      _ => 0,
-                    };
-                    var_array.init_values = None;
+    let mut statements = vec![];
+    for obj in global_objs {
+      match parser.ast[obj].clone() {
+        Node::DeclAggr { decls } => {
+          for decl in decls {
+            if matches!(parser.ast[decl], Node::VarArray { .. }) {
+              let values = if let Node::VarArray { init_values, .. } = &mut parser.ast[decl] {
+                init_values.take()
+              } else {
+                None
+              };
 
-                  } else if var_array.init_values.is_some() {
-                    let init_vals = var_array.init_values.take().unwrap();
-                    if init_vals.is_empty() {
-                      // handle empty init val
-                      var_array.init_values = None;
-                    } else {
-                      // fold the initializer
-                      var_array.init_values = Some(init_vals.into_iter().map(|init_val| parser.fold(init_val)).collect());
-                    }
+              if let Some(values) = values {
+                if values.is_empty() {
+                  if let Node::VarArray { init_values, .. } = &mut parser.ast[decl] {
+                    *init_values = None;
                   }
-                } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut *decl) {
-                  if var_decl.mutable {
-                    // if no initializer, set to zero
-                    if var_decl.init_value.is_none() {
-                      var_decl.init_value = match &var_decl.typ {
-                        Type::Int | Type::Float => Some(Box::new(Literal::Int(0))),
-                        Type::Pointer { .. } => Some(Box::new(Literal::Int(0))),
-                        _ => None,
-                      };
-                    } else {
-                      // fold the initializer
-                      var_decl.init_value = Some(parser.fold(var_decl.init_value.take().unwrap()));
-                    }
+                } else {
+                  let mut folded_values = Vec::with_capacity(values.len());
+                  for init_val in values {
+                    let node = std::mem::take(&mut parser.ast[init_val]);
+                    let folded = parser.fold(node);
+                    folded_values.push(parser.ast.alloc(folded));
+                  }
+                  if let Node::VarArray { init_values, .. } = &mut parser.ast[decl] {
+                    *init_values = Some(folded_values);
                   }
                 }
-                vec.push(decl);
               }
-            } else {
-              vec.push(obj);
+            } else if matches!(parser.ast[decl], Node::VarDecl { .. }) {
+              let (typ, mutable, init_value) = if let Node::VarDecl { typ, mutable, init_value, .. } = &parser.ast[decl] {
+                (typ.clone(), *mutable, *init_value)
+              } else {
+                unreachable!()
+              };
+
+              if mutable {
+                if init_value.is_none() {
+                  let default_init = match typ {
+                    Type::Int | Type::Float | Type::Pointer { .. } => {
+                      Some(parser.ast.alloc(Node::Literal(Literal::Int(0))))
+                    }
+                    _ => None,
+                  };
+                  if let Node::VarDecl { init_value, .. } = &mut parser.ast[decl] {
+                    *init_value = default_init;
+                  }
+                } else if let Some(value) = init_value {
+                  let node = std::mem::take(&mut parser.ast[value]);
+                  let folded = parser.fold(node);
+                  let folded_id = parser.ast.alloc(folded);
+                  if let Node::VarDecl { init_value, .. } = &mut parser.ast[decl] {
+                    *init_value = Some(folded_id);
+                  }
+                }
+              }
             }
+            statements.push(decl);
           }
-          vec
         }
+        _ => statements.push(obj),
       }
-    )
+    }
+
+    parser.ast.alloc(Node::Block { statements })
   }
 };
 
-// add scope management rules
 EnterScope: () = {
   () => {
     parser.syms.enter_scope();
@@ -90,68 +94,57 @@ ExitScope: () = {
   },
 };
 
-GlobalObj: Box<dyn Node> = {
+GlobalObj: NodeId = {
   <func_def: FuncDef> => func_def,
   <global_decl: Decl> => global_decl,
 };
 
-// 同上, 不解释
-FuncDef: Box<dyn Node> = {
+FuncDef: NodeId = {
   <b_type: BType> <ident: Ident> "(" <func_fparams: FuncFParams> ")" <block: Block> => {
-    // construct FuncDef struct, using shorthand <> to pass all named fields
     let param_types = func_fparams.iter().map(|(_, t)| t.clone()).collect();
-    Box::new(
-      FnDecl { 
-        name: ident,
-        params: func_fparams,
-        typ: Type::Function {
-          return_type: Box::new(b_type.clone()),
-          param_types,
-        },
-        body: block,
-      }
-    )
+    parser.ast.alloc(Node::FnDecl {
+      name: ident,
+      params: func_fparams,
+      typ: Type::Function {
+        return_type: Box::new(b_type.clone()),
+        param_types,
+      },
+      body: block,
+    })
   },
-  // case with no parameters
   <b_type: BType> <ident: Ident> "(" ")" <block: Block> => {
-    Box::new(
-      FnDecl { 
-        name: ident,
-        params: vec![],
-        body: block,
-        typ: Type::Function {
-          return_type: Box::new(b_type.clone()),
-          param_types: vec![],
-        },
-      }
-    )
+    parser.ast.alloc(Node::FnDecl {
+      name: ident,
+      params: vec![],
+      body: block,
+      typ: Type::Function {
+        return_type: Box::new(b_type.clone()),
+        param_types: vec![],
+      },
+    })
   },
   "void" <ident: Ident> "(" <func_fparams: FuncFParams> ")" <block: Block> => {
     let param_types = func_fparams.iter().map(|(_, t)| t.clone()).collect();
-    Box::new(
-      FnDecl { 
-        name: ident,
-        params: func_fparams,
-        body: block,
-        typ: Type::Function {
-          return_type: Box::new(Type::Void),
-          param_types,
-        },
-      }
-    )
+    parser.ast.alloc(Node::FnDecl {
+      name: ident,
+      params: func_fparams,
+      body: block,
+      typ: Type::Function {
+        return_type: Box::new(Type::Void),
+        param_types,
+      },
+    })
   },
   "void" <ident: Ident> "(" ")" <block: Block> => {
-    Box::new(
-      FnDecl { 
-        name: ident,
-        params: vec![],
-        body: block,
-        typ: Type::Function {
-          return_type: Box::new(Type::Void),
-          param_types: vec![],
-        },
-      }
-    )
+    parser.ast.alloc(Node::FnDecl {
+      name: ident,
+      params: vec![],
+      body: block,
+      typ: Type::Function {
+        return_type: Box::new(Type::Void),
+        param_types: vec![],
+      },
+    })
   },
 };
 
@@ -168,18 +161,19 @@ FuncFParams: Vec<(String, Type)> = {
 FuncFParam: (String, Type) = {
   <param_type: BType> <ident: Ident> => (ident, param_type),
   <param_type: BType> <ident: Ident> <first_const_exp: ("[" "]")> <other_const_exps: ("[" ConstExp "]")*> => {
-    // In FuncFParam, the first dimension should be treated as a pointer.
     let arr_type = Type::Pointer {
       base: if other_const_exps.is_empty() {
         Box::new(param_type)
       } else {
         Box::new(Type::Array {
           base: Box::new(param_type),
-          // fold dims here
-          dims: other_const_exps.into_iter().map(|(_, exp, _)| match cast::<Literal>(&*parser.fold(exp)).unwrap() {
-            Literal::Int(i) => *i as u32,
-            _ => panic!("Array dimension must be an integer literal"),
-          }).collect()
+          dims: other_const_exps.into_iter().map(|(_, exp, _)| {
+            let node = std::mem::take(&mut parser.ast[exp]);
+            match parser.fold(node) {
+              Node::Literal(Literal::Int(i)) => i as u32,
+              _ => panic!("Array dimension must be an integer literal"),
+            }
+          }).collect(),
         })
       },
     };
@@ -197,83 +191,81 @@ BType: Type = {
   "float" => Type::Float,
 };
 
-Block: Box<dyn Node> = "{" <enter_scope: EnterScope> <block_items: (BlockItem)*> <exit_scope: ExitScope> "}" => Box::new(Block { statements: {
-  let mut vec = vec![];
+Block: NodeId = "{" <enter_scope: EnterScope> <block_items: (BlockItem)*> <exit_scope: ExitScope> "}" => {
+  let mut statements = vec![];
   for item in block_items {
-    if is::<DeclAggr>(&*item) {
-      let decl_aggr = cast_deref::<DeclAggr>(item).unwrap();
-      for decl in decl_aggr.decls.into_iter() {
-        vec.push(decl);
+    match parser.ast[item].clone() {
+      Node::DeclAggr { decls } => {
+        for decl in decls {
+          statements.push(decl);
+        }
       }
-    } else {
-      vec.push(item);
+      _ => statements.push(item),
     }
   }
-  vec
-}});
+  parser.ast.alloc(Node::Block { statements })
+};
 
-BlockItem: Box<dyn Node> = {
+BlockItem: NodeId = {
   <stmt: Stmt> => stmt,
   <decl: Decl> => decl,
 };
 
-Stmt: Box<dyn Node> = {
+Stmt: NodeId = {
   <open_stmt: OpenStmt> => open_stmt,
   <close_stmt: CloseStmt> => close_stmt,
-}
+};
 
-CloseStmt: Box<dyn Node> = {
+CloseStmt: NodeId = {
   <simple_stmt: SimpleStmt> => simple_stmt,
-  "if" "(" <condition: Exp> ")" <then_stmt: CloseStmt> "else" <else_stmt: CloseStmt> => Box::new(If {
-      condition: condition,
+  "if" "(" <condition: Exp> ")" <then_stmt: CloseStmt> "else" <else_stmt: CloseStmt> => parser.ast.alloc(Node::If {
+      condition,
       then_block: then_stmt,
       else_block: Some(else_stmt),
   }),
-  "while" "(" <condition: Exp> ")" <body_stmt: CloseStmt> => Box::new(While {
-      condition: condition,
+  "while" "(" <condition: Exp> ")" <body_stmt: CloseStmt> => parser.ast.alloc(Node::While {
+      condition,
       body: body_stmt,
   }),
 };
 
-OpenStmt: Box<dyn Node> = {
-  "if" "(" <condition: Exp> ")" <then_stmt: CloseStmt> "else" <else_stmt: OpenStmt> => Box::new(If {
-      condition: condition,
+OpenStmt: NodeId = {
+  "if" "(" <condition: Exp> ")" <then_stmt: CloseStmt> "else" <else_stmt: OpenStmt> => parser.ast.alloc(Node::If {
+      condition,
       then_block: then_stmt,
       else_block: Some(else_stmt),
   }),
-  "if" "(" <condition: Exp> ")" <then_stmt: Stmt> => Box::new(If {
-      condition: condition,
+  "if" "(" <condition: Exp> ")" <then_stmt: Stmt> => parser.ast.alloc(Node::If {
+      condition,
       then_block: then_stmt,
       else_block: None,
   }),
-  "while" "(" <condition: Exp> ")" <body_stmt: OpenStmt> => Box::new(While {
-      condition: condition,
+  "while" "(" <condition: Exp> ")" <body_stmt: OpenStmt> => parser.ast.alloc(Node::While {
+      condition,
       body: body_stmt,
   }),
 };
 
-SimpleStmt: Box<dyn Node> = {
-  <l_val: LVal> "=" <exp: Exp> ";" => Box::new(Assign { lhs: l_val, rhs: exp }),
+SimpleStmt: NodeId = {
+  <l_val: LVal> "=" <exp: Exp> ";" => parser.ast.alloc(Node::Assign { lhs: l_val, rhs: exp }),
   <block: Block> => block,
-  // return statement should have higher priority that RawExp.
-  "return" <exp: Exp> ";" => Box::new(Return(Some(exp))),
-  "return" ";" => Box::new(Return(None)),
-  "break" ";" => Box::new(Break()),
-  "continue" ";" => Box::new(Continue()),
+  "return" <exp: Exp> ";" => parser.ast.alloc(Node::Return(Some(exp))),
+  "return" ";" => parser.ast.alloc(Node::Return(None)),
+  "break" ";" => parser.ast.alloc(Node::Break),
+  "continue" ";" => parser.ast.alloc(Node::Continue),
   <exp: Exp> ";" => exp,
-  ";" => Box::new(Empty()),
+  ";" => parser.ast.alloc(Node::Empty),
 };
 
-LVal: Box<dyn Node> = {
+LVal: NodeId = {
   <ident: Ident> <exps: ("[" Exp "]")*> => {
-    // Dispatch VarAccess and ArrayAccess
     if exps.is_empty() {
-      Box::new(VarAccess {
+      parser.ast.alloc(Node::VarAccess {
         name: ident,
         typ: Type::Void,
       })
     } else {
-      Box::new(ArrayAccess {
+      parser.ast.alloc(Node::ArrayAccess {
         name: ident,
         indices: exps.into_iter().map(|(_, exp, _)| exp).collect(),
         typ: Type::Void,
@@ -282,34 +274,34 @@ LVal: Box<dyn Node> = {
   },
 };
 
-Decl: Box<dyn Node> = {
+Decl: NodeId = {
   <const_decl: ConstDecl> => const_decl,
   <var_decl: VarDecl> => var_decl,
-}
+};
 
-ConstDecl: Box<dyn Node> = {
+ConstDecl: NodeId = {
   "const" <b_type: BType> <const_def: ConstDef> <other_const_defs: ("," ConstDef)*> ";" => {
     let mut const_defs = vec![const_def];
     for (_, def) in other_const_defs {
       const_defs.push(def);
     }
-    Box::new(
-      DeclAggr {
-        decls: parser.canonicalize(
-          RawDecl {
-            typ: b_type,
-            mutable: false,
-            raw_decls: const_defs.into_iter().collect(),
-          }
-        ),
-      }
-    )
+
+    let raw_decl = parser.ast.alloc(Node::RawDecl {
+      typ: b_type,
+      mutable: false,
+      raw_decls: const_defs,
+    });
+
+    let decls = parser.canonicalize(raw_decl);
+
+    parser.ast.alloc(Node::DeclAggr {
+      decls,
+    })
   }
-}
+};
 
 ConstDef: RawDef = {
   <ident: Ident> <const_exps: ("[" ConstExp "]")*> "=" <const_init_val: ConstInitVal> => {
-    // if const_exps is empty, then it's a scalar, we directly construct a VarDecl
     RawDef {
       ident,
       const_exps: const_exps.into_iter().map(|(_, exp, _)| exp).collect(),
@@ -318,136 +310,119 @@ ConstDef: RawDef = {
   }
 };
 
-ConstInitVal: Box<dyn Node> = {
+ConstInitVal: NodeId = {
   <const_exp: ConstExp> => const_exp,
-  "{" "}" => Box::new(ArrayInitVal { init_vals: vec![] }),
+  "{" "}" => parser.ast.alloc(Node::ArrayInitVal { init_vals: vec![] }),
   "{" <first_init_val: ConstInitVal> <other_init_vals: ("," ConstInitVal)*> "}" => {
     let mut init_vals = vec![first_init_val];
     for (_, val) in other_init_vals {
       init_vals.push(val);
     }
-    Box::new(ArrayInitVal { init_vals })
+    parser.ast.alloc(Node::ArrayInitVal { init_vals })
   }
 };
 
-ConstExp: Box<dyn Node> = {
-  <exp: Exp> => {
-    exp
-  },
-}
+ConstExp: NodeId = {
+  <exp: Exp> => exp,
+};
 
-VarDecl: Box<dyn Node> = {
+VarDecl: NodeId = {
   <b_type: BType> <var_def: VarDef> <other_var_defs: ("," VarDef)*> ";" => {
     let mut var_defs = vec![var_def];
     for (_, def) in other_var_defs {
       var_defs.push(def);
     }
 
-    Box::new(
-      DeclAggr {
-        decls: parser.canonicalize(
-          RawDecl {
-            typ: b_type,
-            mutable: true,
-            raw_decls: var_defs.into_iter().collect(),
-          }
-        ),
-      }
-    )
+    let raw_decl = parser.ast.alloc(Node::RawDecl {
+      typ: b_type,
+      mutable: true,
+      raw_decls: var_defs,
+    });
+
+    let decls = parser.canonicalize(raw_decl);
+
+    parser.ast.alloc(Node::DeclAggr {
+      decls,
+    })
   }
-}
+};
 
 VarDef: RawDef = {
   <ident: Ident> <const_exps: ("[" ConstExp "]")*> "=" <init_val: InitVal> => RawDef {
-    ident, 
+    ident,
     const_exps: const_exps.into_iter().map(|(_, exp, _)| exp).collect(),
     init_val: Some(init_val),
   },
-  <ident: Ident> <const_exps: ("[" ConstExp "]")*> => RawDef { 
-    ident, 
+  <ident: Ident> <const_exps: ("[" ConstExp "]")*> => RawDef {
+    ident,
     const_exps: const_exps.into_iter().map(|(_, exp, _)| exp).collect(),
     init_val: None,
   },
 };
 
-InitVal: Box<dyn Node> = {
+InitVal: NodeId = {
   <exp: Exp> => exp,
-  "{" "}" => Box::new(ArrayInitVal { init_vals: vec![] }),
+  "{" "}" => parser.ast.alloc(Node::ArrayInitVal { init_vals: vec![] }),
   "{" <first_init_val: InitVal> <other_init_vals: ("," InitVal)*> "}" => {
     let mut init_vals = vec![first_init_val];
     for (_, val) in other_init_vals {
       init_vals.push(val);
     }
-    Box::new(ArrayInitVal { init_vals })
+    parser.ast.alloc(Node::ArrayInitVal { init_vals })
   }
 };
 
-// The priority of MulExp is higher than AddExp, so we should parse AddExp first, 
-// which makes MulExp processed before AddExp in stmt_parser.
-Exp: Box<dyn Node> = { 
+Exp: NodeId = {
   <lor_exp: LOrExp> => lor_exp,
 };
 
-// the match items in the block must follow the priority strictly
-LOrExp: Box<dyn Node> = {
-  <lor_exp: LOrExp> <lor_op: LOrOp> <land_exp: LAndExp> => Box::new(
-    BinaryOp { 
+LOrExp: NodeId = {
+  <lor_exp: LOrExp> <lor_op: LOrOp> <land_exp: LAndExp> => parser.ast.alloc(Node::BinaryOp {
       typ: Type::Void,
       lhs: lor_exp,
       op: lor_op,
       rhs: land_exp,
-    }
-  ),
+  }),
   <land_exp: LAndExp> => land_exp,
 };
 
-LAndExp: Box<dyn Node> = {
-  <land_exp: LAndExp> <land_op: LAndOp> <eq_exp: EqExp> => Box::new(
-    BinaryOp { 
+LAndExp: NodeId = {
+  <land_exp: LAndExp> <land_op: LAndOp> <eq_exp: EqExp> => parser.ast.alloc(Node::BinaryOp {
       typ: Type::Void,
-      lhs: land_exp, 
-      op: land_op, 
-      rhs: eq_exp 
-    }
-  ),
+      lhs: land_exp,
+      op: land_op,
+      rhs: eq_exp,
+  }),
   <eq_exp: EqExp> => eq_exp,
 };
 
-EqExp: Box<dyn Node> = {
-  <eq_exp: EqExp> <eq_op: EqOp> <rel_exp: RelExp> => Box::new(
-    BinaryOp { 
+EqExp: NodeId = {
+  <eq_exp: EqExp> <eq_op: EqOp> <rel_exp: RelExp> => parser.ast.alloc(Node::BinaryOp {
       typ: Type::Void,
-      lhs: eq_exp, 
-      op: eq_op, 
-      rhs: rel_exp 
-    }
-  ),
+      lhs: eq_exp,
+      op: eq_op,
+      rhs: rel_exp,
+  }),
   <rel_exp: RelExp> => rel_exp,
 };
 
-RelExp: Box<dyn Node> = {
-  <rel_exp: RelExp> <rel_op: RelOp> <add_exp: AddExp> => Box::new(
-    BinaryOp { 
+RelExp: NodeId = {
+  <rel_exp: RelExp> <rel_op: RelOp> <add_exp: AddExp> => parser.ast.alloc(Node::BinaryOp {
       typ: Type::Void,
-      lhs: rel_exp, 
-      op: rel_op, 
-      rhs: add_exp 
-    }
-  ),
+      lhs: rel_exp,
+      op: rel_op,
+      rhs: add_exp,
+  }),
   <add_exp: AddExp> => add_exp,
 };
 
-UnaryExp: Box<dyn Node> = {
-  <unary_op: UnaryOp> <unary_exp: UnaryExp> => Box::new(
-    UnaryOp { 
+UnaryExp: NodeId = {
+  <unary_op: UnaryOp> <unary_exp: UnaryExp> => parser.ast.alloc(Node::UnaryOp {
       typ: Type::Void,
-      op: unary_op, 
-      operand: unary_exp 
-    }
-  ),
-  // FnDecl calling
-  <ident: Ident> "(" <arg: Exp> <other_args: ("," Exp)*> ")" => Box::new(
-    Call {
+      op: unary_op,
+      operand: unary_exp,
+  }),
+  <ident: Ident> "(" <arg: Exp> <other_args: ("," Exp)*> ")" => parser.ast.alloc(Node::Call {
       typ: Type::Void,
       func_name: ident,
       args: {
@@ -457,43 +432,36 @@ UnaryExp: Box<dyn Node> = {
         }
         args_vec
       },
-    }
-  ),
-  <ident: Ident> "(" ")" => Box::new(
-    Call {
+  }),
+  <ident: Ident> "(" ")" => parser.ast.alloc(Node::Call {
       typ: Type::Void,
       func_name: ident,
       args: vec![],
-    }
-  ),
+  }),
   <primary_exp: PrimaryExp> => primary_exp,
 };
 
-AddExp: Box<dyn Node> = {
-  <add_exp: AddExp> <add_op: AddOp> <mul_exp: MulExp> => Box::new(
-    BinaryOp { 
+AddExp: NodeId = {
+  <add_exp: AddExp> <add_op: AddOp> <mul_exp: MulExp> => parser.ast.alloc(Node::BinaryOp {
       typ: Type::Void,
-      lhs: add_exp, 
-      op: add_op, 
-      rhs: mul_exp
-    }
-  ),
+      lhs: add_exp,
+      op: add_op,
+      rhs: mul_exp,
+  }),
   <mul_exp: MulExp> => mul_exp,
 };
 
-MulExp: Box<dyn Node> = {
-  <mul_exp: MulExp> <mul_op: MulOp> <unary_exp: UnaryExp> => Box::new(
-    BinaryOp { 
+MulExp: NodeId = {
+  <mul_exp: MulExp> <mul_op: MulOp> <unary_exp: UnaryExp> => parser.ast.alloc(Node::BinaryOp {
       typ: Type::Void,
-      lhs: mul_exp, 
-      op: mul_op, 
-      rhs: unary_exp 
-    }
-  ),
+      lhs: mul_exp,
+      op: mul_op,
+      rhs: unary_exp,
+  }),
   <unary_exp: UnaryExp> => unary_exp,
 };
 
-PrimaryExp: Box<dyn Node> = {
+PrimaryExp: NodeId = {
   "(" <exp: Exp> ")" => exp,
   <l_val: LVal> => l_val,
   <num: Number> => num,
@@ -536,11 +504,11 @@ AddOp: Op = {
   r"-" => Op::Sub,
 };
 
-Number: Box<dyn Node> = {
-  <int: IntConst> => Box::new(Literal::Int(int)),
-  <float: FloatConst> => Box::new(Literal::Float(float)),
-  <fmt_string: FormattedString> => Box::new(Literal::String(fmt_string)),
-}
+Number: NodeId = {
+  <int: IntConst> => parser.ast.alloc(Node::Literal(Literal::Int(int))),
+  <float: FloatConst> => parser.ast.alloc(Node::Literal(Literal::Float(float))),
+  <fmt_string: FormattedString> => parser.ast.alloc(Node::Literal(Literal::String(fmt_string))),
+};
 
 Ident: String = <s: r"[_a-zA-Z][_a-zA-Z0-9]*"> => {
   s.to_string()
@@ -562,4 +530,4 @@ FloatConst: f32 = {
 
 FormattedString: String = {
   r"%([-+#0]*)([\d]+|\*)?(?:\.([\d]+|\*))?(hh|ll|[hlLzjt])?([dcf])" => <>.to_string(),
-}
+};

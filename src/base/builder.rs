@@ -373,13 +373,13 @@ impl Builder {
         let op_id = match op.data {
             OpData::GlobalAlloca(_) => {
                 let globals = &mut ctx.globals;
-                let op_id = globals.alloc(op)?;
+                let op_id = globals.alloc(op);
                 // Distinguish global alloca from normal local variables. They don't share the same namespace.
                 Operand::Global(op_id)
             }
             OpData::Declare { .. } => {
                 let globals = &mut ctx.globals;
-                let op_id = globals.alloc(op)?;
+                let op_id = globals.alloc(op);
                 Operand::Global(op_id)
             }
             OpData::GetArg(_)
@@ -426,7 +426,7 @@ impl Builder {
                 let cfg = acquire_cfg!(ctx, "Builder create: ctx.cfg is None");
 
                 // append_at will update the prev and next pointers accordingly
-                let op_id = dfg.alloc(op)?;
+                let op_id = dfg.alloc(op);
                 let current_block = if let Some(block) = &self.current_block {
                     block.get_bb_id()?
                 } else {
@@ -513,7 +513,7 @@ impl Builder {
 
     pub fn create_new_block(&mut self, ctx: &mut BuilderContext) -> Result<Operand, String> {
         let cfg = acquire_cfg!(ctx, "Builder create_new_block: ctx.cfg is None");
-        let bb_id = cfg.alloc(BasicBlock::new())?;
+        let bb_id = cfg.alloc(BasicBlock::new());
         // we separate block creation and setting current block
         Ok(Operand::BB(bb_id))
     }

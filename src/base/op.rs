@@ -175,7 +175,7 @@ pub enum OpData {
     Phi {
         incoming: Vec<(Operand, Operand)>, // Vec<(value, bb_id)>
     },
-    Alloca(u32),
+    Alloca(Type),
 
     /// Control flow
     Call {
@@ -476,15 +476,42 @@ impl Arena<Op> for IndexedArena<Op> {
             }
         }
 
+        let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
+            *idx = match old_arena.get(*idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
+                _ => return Err(format!("DFG gc: index {} not found", *idx)),
+            };
+            Ok(())
+        };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry, &self.storage)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx, &self.storage)?;
+        }
+
+        let remap_value =
+            |operand: &mut Operand, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
+                if !matches!(operand, Operand::Value(_)) {
+                    return Ok(());
+                }
+                let old_idx = operand.get_op_id()?;
+                *operand = match old_arena.get(old_idx) {
+                    Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
+                    _ => return Err(format!("DFG gc: op index {} not found", old_idx)),
+                };
+                Ok(())
+            };
+
         // rewrite idx
         for item in new_arena.iter_mut() {
             // item can't be any other variant than Data here
             if let ArenaItem::Data(node) = item {
                 // rewrite uses
                 for use_idx in node.uses.iter_mut() {
-                    if let ArenaItem::NewIndex(new_idx) = self.storage[use_idx.get_op_id()?] {
-                        *use_idx = Operand::Value(new_idx);
-                    };
+                    remap_value(use_idx, &self.storage)?;
                 }
 
                 // rewrite operands excluding BBId
@@ -516,74 +543,48 @@ impl Arena<Op> for IndexedArena<Op> {
                     | OpData::OLt { lhs, rhs }
                     | OpData::OGe { lhs, rhs }
                     | OpData::OLe { lhs, rhs } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[lhs.get_op_id()?] {
-                            *lhs = Operand::Value(new_idx);
-                        };
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[rhs.get_op_id()?] {
-                            *rhs = Operand::Value(new_idx);
-                        };
+                        remap_value(lhs, &self.storage)?;
+                        remap_value(rhs, &self.storage)?;
                     }
 
                     OpData::Sitofp { value } | OpData::Fptosi { value } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                            *value = Operand::Value(new_idx);
-                        };
+                        remap_value(value, &self.storage)?;
                     }
                     OpData::Store { addr, value } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[addr.get_op_id()?] {
-                            *addr = Operand::Value(new_idx);
-                        };
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                            *value = Operand::Value(new_idx);
-                        };
+                        remap_value(addr, &self.storage)?;
+                        remap_value(value, &self.storage)?;
                     }
                     OpData::Load { addr } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[addr.get_op_id()?] {
-                            *addr = Operand::Value(new_idx);
-                        };
+                        remap_value(addr, &self.storage)?;
                     }
                     OpData::Call { args, .. } => {
                         for arg in args.iter_mut() {
-                            if let ArenaItem::NewIndex(new_idx) = self.storage[arg.get_op_id()?] {
-                                *arg = Operand::Value(new_idx);
-                            };
+                            remap_value(arg, &self.storage)?;
                         }
                     }
                     OpData::Br { cond, .. } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[cond.get_op_id()?] {
-                            *cond = Operand::Value(new_idx);
-                        };
+                        remap_value(cond, &self.storage)?;
                     }
                     OpData::Ret { value } => {
                         if let Some(val) = value {
-                            if let ArenaItem::NewIndex(new_idx) = self.storage[val.get_op_id()?] {
-                                *val = Operand::Value(new_idx);
-                            };
+                            remap_value(val, &self.storage)?;
                         }
                     }
 
                     OpData::GEP { base, indices } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[base.get_op_id()?] {
-                            *base = Operand::Value(new_idx);
-                        };
+                        remap_value(base, &self.storage)?;
                         for index in indices.iter_mut() {
-                            if let ArenaItem::NewIndex(new_idx) = self.storage[index.get_op_id()?] {
-                                *index = Operand::Value(new_idx);
-                            };
+                            remap_value(index, &self.storage)?;
                         }
                     }
 
                     OpData::Move { value, .. } => {
-                        if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                            *value = Operand::Value(new_idx);
-                        };
+                        remap_value(value, &self.storage)?;
                     }
 
                     OpData::Phi { incoming } => {
                         for (value, _bb_id) in incoming.iter_mut() {
-                            if let ArenaItem::NewIndex(new_idx) = self.storage[value.get_op_id()?] {
-                                *value = Operand::Value(new_idx);
-                            };
+                            remap_value(value, &self.storage)?;
                         }
                     }
 

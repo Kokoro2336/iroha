@@ -1,289 +1,417 @@
-use crate::base::Type;
-use crate::base::SYSY_LIB;
 /**
  * Semantic analysis.
  * Performs type inference, add implicit cast and checks for semantic errors.
  */
+use crate::base::Type;
+use crate::base::SYSY_LIB;
 use crate::base::{Pass, SymbolTable};
 use crate::frontend::ast::*;
-use crate::utils::{cast, cast_mut, replace, take};
+use crate::utils::arena::Arena;
 
 use regex::Regex;
 use std::collections::HashMap;
 
 pub struct Semantic {
-    pub node: Option<Box<dyn Node>>,
+    pub ast: AST,
     funcs: HashMap<String, Type>,
     syms: SymbolTable<String, Type>,
-    // func_name: String, param_names: Vec<String>, param_added: bool
     current_func: Option<String>,
 }
 
 impl Semantic {
-    pub fn new(node: Box<dyn Node>) -> Self {
-        // Add SysY lib functions
+    pub fn new(ast: AST) -> Self {
         Self {
             syms: SymbolTable::new(),
             funcs: HashMap::new(),
             current_func: None,
-            node: Some(node),
+            ast,
         }
     }
 
-    pub fn analyze(&mut self, node: &mut Box<dyn Node>) -> Result<Type, String> {
-        // Exps
-        if let Some(bin_op) = cast_mut::<BinaryOp>(&mut **node) {
-            let lhs_type = self.analyze(&mut bin_op.lhs)?;
-            let rhs_type = self.analyze(&mut bin_op.rhs)?;
+    pub fn analyze(&mut self, node_id: NodeId) -> Result<Type, String> {
+        let node_type = self.ast.get_node_type(node_id)?;
+        match node_type {
+            NodeType::BinaryOp => {
+                crate::debug::info!("Semantic analyzing BinaryOp node: {:?}", &self.ast[node_id]);
+                let op_kind = match &self.ast[node_id] {
+                    Node::BinaryOp { op, .. } => op.clone(),
+                    _ => unreachable!(),
+                };
 
-            // Modulo
-            if bin_op.op == Op::Mod
-                && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int))
-            {
-                return Err("Modulo operator % only supports Int type".to_string());
-            }
-
-            // And & Or
-            if matches!(bin_op.op, Op::And | Op::Or) {
-                if matches!(lhs_type, Type::Float) {
-                    bin_op.lhs = Box::new(BinaryOp {
-                        typ: Type::Int,
-                        lhs: take(&mut bin_op.lhs),
-                        op: Op::Ne,
-                        rhs: Box::new(Literal::Float(0.0)),
-                    });
+                // Flatten long chain expression into separate operations.
+                let mut op_list: Vec<NodeId> = vec![];
+                let origin = op_kind.clone();
+                let mut cur = node_id;
+                // Collect the operations with same kind.
+                while let Node::BinaryOp { lhs, op, .. } = &self.ast[cur] {
+                    if *op == origin {
+                        op_list.push(cur);
+                        // Since SysY's operator are all left-associative, the tree recurse on the left side of the tree.
+                        cur = *lhs;
+                    } else {
+                        break;
+                    }
                 }
 
-                if matches!(rhs_type, Type::Float) {
-                    bin_op.rhs = Box::new(BinaryOp {
-                        typ: Type::Int,
-                        lhs: take(&mut bin_op.rhs),
-                        op: Op::Ne,
-                        rhs: Box::new(Literal::Float(0.0)),
-                    });
-                }
-            }
+                fn infer(
+                    ast: &mut AST,
+                    lhs_id: &mut NodeId,
+                    rhs_id: &mut NodeId,
+                    lhs_type: Type,
+                    rhs_type: Type,
+                    op_kind: Op,
+                ) -> Result<Type, String> {
+                    if op_kind == Op::Mod
+                        && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int))
+                    {
+                        return Err("Modulo operator % only supports Int type".to_string());
+                    }
 
-            // Implicit cast
-            if matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float) {
-                bin_op.lhs = Box::new(UnaryOp {
-                    typ: Type::Float,
-                    op: Op::Cast(Type::Int, Type::Float),
-                    operand: take(&mut bin_op.lhs),
-                });
-            } else if matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int) {
-                bin_op.rhs = Box::new(UnaryOp {
-                    typ: Type::Float,
-                    op: Op::Cast(Type::Int, Type::Float),
-                    operand: take(&mut bin_op.rhs),
-                });
-            }
+                    if matches!(op_kind, Op::And | Op::Or) {
+                        if matches!(lhs_type, Type::Float) {
+                            let zero_id = ast.alloc(Node::Literal(Literal::Float(0.0)));
+                            *lhs_id = ast.alloc(Node::BinaryOp {
+                                typ: Type::Int,
+                                lhs: *lhs_id,
+                                op: Op::Ne,
+                                rhs: zero_id,
+                            });
+                        }
+                        if matches!(rhs_type, Type::Float) {
+                            let zero_id = ast.alloc(Node::Literal(Literal::Float(0.0)));
+                            *rhs_id = ast.alloc(Node::BinaryOp {
+                                typ: Type::Int,
+                                lhs: *rhs_id,
+                                op: Op::Ne,
+                                rhs: zero_id,
+                            });
+                        }
+                    }
 
-            // return type
-            // if the operation doesn't allow float return type, directly return Int
-            if bin_op.op.only_ret_int() {
-                bin_op.typ = Type::Int;
-                Ok(Type::Int)
-            } else if matches!(lhs_type, Type::Float) || matches!(rhs_type, Type::Float) {
-                bin_op.typ = Type::Float;
-                Ok(Type::Float)
-            } else {
-                bin_op.typ = Type::Int;
-                Ok(Type::Int)
-            }
-        } else if let Some(un_op) = cast_mut::<UnaryOp>(&mut **node) {
-            if matches!(un_op.op, Op::Cast(_, _)) {
-                panic!("Cast op is impossible to occur before semantic analysis!");
-            }
-            let operand_type = self.analyze(&mut un_op.operand)?;
-
-            // Insert Ne for float
-            match un_op.op {
-                Op::Plus => {
-                    // remove the plus node, and we don't need to update the op's type anymore.
-                    let operand = take(&mut un_op.operand);
-                    replace(node, operand);
-                    Ok(operand_type)
-                }
-                Op::Minus => {
-                    // Minus always returns the same type as operand
-                    // Infer the type of unary op based on operand type
-                    un_op.typ = operand_type.clone();
-                    Ok(operand_type)
-                }
-                Op::Not => {
-                    // Insert Ne for float
-                    if matches!(operand_type, Type::Float) {
-                        un_op.operand = Box::new(BinaryOp {
-                            typ: Type::Int,
-                            lhs: take(&mut un_op.operand),
-                            op: Op::Ne,
-                            rhs: Box::new(Literal::Float(0.0)),
+                    if matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float) {
+                        *lhs_id = ast.alloc(Node::UnaryOp {
+                            typ: Type::Float,
+                            op: Op::Cast(Type::Int, Type::Float),
+                            operand: *lhs_id,
+                        });
+                    } else if matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int) {
+                        *rhs_id = ast.alloc(Node::UnaryOp {
+                            typ: Type::Float,
+                            op: Op::Cast(Type::Int, Type::Float),
+                            operand: *rhs_id,
                         });
                     }
-                    un_op.typ = Type::Int;
-                    Ok(Type::Int)
+
+                    let ret_typ = if op_kind.only_ret_int() {
+                        Type::Int
+                    } else if matches!(lhs_type, Type::Float) || matches!(rhs_type, Type::Float) {
+                        Type::Float
+                    } else {
+                        Type::Int
+                    };
+                    Ok(ret_typ)
                 }
-                _ => unreachable!("Unexpected unary op: {:?}", un_op),
+
+                let mut res = Type::Void;
+                for (idx, op_id) in op_list.into_iter().rev().enumerate() {
+                    let (mut lhs_id, mut rhs_id, op_kind) = match &self.ast[op_id] {
+                        Node::BinaryOp { lhs, rhs, op, .. } => (*lhs, *rhs, op.clone()),
+                        _ => return Err(format!("Expected RVal node, got {:?}", &self.ast[op_id])),
+                    };
+
+                    let lhs_type = if idx == 0 {
+                        // This first element's lhs is not original type, so we need to invoke analyze() for it.
+                        self.analyze(lhs_id)?
+                    } else {
+                        // res is currently the type of the previous operation, which is the new lhs type for current operation.
+                        res.clone()
+                    };
+                    let rhs_type = self.analyze(rhs_id)?;
+                    let ret_typ = infer(
+                        &mut self.ast,
+                        &mut lhs_id,
+                        &mut rhs_id,
+                        lhs_type,
+                        rhs_type,
+                        op_kind,
+                    )?;
+                    if let Node::BinaryOp { typ, lhs, rhs, .. } = &mut self.ast[op_id] {
+                        *typ = ret_typ.clone();
+                        *lhs = lhs_id;
+                        *rhs = rhs_id;
+                    }
+                    // The result type of current operation, which will be used as lhs type for the next operation in the chain.
+                    res = ret_typ;
+                }
+
+                Ok(res)
             }
-        } else if let Some(lit) = cast_mut::<Literal>(&mut **node) {
-            match *lit {
-                Literal::Int(_) => Ok(Type::Int),
-                Literal::Float(_) => Ok(Type::Float),
-                Literal::String(_) => Ok(Type::Pointer {
+            NodeType::UnaryOp => {
+                crate::debug::info!("Semantic analyzing UnaryOp node: {:?}", &self.ast[node_id]);
+                let op_kind = match &self.ast[node_id] {
+                    Node::UnaryOp { op, .. } => op.clone(),
+                    _ => unreachable!(),
+                };
+
+                if matches!(op_kind, Op::Cast(_, _)) {
+                    panic!("Cast op is impossible to occur before semantic analysis!");
+                }
+
+                let mut op_list: Vec<NodeId> = vec![];
+                let origin = op_kind.clone();
+                let mut cur = node_id;
+                while let Node::UnaryOp { op, operand, .. } = &self.ast[cur] {
+                    if *op == origin {
+                        op_list.push(cur);
+                        cur = *operand;
+                    } else {
+                        break;
+                    }
+                }
+
+                match op_kind {
+                    Op::Plus => {
+                        // If the operand is Plus, we eliminate the unary plus operator.
+                        let last_id = op_list.last().copied().unwrap();
+                        let operand_id = match &self.ast[last_id] {
+                            Node::UnaryOp { operand, .. } => *operand,
+                            _ => {
+                                return Err(format!(
+                                    "Expected UnaryOp node, got {:?}",
+                                    &self.ast[last_id]
+                                ))
+                            }
+                        };
+                        let operand_type = self.analyze(operand_id)?;
+                        // Replace the root unary node with its operand node, in place.
+                        let operand = self.ast[operand_id].clone();
+                        self.ast.replace(node_id, operand)?;
+                        // Remove redundant unary chain nodes and duplicated operand node.
+                        for id in op_list.into_iter().filter(|id| *id != node_id) {
+                            self.ast.remove(id)?;
+                        }
+                        self.ast.remove(operand_id)?;
+                        Ok(operand_type)
+                    }
+                    Op::Minus | Op::Not => {
+                        // Eliminate the unary/minus operator.
+                        let last_id = op_list.last().copied().unwrap();
+                        let operand_id = match &self.ast[last_id] {
+                            Node::UnaryOp { operand, .. } => *operand,
+                            _ => {
+                                return Err(format!(
+                                    "Expected UnaryOp node, got {:?}",
+                                    &self.ast[last_id]
+                                ))
+                            }
+                        };
+                        let operand_type = self.analyze(operand_id)?;
+
+                        let res_id = if op_list.len() % 2 == 0 {
+                            // Even count: unary chain cancels out.
+                            let operand = self.ast[operand_id].clone();
+                            self.ast.replace(node_id, operand)?;
+                            // Remove redundant unary chain nodes and duplicated operand node.
+                            for id in op_list.into_iter().filter(|id| *id != node_id) {
+                                self.ast.remove(id)?;
+                            }
+                            self.ast.remove(operand_id)?;
+                            return Ok(operand_type);
+                        } else {
+                            // Odd count: keep one operator at the root and point directly to base operand.
+                            if let Node::UnaryOp { operand, .. } = &mut self.ast[node_id] {
+                                *operand = operand_id;
+                            }
+                            // Remove redundant unary chain nodes, keep root and base operand.
+                            for id in op_list.iter().copied().filter(|id| *id != node_id) {
+                                self.ast.remove(id)?;
+                            }
+                            operand_id
+                        };
+
+                        if op_kind == Op::Not && matches!(operand_type, Type::Float) {
+                            let zero_id = self.ast.alloc(Node::Literal(Literal::Float(0.0)));
+                            let new_res_id = self.ast.alloc(Node::BinaryOp {
+                                typ: Type::Int,
+                                op: Op::Ne,
+                                lhs: res_id,
+                                rhs: zero_id,
+                            });
+                            if let Node::UnaryOp { typ, operand, .. } = &mut self.ast[node_id] {
+                                *typ = Type::Int;
+                                *operand = new_res_id;
+                            }
+                            return Ok(Type::Int);
+                        }
+                        match &mut self.ast[node_id] {
+                            Node::UnaryOp { typ, operand, .. } => {
+                                *typ = operand_type.clone();
+                                *operand = res_id;
+                                Ok(operand_type)
+                            }
+                            _ => Err(format!(
+                                "Expected UnaryOp node, got {:?}",
+                                &self.ast[node_id]
+                            )),
+                        }
+                    }
+                    _ => Err(format!("Unsupported unary operator: {:?}", op_kind)),
+                }
+            }
+            NodeType::Literal => match &self.ast[node_id] {
+                Node::Literal(Literal::Int(_)) => Ok(Type::Int),
+                Node::Literal(Literal::Float(_)) => Ok(Type::Float),
+                Node::Literal(Literal::String(_)) => Ok(Type::Pointer {
                     base: Box::new(Type::Char),
                 }),
-            }
-        } else if let Some(var_access) = cast_mut::<VarAccess>(&mut **node) {
-            if let Some(var_type) = self.syms.get(&var_access.name) {
-                var_access.typ = var_type.clone();
-                Ok(var_type.clone())
-            } else {
-                Err(format!("Undefined variable: {}", var_access.name))
-            }
-        } else if let Some(call) = cast_mut::<Call>(&mut **node) {
-            let (fn_params, return_typ) = if let Some(func_typ) = self.funcs.get(&call.func_name) {
-                if let Type::Function {
-                    return_type,
-                    param_types,
-                } = func_typ
-                {
-                    (param_types.clone(), *return_type.clone())
-                } else {
-                    return Err(format!("{} is not a function", call.func_name));
-                }
-            } else {
-                return Err(format!("Undefined FnDecl: {}", call.func_name));
-            };
-
-            // check argument types
-            if call.func_name != "putf" {
-                if fn_params.len() != call.args.len() {
-                    return Err(format!(
-                        "Function {} expects {} arguments, got {}",
-                        call.func_name,
-                        fn_params.len(),
-                        call.args.len()
-                    ));
-                }
-                for (i, arg) in call.args.iter_mut().enumerate() {
-                    let arg_type = self.analyze(arg)?;
-                    let param_type = &fn_params[i];
-
-                    if matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int)
-                        || matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float)
-                    {
-                        // insert implicit cast
-                        *arg = Box::new(UnaryOp {
-                            typ: param_type.clone(),
-                            op: Op::Cast(arg_type, param_type.clone()),
-                            operand: take(arg),
-                        });
-                    } else if arg_type != *param_type {
-                        return Err(format!(
-                            "Argument type mismatch in function {}: expected {:?}, got {:?}",
-                            call.func_name, param_type, arg_type
-                        ));
-                    }
-                }
-            } else {
-                if call.args.is_empty() {
-                    return Err("putf expects at least one argument".to_string());
-                }
-
-                let fmt_str = if let Some(Literal::String(s)) = cast::<Literal>(&*call.args[0]) {
-                    s.clone()
-                } else {
-                    return Err("The first argument of putf must be a string literal".to_string());
+                _ => unreachable!(),
+            },
+            NodeType::VarAccess => {
+                let name = match &self.ast[node_id] {
+                    Node::VarAccess { name, .. } => name.clone(),
+                    _ => unreachable!(),
                 };
 
-                let re = Regex::new(r"%.").unwrap();
-                let mut placeholder_types = Vec::new();
-                for cap in re.captures_iter(&fmt_str) {
-                    match &cap[0] {
-                        "%d" | "%c" => placeholder_types.push(Type::Int),
-                        "%f" => placeholder_types.push(Type::Float),
-                        s => return Err(format!("Unsupported format specifier: {}", s)),
+                if let Some(var_type) = self.syms.get(&name) {
+                    if let Node::VarAccess { typ, .. } = &mut self.ast[node_id] {
+                        *typ = var_type.clone();
                     }
-                }
-
-                if call.args.len() - 1 != placeholder_types.len() {
-                    return Err(format!(
-                        "putf expects {} arguments, got {}",
-                        placeholder_types.len(),
-                        call.args.len() - 1
-                    ));
-                }
-
-                for (i, arg) in call.args.iter_mut().skip(1).enumerate() {
-                    let arg_type = self.analyze(arg)?;
-                    let param_type = &placeholder_types[i];
-                    if (matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int))
-                        || (matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float))
-                    {
-                        *arg = Box::new(UnaryOp {
-                            typ: param_type.clone(),
-                            op: Op::Cast(arg_type, param_type.clone()),
-                            operand: take(arg),
-                        });
-                    } else if arg_type != *param_type {
-                        return Err(format!(
-                            "Argument type mismatch in putf: expected {:?}, got {:?}",
-                            param_type, arg_type
-                        ));
-                    }
-                }
-            }
-
-            call.typ = return_typ.clone();
-            Ok(return_typ)
-        } else if let Some(array_access) = cast_mut::<ArrayAccess>(&mut **node) {
-            let array_type = match self.syms.get(&array_access.name) {
-                Some(typ) => typ.clone(),
-                None => return Err(format!("Undefined variable: {}", array_access.name)),
-            };
-
-            // infer the type of indices
-            for index in &mut array_access.indices {
-                self.analyze(index)?;
-            }
-
-            // infer the access's typ
-            array_access.typ = if let Type::Array { base, dims } = array_type {
-                let new_dims = if array_access.indices.len() > dims.len() {
-                    return Err(format!(
-                        "Too many indices for array access! Expected at most {}, got {}",
-                        dims.len(),
-                        array_access.indices.len()
-                    ));
+                    Ok(var_type.clone())
                 } else {
-                    dims.clone()[array_access.indices.len()..].to_vec()
+                    Err(format!("Undefined variable: {}", name))
+                }
+            }
+            NodeType::Call => {
+                let (func_name, mut args_ids) = match &self.ast[node_id] {
+                    Node::Call {
+                        func_name, args, ..
+                    } => (func_name.clone(), args.clone()),
+                    _ => unreachable!(),
                 };
 
-                // if new_dims is empty, return base type; else decay it to pointer.
-                if new_dims.is_empty() {
-                    base.as_ref().clone()
+                let (fn_params, return_typ) = if let Some(func_typ) = self.funcs.get(&func_name) {
+                    if let Type::Function {
+                        return_type,
+                        param_types,
+                    } = func_typ
+                    {
+                        (param_types.clone(), *return_type.clone())
+                    } else {
+                        return Err(format!("{} is not a function", func_name));
+                    }
                 } else {
-                    decay(Type::Array {
-                        base: base.clone(),
-                        dims: new_dims,
-                    })?
+                    return Err(format!("Undefined FnDecl: {}", func_name));
+                };
+
+                if func_name != "putf" {
+                    if fn_params.len() != args_ids.len() {
+                        return Err(format!(
+                            "Function {} expects {} arguments, got {}",
+                            func_name,
+                            fn_params.len(),
+                            args_ids.len()
+                        ));
+                    }
+
+                    for (i, arg_id) in args_ids.iter_mut().enumerate() {
+                        let arg_type = self.analyze(*arg_id)?;
+                        let param_type = &fn_params[i];
+                        if matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int)
+                            || matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float)
+                        {
+                            *arg_id = self.ast.alloc(Node::UnaryOp {
+                                typ: param_type.clone(),
+                                op: Op::Cast(arg_type, param_type.clone()),
+                                operand: *arg_id,
+                            });
+                        } else if arg_type != *param_type {
+                            return Err(format!(
+                                "Argument type mismatch in function {}: expected {:?}, got {:?}",
+                                func_name, param_type, arg_type
+                            ));
+                        }
+                    }
+                } else {
+                    if args_ids.is_empty() {
+                        return Err("putf expects at least one argument".to_string());
+                    }
+                    let fmt_str = if let Node::Literal(Literal::String(s)) = &self.ast[args_ids[0]]
+                    {
+                        s.clone()
+                    } else {
+                        return Err(
+                            "The first argument of putf must be a string literal".to_string()
+                        );
+                    };
+
+                    let re = Regex::new(r"%.").unwrap();
+                    let mut placeholder_types = Vec::new();
+                    for cap in re.captures_iter(&fmt_str) {
+                        match &cap[0] {
+                            "%d" | "%c" => placeholder_types.push(Type::Int),
+                            "%f" => placeholder_types.push(Type::Float),
+                            s => return Err(format!("Unsupported format specifier: {}", s)),
+                        }
+                    }
+
+                    if args_ids.len() - 1 != placeholder_types.len() {
+                        return Err(format!(
+                            "putf expects {} arguments, got {}",
+                            placeholder_types.len(),
+                            args_ids.len() - 1
+                        ));
+                    }
+
+                    for (i, arg_id) in args_ids.iter_mut().skip(1).enumerate() {
+                        let arg_type = self.analyze(*arg_id)?;
+                        let param_type = &placeholder_types[i];
+                        if (matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int))
+                            || (matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float))
+                        {
+                            *arg_id = self.ast.alloc(Node::UnaryOp {
+                                typ: param_type.clone(),
+                                op: Op::Cast(arg_type, param_type.clone()),
+                                operand: *arg_id,
+                            });
+                        } else if arg_type != *param_type {
+                            return Err(format!(
+                                "Argument type mismatch in putf: expected {:?}, got {:?}",
+                                param_type, arg_type
+                            ));
+                        }
+                    }
                 }
-            } else if let Type::Pointer { .. } = array_type {
-                // raise the pointer type to array type for the convenience of indexing.
-                let raised = raise(array_type)?;
-                // after raising, the type must be array type, and we can do the same thing as above to get the access's type.
-                if let Type::Array { base, dims } = raised {
-                    let new_dims = if array_access.indices.len() > dims.len() {
+
+                if let Node::Call { typ, args, .. } = &mut self.ast[node_id] {
+                    *typ = return_typ.clone();
+                    *args = args_ids;
+                }
+                Ok(return_typ)
+            }
+            NodeType::ArrayAccess => {
+                let (name, indices_ids) = match &self.ast[node_id] {
+                    Node::ArrayAccess { name, indices, .. } => (name.clone(), indices.clone()),
+                    _ => unreachable!(),
+                };
+                let array_type = match self.syms.get(&name) {
+                    Some(typ) => typ.clone(),
+                    None => return Err(format!("Undefined variable: {}", name)),
+                };
+
+                for index in &indices_ids {
+                    self.analyze(*index)?;
+                }
+
+                let inferred = if let Type::Array { base, dims } = array_type {
+                    let new_dims = if indices_ids.len() > dims.len() {
                         return Err(format!(
                             "Too many indices for array access! Expected at most {}, got {}",
                             dims.len(),
-                            array_access.indices.len()
+                            indices_ids.len()
                         ));
                     } else {
-                        dims.clone()[array_access.indices.len()..].to_vec()
+                        dims[indices_ids.len()..].to_vec()
                     };
-
                     if new_dims.is_empty() {
                         base.as_ref().clone()
                     } else {
@@ -292,254 +420,336 @@ impl Semantic {
                             dims: new_dims,
                         })?
                     }
-                } else {
-                    unreachable!("Raised pointer type is not array type!")
-                }
-            } else {
-                return Err(format!(
-                    "Variable {} is not an array, cannot access with indices. Got type {:?}",
-                    array_access.name, array_type
-                ));
-            };
-            Ok(array_access.typ.clone())
-
-        // Declarations
-        } else if let Some(func) = cast_mut::<FnDecl>(&mut **node) {
-            self.funcs.insert(func.name.clone(), func.typ.clone());
-            // enter the scope created for function itself, which is 1 level higher than the function body scope
-            self.syms.enter_scope();
-
-            // insert parameters into symbol table
-            for param in &func.params {
-                self.syms.insert(param.0.clone(), param.1.clone());
-            }
-            // add current function info
-            self.current_func = Some(func.name.clone());
-            self.analyze(&mut func.body)?;
-
-            self.syms.exit_scope();
-            Ok(Type::Void)
-        } else if let Some(var_decl) = cast_mut::<VarDecl>(&mut **node) {
-            self.syms
-                .insert(var_decl.name.clone(), var_decl.typ.clone());
-            if let Some(init_value) = &mut var_decl.init_value {
-                let val_typ = self.analyze(init_value)?;
-                // if val_typ does not match the decl's typ, insert implicit cast
-                if matches!(val_typ, Type::Float) && matches!(var_decl.typ, Type::Int)
-                    || matches!(val_typ, Type::Int) && matches!(var_decl.typ, Type::Float)
-                {
-                    var_decl.init_value = Some(Box::new(UnaryOp {
-                        typ: var_decl.typ.clone(),
-                        op: Op::Cast(val_typ, var_decl.typ.clone()),
-                        operand: take(init_value),
-                    }));
-                } else if val_typ != var_decl.typ {
-                    return Err(format!(
-                        "Variable type mismatch: expected {:?}, got {:?}",
-                        var_decl.typ, val_typ
-                    ));
-                }
-            }
-            Ok(Type::Void)
-        } else if let Some(const_array) = cast_mut::<ConstArray>(&mut **node) {
-            // decay the array type to pointer type when inserting into symbol table
-            let decayed_type = decay(const_array.typ.clone())?;
-            self.syms.insert(const_array.name.clone(), decayed_type);
-            let base = match &const_array.typ {
-                Type::Array { base, .. } => base.as_ref().clone(),
-                _ => panic!("ConstArray must have array type!"),
-            };
-
-            // If the init_values is None, it means it's a zeroinitializer, which is always valid.
-            // So we only need to check the init_values when it's Some.
-            if let Some(init_values) = &mut const_array.init_values {
-                for init_val in init_values {
-                    let val_type = self.analyze(init_val)?;
-                    // We don't insert cast node for ConstArray, we directly modify the init_val node.
-                    if val_type != base {
-                        let literal = cast_mut::<Literal>(init_val).unwrap();
-                        match val_type {
-                            // if val_typ == Type::Int and val_typ != base, then base must be Float
-                            Type::Int => {
-                                *literal = Literal::Float(literal.get_int() as f32);
-                            }
-                            Type::Float => {
-                                *literal = Literal::Float(literal.get_float());
-                            }
-                            _ => unreachable!(
-                                "ConstArray can only be initialized with Int or Float literals: {:?}",
-                                val_type
-                            ),
+                } else if let Type::Pointer { .. } = array_type {
+                    let raised = raise(array_type)?;
+                    if let Type::Array { base, dims } = raised {
+                        let new_dims = if indices_ids.len() > dims.len() {
+                            return Err(format!(
+                                "Too many indices for array access! Expected at most {}, got {}",
+                                dims.len(),
+                                indices_ids.len()
+                            ));
+                        } else {
+                            dims[indices_ids.len()..].to_vec()
+                        };
+                        if new_dims.is_empty() {
+                            base.as_ref().clone()
+                        } else {
+                            decay(Type::Array {
+                                base: base.clone(),
+                                dims: new_dims,
+                            })?
                         }
+                    } else {
+                        unreachable!("Raised pointer type is not array type!")
                     }
-                }
-            }
-            Ok(Type::Void)
-        } else if let Some(var_array) = cast_mut::<VarArray>(&mut **node) {
-            // decay the array type to pointer type when inserting into symbol table
-            let decayed_type = decay(var_array.typ.clone())?;
-            self.syms.insert(var_array.name.clone(), decayed_type);
+                } else {
+                    return Err(format!(
+                        "Variable {} is not an array, cannot access with indices. Got type {:?}",
+                        name, array_type
+                    ));
+                };
 
-            // If the init_values is Some, check the type of each init value and insert implicit cast if necessary.
-            // If the init_values is None and it's a global variable, it means it's a zeroinitializer, which is always valid.
-            // If the init_values is None and it's not a global variable, it means it's uninitialized, which is also valid.
-            if let Some(init_values) = &mut var_array.init_values {
-                for init_val in init_values {
-                    let val_typ = self.analyze(init_val)?;
-                    let base_typ = match &var_array.typ {
-                        Type::Array { base, .. } => base.as_ref().clone(),
-                        _ => panic!("VarArray must have array type!"),
-                    };
-                    // since we don't know whether the init_values is float or int, we insert cast node here.
-                    if matches!(val_typ, Type::Float) && matches!(base_typ, Type::Int)
-                        || matches!(val_typ, Type::Int) && matches!(base_typ, Type::Float)
+                if let Node::ArrayAccess { typ, .. } = &mut self.ast[node_id] {
+                    *typ = inferred.clone();
+                }
+                Ok(inferred)
+            }
+            NodeType::FnDecl => {
+                let (name, params, typ, body) = match &self.ast[node_id] {
+                    Node::FnDecl {
+                        name,
+                        params,
+                        typ,
+                        body,
+                    } => (name.clone(), params.clone(), typ.clone(), *body),
+                    _ => unreachable!(),
+                };
+                self.funcs.insert(name.clone(), typ);
+                self.syms.enter_scope();
+                for param in &params {
+                    self.syms.insert(param.0.clone(), param.1.clone());
+                }
+                self.current_func = Some(name);
+                self.analyze(body)?;
+                self.syms.exit_scope();
+                Ok(Type::Void)
+            }
+            NodeType::VarDecl => {
+                let (name, decl_type, mut init_value) = match &self.ast[node_id] {
+                    Node::VarDecl {
+                        name,
+                        typ,
+                        init_value,
+                        ..
+                    } => (name.clone(), typ.clone(), *init_value),
+                    _ => unreachable!(),
+                };
+                self.syms.insert(name, decl_type.clone());
+                if let Some(init_id) = init_value {
+                    let val_typ = self.analyze(init_id)?;
+                    if matches!(val_typ, Type::Float) && matches!(decl_type, Type::Int)
+                        || matches!(val_typ, Type::Int) && matches!(decl_type, Type::Float)
                     {
-                        match val_typ {
-                            Type::Int => {
-                                *init_val = Box::new(UnaryOp {
-                                    typ: base_typ.clone(),
-                                    op: Op::Cast(Type::Int, base_typ.clone()),
-                                    operand: take(init_val),
-                                });
-                            }
-                            Type::Float => {
-                                *init_val = Box::new(UnaryOp {
-                                    typ: base_typ.clone(),
-                                    op: Op::Cast(Type::Float, base_typ.clone()),
-                                    operand: take(init_val),
-                                });
-                            }
-                            _ => unreachable!(
-                                "VarArray can only be initialized with Int or Float literals: {:?}",
-                                val_typ
-                            ),
-                        }
-                    } else if val_typ != base_typ {
+                        init_value = Some(self.ast.alloc(Node::UnaryOp {
+                            typ: decl_type.clone(),
+                            op: Op::Cast(val_typ, decl_type.clone()),
+                            operand: init_id,
+                        }));
+                    } else if val_typ != decl_type {
                         return Err(format!(
-                            "Array variable type mismatch: expected {:?}, got {:?}",
-                            base_typ, val_typ
+                            "Variable type mismatch: expected {:?}, got {:?}",
+                            decl_type, val_typ
                         ));
                     }
                 }
+                if let Node::VarDecl { init_value: iv, .. } = &mut self.ast[node_id] {
+                    *iv = init_value;
+                }
+                Ok(Type::Void)
             }
-            Ok(Type::Void)
-
-        // Statements
-        } else if let Some(block) = cast_mut::<Block>(&mut **node) {
-            self.syms.enter_scope();
-            for stmt in &mut block.statements {
-                self.analyze(stmt)?;
-            }
-            self.syms.exit_scope();
-            Ok(Type::Void)
-        } else if let Some(if_stmt) = cast_mut::<If>(&mut **node) {
-            // Do implicit cast for cond if necessary.
-            let cond_type = self.analyze(&mut if_stmt.condition)?;
-            if matches!(cond_type, Type::Float) {
-                if_stmt.condition = Box::new(BinaryOp {
-                    typ: Type::Int,
-                    lhs: take(&mut if_stmt.condition),
-                    op: Op::Ne,
-                    rhs: Box::new(Literal::Float(0.0)),
-                });
-            }
-
-            self.analyze(&mut if_stmt.then_block)?;
-            if let Some(else_branch) = &mut if_stmt.else_block {
-                self.analyze(else_branch)?;
-            }
-            Ok(Type::Void)
-        } else if let Some(while_stmt) = cast_mut::<While>(&mut **node) {
-            let cond_type = self.analyze(&mut while_stmt.condition)?;
-            if matches!(cond_type, Type::Float) {
-                while_stmt.condition = Box::new(BinaryOp {
-                    typ: Type::Int,
-                    lhs: take(&mut while_stmt.condition),
-                    op: Op::Ne,
-                    rhs: Box::new(Literal::Float(0.0)),
-                });
-            }
-
-            self.analyze(&mut while_stmt.body)?;
-            Ok(Type::Void)
-        } else if let Some(ret) = cast_mut::<Return>(&mut **node) {
-            // check whether the function return type matches
-            if let Some(expr) = &mut ret.0 {
-                let ret_typ = self.analyze(expr)?;
-                let func_typ = self
-                    .funcs
-                    .get(self.current_func.as_ref().unwrap())
-                    .unwrap()
-                    .clone();
-                let func_ret_typ = match func_typ {
-                    Type::Function { return_type, .. } => *return_type,
-                    _ => {
-                        return Err(format!(
-                            "Current function {} does not have a valid function type!",
-                            self.current_func.as_ref().unwrap()
-                        ))
-                    }
+            NodeType::ConstArray => {
+                let (name, array_type, init_values) = match &self.ast[node_id] {
+                    Node::ConstArray {
+                        name,
+                        typ,
+                        init_values,
+                    } => (name.clone(), typ.clone(), init_values.clone()),
+                    _ => unreachable!(),
+                };
+                self.syms.insert(name, decay(array_type.clone())?);
+                let base = match &array_type {
+                    Type::Array { base, .. } => base.as_ref().clone(),
+                    _ => panic!("ConstArray must have array type!"),
                 };
 
-                if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
-                    || (matches!(func_ret_typ, Type::Int) && matches!(ret_typ, Type::Float))
+                if let Some(init_ids) = init_values {
+                    for init_id in init_ids {
+                        let val_type = self.analyze(init_id)?;
+                        if val_type != base {
+                            match &mut self.ast[init_id] {
+                                Node::Literal(literal) => match val_type {
+                                    Type::Int => {
+                                        *literal = Literal::Float(literal.get_int() as f32)
+                                    }
+                                    Type::Float => *literal = Literal::Float(literal.get_float()),
+                                    _ => {
+                                        return Err(format!(
+                                            "ConstArray can only be initialized with Int or Float literals: {:?}",
+                                            val_type
+                                        ));
+                                    }
+                                },
+                                _ => {
+                                    return Err("ConstArray initializer must be literal".to_string())
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Type::Void)
+            }
+            NodeType::VarArray => {
+                let (name, array_type, mut init_values) = match &self.ast[node_id] {
+                    Node::VarArray {
+                        name,
+                        typ,
+                        init_values,
+                        ..
+                    } => (name.clone(), typ.clone(), init_values.clone()),
+                    _ => unreachable!(),
+                };
+                self.syms.insert(name, decay(array_type.clone())?);
+
+                if let Some(init_ids) = &mut init_values {
+                    let base_typ = match &array_type {
+                        Type::Array { base, .. } => base.as_ref().clone(),
+                        _ => panic!("VarArray must have array type!"),
+                    };
+
+                    for init_id in init_ids.iter_mut() {
+                        let val_typ = self.analyze(*init_id)?;
+                        if matches!(val_typ, Type::Float) && matches!(base_typ, Type::Int)
+                            || matches!(val_typ, Type::Int) && matches!(base_typ, Type::Float)
+                        {
+                            *init_id = self.ast.alloc(Node::UnaryOp {
+                                typ: base_typ.clone(),
+                                op: Op::Cast(val_typ, base_typ.clone()),
+                                operand: *init_id,
+                            });
+                        } else if val_typ != base_typ {
+                            return Err(format!(
+                                "Array variable type mismatch: expected {:?}, got {:?}",
+                                base_typ, val_typ
+                            ));
+                        }
+                    }
+                }
+
+                if let Node::VarArray {
+                    init_values: iv, ..
+                } = &mut self.ast[node_id]
                 {
-                    // insert implicit cast if necessary
-                    ret.0 = Some(Box::new(UnaryOp {
-                        typ: func_ret_typ.clone(),
-                        op: Op::Cast(ret_typ, func_ret_typ.clone()),
-                        operand: take(expr),
-                    }));
-                } else if ret_typ != func_ret_typ {
+                    *iv = init_values;
+                }
+                Ok(Type::Void)
+            }
+            NodeType::Block => {
+                let statements = match &self.ast[node_id] {
+                    Node::Block { statements } => statements.clone(),
+                    _ => unreachable!(),
+                };
+                self.syms.enter_scope();
+                for stmt in statements {
+                    self.analyze(stmt)?;
+                }
+                self.syms.exit_scope();
+                Ok(Type::Void)
+            }
+            NodeType::If => {
+                let (mut condition, then_block, else_block) = match &self.ast[node_id] {
+                    Node::If {
+                        condition,
+                        then_block,
+                        else_block,
+                    } => (*condition, *then_block, *else_block),
+                    _ => unreachable!(),
+                };
+                let cond_type = self.analyze(condition)?;
+                if matches!(cond_type, Type::Float) {
+                    let zero_id = self.ast.alloc(Node::Literal(Literal::Float(0.0)));
+                    condition = self.ast.alloc(Node::BinaryOp {
+                        typ: Type::Int,
+                        lhs: condition,
+                        op: Op::Ne,
+                        rhs: zero_id,
+                    });
+                }
+                self.analyze(then_block)?;
+                if let Some(else_id) = else_block {
+                    self.analyze(else_id)?;
+                }
+                if let Node::If { condition: c, .. } = &mut self.ast[node_id] {
+                    *c = condition;
+                }
+                Ok(Type::Void)
+            }
+            NodeType::While => {
+                let (mut condition, body) = match &self.ast[node_id] {
+                    Node::While { condition, body } => (*condition, *body),
+                    _ => unreachable!(),
+                };
+                let cond_type = self.analyze(condition)?;
+                if matches!(cond_type, Type::Float) {
+                    let zero_id = self.ast.alloc(Node::Literal(Literal::Float(0.0)));
+                    condition = self.ast.alloc(Node::BinaryOp {
+                        typ: Type::Int,
+                        lhs: condition,
+                        op: Op::Ne,
+                        rhs: zero_id,
+                    });
+                }
+                self.analyze(body)?;
+                if let Node::While { condition: c, .. } = &mut self.ast[node_id] {
+                    *c = condition;
+                }
+                Ok(Type::Void)
+            }
+            NodeType::Return => {
+                let mut expr = match &self.ast[node_id] {
+                    Node::Return(expr) => *expr,
+                    _ => unreachable!(),
+                };
+
+                if let Some(id) = expr {
+                    let ret_typ = self.analyze(id)?;
+                    let func_typ = self
+                        .funcs
+                        .get(self.current_func.as_ref().unwrap())
+                        .unwrap()
+                        .clone();
+                    let func_ret_typ = match func_typ {
+                        Type::Function { return_type, .. } => *return_type,
+                        _ => {
+                            return Err(format!(
+                                "Current function {} does not have a valid function type!",
+                                self.current_func.as_ref().unwrap()
+                            ));
+                        }
+                    };
+
+                    if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
+                        || (matches!(func_ret_typ, Type::Int) && matches!(ret_typ, Type::Float))
+                    {
+                        expr = Some(self.ast.alloc(Node::UnaryOp {
+                            typ: func_ret_typ.clone(),
+                            op: Op::Cast(ret_typ, func_ret_typ.clone()),
+                            operand: id,
+                        }));
+                    } else if ret_typ != func_ret_typ {
+                        return Err(format!(
+                            "Return type mismatch in function {}: expected {:?}, got {:?}",
+                            self.current_func.as_ref().unwrap(),
+                            func_ret_typ,
+                            ret_typ
+                        ));
+                    }
+                }
+
+                if let Node::Return(ret) = &mut self.ast[node_id] {
+                    *ret = expr;
+                }
+                Ok(Type::Void)
+            }
+            NodeType::Assign => {
+                let (lhs_id, mut rhs_id) = match &self.ast[node_id] {
+                    Node::Assign { lhs, rhs } => (*lhs, *rhs),
+                    _ => unreachable!(),
+                };
+                let lhs_type = self.analyze(lhs_id)?;
+                let rhs_type = self.analyze(rhs_id)?;
+                if (matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int))
+                    || (matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float))
+                {
+                    rhs_id = self.ast.alloc(Node::UnaryOp {
+                        typ: lhs_type.clone(),
+                        op: Op::Cast(rhs_type, lhs_type),
+                        operand: rhs_id,
+                    });
+                } else if lhs_type != rhs_type {
                     return Err(format!(
-                        "Return type mismatch in function {}: expected {:?}, got {:?}",
-                        self.current_func.as_ref().unwrap(),
-                        func_ret_typ,
-                        ret_typ
+                        "Assignment type mismatch: expected {:?}, got {:?}",
+                        lhs_type, rhs_type
                     ));
                 }
-            }
-            Ok(Type::Void)
-        } else if let Some(assign) = cast_mut::<Assign>(&mut **node) {
-            let lhs_type = self.analyze(&mut assign.lhs)?;
-            let rhs_type = self.analyze(&mut assign.rhs)?;
-            // insert implicit cast if necessary
-            if (matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int))
-                || (matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float))
-            {
-                assign.rhs = Box::new(UnaryOp {
-                    typ: lhs_type.clone(),
-                    op: Op::Cast(rhs_type, lhs_type),
-                    operand: take(&mut assign.rhs),
-                });
-            } else if lhs_type != rhs_type {
-                return Err(format!(
-                    "Assignment type mismatch: expected {:?}, got {:?}",
-                    lhs_type, rhs_type
-                ));
-            }
 
-            Ok(Type::Void)
-        } else {
-            Ok(Type::Void)
+                if let Node::Assign { rhs, .. } = &mut self.ast[node_id] {
+                    *rhs = rhs_id;
+                }
+                Ok(Type::Void)
+            }
+            _ => Ok(Type::Void),
         }
     }
 }
 
-impl Pass<Box<dyn Node>> for Semantic {
-    fn run(&mut self) -> Result<Box<dyn Node>, String> {
-        let mut node = self.node.take().unwrap();
-        // create a scope for SysY lib functions, which is outermost scope
+impl Pass<AST> for Semantic {
+    fn run(&mut self) -> Result<AST, String> {
         self.syms.enter_scope();
-        // insert SysY lib functions into symbol table
         SYSY_LIB.with(|lib| {
             for (name, typ) in lib.iter() {
                 self.funcs.insert(name.to_string(), typ.clone());
             }
         });
-        self.analyze(&mut node)?;
+
+        let entry = self
+            .ast
+            .entry
+            .ok_or("Semantic: AST entry is missing".to_string())?;
+        self.analyze(entry)?;
+
         self.syms.exit_scope();
-        Ok(node)
+        Ok(std::mem::replace(&mut self.ast, AST::new()))
     }
 }
 
@@ -561,7 +771,6 @@ pub fn decay(typ: Type) -> Result<Type, String> {
                 })
             }
         }
-        // do nothing for pointer type
         Type::Pointer { .. } => Ok(typ),
         _ => Err(format!("Cannot decay non-array type: {:?}", typ)),
     }
@@ -569,31 +778,25 @@ pub fn decay(typ: Type) -> Result<Type, String> {
 
 pub fn raise(typ: Type) -> Result<Type, String> {
     match typ {
-        Type::Pointer { base } => {
-            match *base {
-                Type::Array {
-                    base: array_base,
-                    dims,
-                } => {
-                    if dims.is_empty() {
-                        // It's impossible to have an array with zero dim here, since we've dealt with it in parsing.
-                        return Err(
-                            "Cannot raise pointer to array with zero dimensions!".to_string()
-                        );
-                    } else {
-                        Ok(Type::Array {
-                            base: array_base,
-                            // Add 1 to the front of dims.
-                            dims: std::iter::once(1).chain(dims).collect(),
-                        })
-                    }
+        Type::Pointer { base } => match *base {
+            Type::Array {
+                base: array_base,
+                dims,
+            } => {
+                if dims.is_empty() {
+                    return Err("Cannot raise pointer to array with zero dimensions!".to_string());
+                } else {
+                    Ok(Type::Array {
+                        base: array_base,
+                        dims: std::iter::once(1).chain(dims).collect(),
+                    })
                 }
-                _ => Ok(Type::Array {
-                    base,
-                    dims: vec![1],
-                }),
             }
-        }
+            _ => Ok(Type::Array {
+                base,
+                dims: vec![1],
+            }),
+        },
         _ => Err(format!("Cannot raise non-pointer type: {:?}", typ)),
     }
 }

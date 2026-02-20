@@ -98,26 +98,42 @@ impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
             })
             .collect::<Vec<ArenaItem<BasicBlock>>>();
 
+        let remap_idx =
+            |idx: &mut usize, old_arena: &Vec<ArenaItem<BasicBlock>>| -> Result<(), String> {
+                *idx = match old_arena.get(*idx) {
+                    Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
+                    _ => return Err(format!("CFG gc: index {} not found", *idx)),
+                };
+                Ok(())
+            };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry, &old_arena)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx, &old_arena)?;
+        }
+
+        let remap_bb = |bb_idx: &mut Operand| -> Result<(), String> {
+            let old_idx = bb_idx.get_bb_id()?;
+            *bb_idx = match old_arena.get(old_idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => Operand::BB(*new_idx),
+                _ => return Err(format!("CFG gc: BB index {} not found", old_idx)),
+            };
+            Ok(())
+        };
+
         // rewrite idx
         for item in self.storage.iter_mut() {
             // item can't be any other variant than Data here
             if let ArenaItem::Data(node) = item {
                 for pred in node.preds.iter_mut() {
-                    *pred = match old_arena.get(pred.get_bb_id()?).unwrap() {
-                        ArenaItem::NewIndex(new_idx) => Operand::BB(*new_idx),
-                        _ => {
-                            return Err("CFG gc: predecessor index not found".to_string());
-                        }
-                    };
+                    remap_bb(pred)?;
                 }
                 // rewrite data.cur needs the old arena of DFG, we'll do it in Compaction pass
                 for succ in node.succs.iter_mut() {
-                    *succ = match old_arena.get(succ.get_bb_id()?).unwrap() {
-                        ArenaItem::NewIndex(new_idx) => Operand::BB(*new_idx),
-                        _ => {
-                            return Err("CFG gc: successor index not found".to_string());
-                        }
-                    };
+                    remap_bb(succ)?;
                 }
             }
         }
@@ -174,6 +190,55 @@ impl Arena<Function> for IndexedArena<Function> {
             })
             .collect::<Vec<ArenaItem<Function>>>();
 
+        let remap_idx =
+            |idx: &mut usize, old_arena: &Vec<ArenaItem<Function>>| -> Result<(), String> {
+                *idx = match old_arena.get(*idx) {
+                    Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
+                    _ => return Err(format!("CG gc: index {} not found", *idx)),
+                };
+                Ok(())
+            };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry, &old_arena)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx, &old_arena)?;
+        }
+
+        let remap_with_dfg = |op_idx: &mut Operand,
+                              old_arena_dfg: &Vec<ArenaItem<crate::base::ir::Op>>|
+         -> Result<(), String> {
+            let old_idx = op_idx.get_op_id()?;
+            *op_idx = match old_arena_dfg.get(old_idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
+                _ => {
+                    return Err(format!(
+                        "Compaction gc: op index {} in BB not found",
+                        old_idx
+                    ));
+                }
+            };
+            Ok(())
+        };
+
+        let remap_with_cfg = |bb_idx: &mut Operand,
+                              old_arena_cfg: &Vec<ArenaItem<BasicBlock>>|
+         -> Result<(), String> {
+            let old_idx = bb_idx.get_bb_id()?;
+            *bb_idx = match old_arena_cfg.get(old_idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => Operand::BB(*new_idx),
+                _ => {
+                    return Err(format!(
+                        "Compaction gc: BB index {} in Op not found",
+                        old_idx
+                    ));
+                }
+            };
+            Ok(())
+        };
+
         // No need to rewrite anything inside Function for now
         self.storage
             .iter_mut()
@@ -190,14 +255,7 @@ impl Arena<Function> for IndexedArena<Function> {
                         .try_for_each(|item| -> Result<(), String> {
                             if let ArenaItem::Data(bb) = item {
                                 for op_idx in bb.cur.iter_mut() {
-                                    *op_idx = match old_arena_dfg.get(op_idx.get_op_id()?).unwrap()
-                                    {
-                                        ArenaItem::NewIndex(new_idx) => Operand::Value(*new_idx),
-                                        _ => {
-                                            return Err("Compaction gc: op index in BB not found"
-                                                .to_string());
-                                        }
-                                    };
+                                    remap_with_dfg(op_idx, &old_arena_dfg)?;
                                 }
                             }
                             Ok(())
@@ -211,64 +269,18 @@ impl Arena<Function> for IndexedArena<Function> {
                             if let ArenaItem::Data(op) = item {
                                 match &mut op.data {
                                     OpData::Jump { target_bb } => {
-                                        *target_bb = match old_arena_cfg
-                                            .get(target_bb.get_bb_id()?)
-                                            .unwrap()
-                                        {
-                                            ArenaItem::NewIndex(new_idx) => Operand::BB(*new_idx),
-                                            _ => {
-                                                return Err(
-                                                    "Compaction gc: BB index in Op not found"
-                                                        .to_string(),
-                                                );
-                                            }
-                                        };
+                                        remap_with_cfg(target_bb, &old_arena_cfg)?;
                                     }
                                     OpData::Br {
                                         then_bb, else_bb, ..
                                     } => {
-                                        *then_bb = match old_arena_cfg
-                                            .get(then_bb.get_bb_id()?)
-                                            .unwrap()
-                                        {
-                                            ArenaItem::NewIndex(new_idx) => Operand::BB(*new_idx),
-                                            _ => {
-                                                return Err(
-                                                    "Compaction gc: BB index in Op not found"
-                                                        .to_string(),
-                                                );
-                                            }
-                                        };
-                                        *else_bb = match old_arena_cfg
-                                            .get(else_bb.get_bb_id()?)
-                                            .unwrap()
-                                        {
-                                            ArenaItem::NewIndex(new_idx) => Operand::BB(*new_idx),
-                                            _ => {
-                                                return Err(
-                                                    "Compaction gc: BB index in Op not found"
-                                                        .to_string(),
-                                                );
-                                            }
-                                        };
+                                        remap_with_cfg(then_bb, &old_arena_cfg)?;
+                                        remap_with_cfg(else_bb, &old_arena_cfg)?;
                                     }
 
                                     OpData::Phi { incoming } => {
                                         for (_val, bb_idx) in incoming.iter_mut() {
-                                            *bb_idx = match old_arena_cfg
-                                                .get(bb_idx.get_bb_id()?)
-                                                .unwrap()
-                                            {
-                                                ArenaItem::NewIndex(new_idx) => {
-                                                    Operand::BB(*new_idx)
-                                                }
-                                                _ => {
-                                                    return Err(
-                                                        "Compaction gc: BB index in Op not found"
-                                                            .to_string(),
-                                                    );
-                                                }
-                                            };
+                                            remap_with_cfg(bb_idx, &old_arena_cfg)?;
                                         }
                                     }
 
@@ -327,7 +339,7 @@ impl Arena<Function> for IndexedArena<Function> {
 impl IndexedArena<Function> {
     pub fn add(&mut self, func: Function) -> Result<usize, String> {
         let name = func.name.clone();
-        let func_id = self.alloc(func)?;
+        let func_id = self.alloc(func);
         self.add_name(name, func_id)?;
         Ok(func_id)
     }

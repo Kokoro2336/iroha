@@ -823,7 +823,6 @@ impl Emit {
                 Ok(Some(call_op))
             }
             Node::BinaryOp { op, .. } => {
-                crate::debug::info!("Emitting BinaryOp node with operator {:?}", op);
                 let op = op.clone();
 
                 let mut op_list: Vec<NodeId> = vec![];
@@ -1168,7 +1167,6 @@ impl Emit {
                 Ok(Some(res))
             }
             Node::UnaryOp { typ, op, operand } => {
-                crate::debug::info!("Emitting UnaryOp node with operator {:?}", op);
                 let typ = typ.clone();
                 let op = op.clone();
                 let operand = *operand;

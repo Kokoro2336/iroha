@@ -380,6 +380,10 @@ pub struct InsertPhi<'a> {
 
     // State field
     current_function: Option<usize>,
+
+    // Phis' id
+    // Vec<(OpId, BBId)>
+    phi_ids: Vec<Vec<(Operand, Operand)>>,
 }
 
 impl<'a> InsertPhi<'a> {
@@ -395,6 +399,7 @@ impl<'a> InsertPhi<'a> {
             var_to_op: HashMap::new(),
             var_counter: 0,
             current_function: None,
+            phi_ids: vec![],
         }
     }
 
@@ -476,7 +481,9 @@ impl<'a> InsertPhi<'a> {
         Ok(())
     }
 
-    pub fn insert(&mut self) -> Result<(), String> {
+    pub fn insert(&mut self) -> Result<Vec<(Operand, Operand)>, String> {
+        let mut phi_ids = vec![];
+
         let defsites_len = self.defsites.len();
         let func_id = acquire_cur_func_id!(self);
         for idx in 0..defsites_len {
@@ -523,7 +530,7 @@ impl<'a> InsertPhi<'a> {
 
                         let mut ctx =
                             context_or_err!(self, "InsertPhi: No current function context found");
-                        self.builder.create_at_head(
+                        let phi_op_id = self.builder.create_at_head(
                             &mut ctx,
                             Op::new(
                                 // We don't know the inst's result type yet
@@ -539,6 +546,8 @@ impl<'a> InsertPhi<'a> {
                         // Restore the old context
                         guard.restore(&mut self.builder);
 
+                        // Record the phi's OpId.
+                        phi_ids.push((phi_op_id, Operand::BB(frontier)));
                         self.phis[idx].push(frontier);
                         if !self.origins[frontier].contains(&idx) {
                             // If it is a new definition in the frontier block, we add the block to the var's worklist.
@@ -548,20 +557,22 @@ impl<'a> InsertPhi<'a> {
                 }
             }
         }
-        Ok(())
+        Ok(phi_ids)
     }
 
-    pub fn run(&mut self) -> Result<(), String> {
+    pub fn run(&mut self) -> Result<Vec<Vec<(Operand, Operand)>>, String> {
+        self.phi_ids = vec![vec![]; self.program.funcs.storage.len()];
         self.program
             .funcs
             .collect_internal()
             .into_iter()
             .try_for_each(|idx| -> Result<(), String> {
                 self.init(idx)?;
-                self.insert()?;
+                let phi_ids = self.insert()?;
+                self.phi_ids.push(phi_ids);
                 Ok(())
             })?;
-        Ok(())
+        Ok(std::mem::take(&mut self.phi_ids))
     }
 }
 
@@ -681,28 +692,6 @@ impl<'a> Renaming<'a> {
                     )?;
                 }
 
-                // In some situations (e.g., when the alloca is created in a loop), the alloca might have been moved to the entry block in a previous iteration.
-                // In SSA form, we can treat it as undef, so we can just use a dummy value (e.g., 0) here.
-                // This is a common practice in SSA construction to handle uninitialized variables.
-                // We insert the store of the dummy value in the entry block, and it will be optimized out later.
-                self.builder
-                    .set_after_inst(&mut ctx, Some(Operand::Value(op_id)))?;
-                self.builder.create(
-                    &mut ctx,
-                    Op::new(
-                        Type::Void,
-                        vec![],
-                        OpData::Store {
-                            addr: Operand::Value(op_id),
-                            value: match alloca_typ {
-                                Type::Int => Operand::Int(0),
-                                Type::Float => Operand::Float(0.0),
-                                _ => return Err("Renaming: unsupported alloca type".to_string()),
-                            },
-                        },
-                    ),
-                )?;
-
                 let var_id = self.var_counter;
                 self.var_counter += 1;
 
@@ -712,7 +701,10 @@ impl<'a> Renaming<'a> {
         }
 
         self.records = vec![vec![]; self.var_counter];
-        self.versions = vec![vec![]; self.var_counter];
+        // In some situations (e.g., when the alloca is created in a loop), the alloca might have been moved to the entry block in a previous iteration.
+        // In SSA form, we can treat it as undef, so we can just simply give all vars a Operand::Undefined.
+        // This is a common practice in SSA construction to handle uninitialized variables.
+        self.versions = vec![vec![Operand::Undefined]; self.var_counter];
 
         Ok(())
     }
@@ -942,6 +934,136 @@ impl<'a> Renaming<'a> {
     }
 }
 
+pub struct RemoveTrivialPhi<'a> {
+    program: &'a mut Program,
+    builder: Builder,
+    phi_ids: Vec<Vec<(Operand, Operand)>>,
+
+    // Ancillary state fields
+    worklist: Vec<(Operand, Operand)>,
+
+    // State function
+    current_function: Option<usize>,
+}
+
+impl<'a> RemoveTrivialPhi<'a> {
+    pub fn new(program: &'a mut Program, phi_ids: Vec<Vec<(Operand, Operand)>>) -> Self {
+        Self {
+            program,
+            builder: Builder::new(),
+            phi_ids,
+            current_function: None,
+            worklist: Vec::new(),
+        }
+    }
+
+    pub fn init(&mut self, idx: usize) -> Result<(), String> {
+        self.current_function = Some(idx);
+        self.worklist = self.phi_ids[idx].clone();
+
+        enum CheckType {
+            Empty,
+            Single(Operand, Operand), // (OpId, BBId)
+            Multiple,
+        }
+        fn check(ctx: &mut BuilderContext, phi_id: usize) -> Result<CheckType, String> {
+            let dfg = ctx.dfg.as_ref().unwrap();
+            let phi_op = &dfg[phi_id];
+            match &phi_op.data {
+                OpData::Phi { incoming } => {
+                    let mut distinct: Vec<(Operand, Operand)> = vec![];
+                    for (value, bb_id) in incoming.iter() {
+                        if matches!(value, Operand::Undefined)
+                            || matches!(value, Operand::Value(id) if *id == phi_id)
+                        {
+                            continue;
+                        }
+
+                        if distinct.iter().all(|(v, _)| *v != *value) {
+                            distinct.push((value.clone(), bb_id.clone()));
+                            if distinct.len() > 1 {
+                                return Ok(CheckType::Multiple);
+                            }
+                        }
+                    }
+
+                    if distinct.is_empty() {
+                        Ok(CheckType::Empty)
+                    } else {
+                        let (value, bb_id) = distinct.pop().unwrap();
+                        Ok(CheckType::Single(value, bb_id))
+                    }
+                }
+                _ => Err("RemoveTrivialPhi: expected phi op".to_string()),
+            }
+        }
+
+        // Check whether the phi_ids are valid
+        while let Some((phi_id, bb_id)) = self.worklist.pop() {
+            let phi_id = match phi_id {
+                Operand::Value(id) => id,
+                _ => return Err("RemoveTrivialPhi: phi_ids contains non-op".to_string()),
+            };
+            let uses = {
+                let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                func.dfg[phi_id].uses.clone()
+            };
+            let mut ctx =
+                context_or_err!(self, "RemoveTrivialPhi: No current function context found");
+            match check(&mut ctx, phi_id)? {
+                CheckType::Empty => {
+                    self.builder.replace_all_uses(
+                        &mut ctx,
+                        Operand::Value(phi_id),
+                        Operand::Undefined,
+                    )?;
+                    for user in uses {
+                        let user = match user {
+                            Operand::Value(id) => id,
+                            _ => return Err("RemoveTrivialPhi: use contains non-op".to_string()),
+                        };
+                        if matches!(
+                            check(&mut ctx, user)?,
+                            CheckType::Empty | CheckType::Single(_, _)
+                        ) {
+                            self.worklist.push((Operand::Value(user), bb_id.clone()));
+                        }
+                    }
+                    self.builder
+                        .remove_op(&mut ctx, Operand::Value(phi_id), bb_id)?;
+                }
+                CheckType::Single(value, _) => {
+                    self.builder
+                        .replace_all_uses(&mut ctx, Operand::Value(phi_id), value)?;
+                    for user in uses {
+                        let user = match user {
+                            Operand::Value(id) => id,
+                            _ => return Err("RemoveTrivialPhi: use contains non-op".to_string()),
+                        };
+                        if matches!(
+                            check(&mut ctx, user)?,
+                            CheckType::Empty | CheckType::Single(_, _)
+                        ) {
+                            self.worklist.push((Operand::Value(user), bb_id.clone()));
+                        }
+                    }
+                    self.builder
+                        .remove_op(&mut ctx, Operand::Value(phi_id), bb_id)?;
+                }
+                CheckType::Multiple => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub fn run(&mut self) -> Result<(), String> {
+        for idx in self.program.funcs.collect_internal() {
+            self.init(idx)?;
+        }
+        Ok(())
+    }
+}
+
 pub struct Mem2Reg {
     program: Program,
 }
@@ -969,7 +1091,7 @@ impl Pass<Program> for Mem2Reg {
         // 3. Insert Phi nodes
         info!("Start inserting phi nodes.");
         let mut phi_inserter = InsertPhi::new(&mut self.program, frontiers);
-        phi_inserter.run()?;
+        let phi_ids = phi_inserter.run()?;
         info!("Phi nodes inserted.");
 
         // 4. Rename variables
@@ -977,6 +1099,12 @@ impl Pass<Program> for Mem2Reg {
         let mut renamer = Renaming::new(&mut self.program, dom_trees);
         renamer.run()?;
         info!("Variables renamed.");
+
+        // 5. Remove trivial phi nodes
+        info!("Start removing trivial phi nodes.");
+        let mut remover = RemoveTrivialPhi::new(&mut self.program, phi_ids);
+        remover.run()?;
+        info!("Trivial phi nodes removed.");
 
         Ok(std::mem::take(&mut self.program))
     }

@@ -32,7 +32,6 @@ impl Semantic {
         let node_type = self.ast.get_node_type(node_id)?;
         match node_type {
             NodeType::BinaryOp => {
-                crate::debug::info!("Semantic analyzing BinaryOp node: {:?}", &self.ast[node_id]);
                 let op_kind = match &self.ast[node_id] {
                     Node::BinaryOp { op, .. } => op.clone(),
                     _ => unreachable!(),
@@ -147,7 +146,6 @@ impl Semantic {
                 Ok(res)
             }
             NodeType::UnaryOp => {
-                crate::debug::info!("Semantic analyzing UnaryOp node: {:?}", &self.ast[node_id]);
                 let op_kind = match &self.ast[node_id] {
                     Node::UnaryOp { op, .. } => op.clone(),
                     _ => unreachable!(),

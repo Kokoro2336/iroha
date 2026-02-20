@@ -89,6 +89,7 @@ impl DumpLlvm for Operand {
             Operand::ParamId(id) => write!(s, "{}", id)?,
             Operand::Index(id) => write!(s, "{}", id)?,
             Operand::Reg(reg) => write!(s, "{:?}", reg)?,
+            Operand::Undefined => write!(s, "undef")?,
         }
         Ok(s)
     }

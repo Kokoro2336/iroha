@@ -294,7 +294,6 @@ impl Parser {
 
                 if mutable {
                     let init_values = if let Some(init_val) = raw_decl.init_val {
-                        crate::debug::info!("Flattening array: {:?}", &self.ast[init_val]);
                         self.flatten(aggr_typ.clone(), dims.clone(), init_val)
                     } else {
                         None

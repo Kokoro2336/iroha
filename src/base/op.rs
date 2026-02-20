@@ -345,6 +345,8 @@ pub enum Operand {
     // for GetArg
     ParamId(u32),
     Reg(Reg),
+    // for phi
+    Undefined,
 }
 
 impl Operand {
@@ -410,6 +412,7 @@ impl std::fmt::Display for Operand {
             Operand::ParamId(param_id) => write!(f, "{}", param_id),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
             Operand::Reg(reg) => write!(f, "{}", reg),
+            Operand::Undefined => write!(f, "undefined"),
         }
     }
 }

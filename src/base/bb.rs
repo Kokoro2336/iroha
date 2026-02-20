@@ -98,6 +98,23 @@ impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
             })
             .collect::<Vec<ArenaItem<BasicBlock>>>();
 
+        let remap_idx =
+            |idx: &mut usize, old_arena: &Vec<ArenaItem<BasicBlock>>| -> Result<(), String> {
+                *idx = match old_arena.get(*idx) {
+                    Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
+                    _ => return Err(format!("CFG gc: index {} not found", *idx)),
+                };
+                Ok(())
+            };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry, &old_arena)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx, &old_arena)?;
+        }
+
         let remap_bb = |bb_idx: &mut Operand| -> Result<(), String> {
             let old_idx = bb_idx.get_bb_id()?;
             *bb_idx = match old_arena.get(old_idx) {
@@ -172,6 +189,23 @@ impl Arena<Function> for IndexedArena<Function> {
                 }
             })
             .collect::<Vec<ArenaItem<Function>>>();
+
+        let remap_idx =
+            |idx: &mut usize, old_arena: &Vec<ArenaItem<Function>>| -> Result<(), String> {
+                *idx = match old_arena.get(*idx) {
+                    Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
+                    _ => return Err(format!("CG gc: index {} not found", *idx)),
+                };
+                Ok(())
+            };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry, &old_arena)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx, &old_arena)?;
+        }
 
         let remap_with_dfg = |op_idx: &mut Operand,
                               old_arena_dfg: &Vec<ArenaItem<crate::base::ir::Op>>|

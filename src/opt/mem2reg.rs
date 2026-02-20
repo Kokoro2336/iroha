@@ -1,5 +1,5 @@
 /**
- * SSA construction & Mem2Reg based on Cytron et al.'s algorithm.
+ * SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
  * Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
  */
 use crate::base::ir::{Attr, Op, OpData, OpType, Operand, Program};

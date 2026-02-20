@@ -2,6 +2,7 @@ use crate::base::SymbolTable;
 use crate::base::Type;
 use crate::debug::{error, info};
 use crate::frontend::ast::*;
+use crate::utils::arena::Arena;
 
 /**
  * A module which provides a variety of utilities for parsing.
@@ -30,7 +31,9 @@ impl Parser {
     }
 
     fn take_node(&mut self, id: NodeId) -> Node {
-        std::mem::take(&mut self.ast[id])
+        self.ast
+            .remove(id)
+            .unwrap_or_else(|e| panic!("Parser take_node failed at {}: {}", id, e))
     }
 
     // early constant folding optimization

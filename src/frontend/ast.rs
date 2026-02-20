@@ -1,3 +1,6 @@
+/**
+ * Definition of AST nodes and related types.
+ */
 use crate::base::Type;
 use crate::utils::arena::*;
 
@@ -261,6 +264,14 @@ impl Arena<Node> for AST {
             };
             Ok(())
         };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx)?;
+        }
 
         for item in self.storage.iter_mut() {
             if let ArenaItem::Data(node) = item {

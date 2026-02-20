@@ -476,6 +476,22 @@ impl Arena<Op> for IndexedArena<Op> {
             }
         }
 
+        let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
+            *idx = match old_arena.get(*idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
+                _ => return Err(format!("DFG gc: index {} not found", *idx)),
+            };
+            Ok(())
+        };
+
+        if let Some(entry) = self.entry.as_mut() {
+            remap_idx(entry, &self.storage)?;
+        }
+
+        for idx in self.map.values_mut() {
+            remap_idx(idx, &self.storage)?;
+        }
+
         let remap_value =
             |operand: &mut Operand, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
                 if !matches!(operand, Operand::Value(_)) {

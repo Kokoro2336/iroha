@@ -163,7 +163,7 @@ impl Emit {
             )
         }
 
-        fn emit_value(this: &mut Emit, node_id: NodeId) -> Result<Operand, String> {
+        fn emit_rval(this: &mut Emit, node_id: NodeId) -> Result<Operand, String> {
             let mut op = this.emit(node_id)?.ok_or_else(|| {
                 format!(
                     "Expected value node, got statement node: {:?}",
@@ -339,7 +339,7 @@ impl Emit {
                     self.syms.insert(name, alloca.clone());
 
                     if let Some(init_id) = init_value {
-                        let value = emit_value(self, init_id)?;
+                        let value = emit_rval(self, init_id)?;
                         let mut ctx = context_or_err!(self, "Local variable init outside function");
                         self.builder.create(
                             &mut ctx,
@@ -421,7 +421,7 @@ impl Emit {
 
                     if let Some(init_ids) = init_values {
                         for (flat_idx, init_id) in init_ids.iter().enumerate() {
-                            let value = emit_value(self, *init_id)?;
+                            let value = emit_rval(self, *init_id)?;
                             let idxs = flat_to_indices(flat_idx, &dims);
 
                             let mut ctx =
@@ -502,7 +502,7 @@ impl Emit {
             Node::Return(expr) => {
                 let expr = *expr;
                 let value = match expr {
-                    Some(e) => Some(emit_value(self, e)?),
+                    Some(e) => Some(emit_rval(self, e)?),
                     None => None,
                 };
                 let mut ctx = context_or_err!(self, "Return outside function");
@@ -534,7 +534,7 @@ impl Emit {
                     )
                 };
 
-                let cond = emit_value(self, condition)?;
+                let cond = emit_rval(self, condition)?;
                 {
                     let mut ctx = context_or_err!(self, "If statement outside function");
                     self.builder.create(
@@ -611,7 +611,7 @@ impl Emit {
                 };
 
                 self.builder.set_current_block(while_entry.clone())?;
-                let cond = emit_value(self, condition)?;
+                let cond = emit_rval(self, condition)?;
                 {
                     let mut ctx = context_or_err!(self, "While statement outside function");
                     self.builder.create(
@@ -696,7 +696,7 @@ impl Emit {
                 let lhs = *lhs;
                 let rhs = *rhs;
 
-                let rhs_op = emit_value(self, rhs)?;
+                let rhs_op = emit_rval(self, rhs)?;
                 let lhs_op = self
                     .emit(lhs)?
                     .ok_or_else(|| "Assignment lhs should be address expression".to_string())?;
@@ -734,7 +734,7 @@ impl Emit {
 
                 let mut index_ops = vec![];
                 for idx in indices {
-                    index_ops.push(emit_value(self, idx)?);
+                    index_ops.push(emit_rval(self, idx)?);
                 }
 
                 let mut ctx = context_or_err!(self, "Array access outside function");
@@ -805,7 +805,7 @@ impl Emit {
 
                 let mut arg_ops = vec![];
                 for arg in args {
-                    arg_ops.push(emit_value(self, arg)?);
+                    arg_ops.push(emit_rval(self, arg)?);
                 }
 
                 let mut ctx = context_or_err!(self, "Call outside function");
@@ -822,354 +822,358 @@ impl Emit {
                 )?;
                 Ok(Some(call_op))
             }
-            Node::BinaryOp { typ, lhs, op, rhs } => {
-                let typ = typ.clone();
-                let lhs = *lhs;
+            Node::BinaryOp { op, .. } => {
+                crate::debug::info!("Emitting BinaryOp node with operator {:?}", op);
                 let op = op.clone();
-                let rhs = *rhs;
 
-                match op {
-                    ast::Op::And => {
-                        let (result_alloca, rhs_block, end_block) = {
-                            let mut ctx = context_or_err!(self, "BinaryOp And outside function");
-                            let result_alloca = self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Pointer {
-                                        base: Box::new(Type::Int),
-                                    },
-                                    vec![Attr::Promotion],
-                                    OpData::Alloca(Type::Int),
-                                ),
-                            )?;
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Store {
-                                        addr: result_alloca.clone(),
-                                        value: Operand::Int(0),
-                                    },
-                                ),
-                            )?;
-                            (
-                                result_alloca,
-                                self.builder.create_new_block(&mut ctx)?,
-                                self.builder.create_new_block(&mut ctx)?,
-                            )
-                        };
-
-                        let lhs_op = emit_value(self, lhs)?;
-                        {
-                            let mut ctx = context_or_err!(self, "BinaryOp And outside function");
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Br {
-                                        cond: lhs_op,
-                                        then_bb: rhs_block.clone(),
-                                        else_bb: end_block.clone(),
-                                    },
-                                ),
-                            )?;
-                            self.builder.set_current_block(rhs_block)?;
-                        }
-
-                        let rhs_op = emit_value(self, rhs)?;
-                        {
-                            let mut ctx = context_or_err!(self, "BinaryOp And outside function");
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Store {
-                                        addr: result_alloca.clone(),
-                                        value: rhs_op,
-                                    },
-                                ),
-                            )?;
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Jump {
-                                        target_bb: end_block.clone(),
-                                    },
-                                ),
-                            )?;
-                        }
-
-                        self.builder.set_current_block(end_block)?;
-                        let mut ctx = context_or_err!(self, "BinaryOp And outside function");
-                        let load_result = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(
-                                Type::Int,
-                                vec![],
-                                OpData::Load {
-                                    addr: result_alloca,
-                                },
-                            ),
-                        )?;
-                        return Ok(Some(load_result));
+                let mut op_list: Vec<NodeId> = vec![];
+                let origin = op.clone();
+                let mut cur = node_id;
+                // Collect the operations first
+                while let Node::BinaryOp { lhs, op, .. } = &self.ast[cur] {
+                    if *op == origin {
+                        op_list.push(cur);
+                        cur = *lhs;
+                    } else {
+                        break;
                     }
-                    ast::Op::Or => {
-                        let (result_alloca, rhs_block, end_block) = {
-                            let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
-                            let result_alloca = self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Pointer {
-                                        base: Box::new(Type::Int),
-                                    },
-                                    vec![Attr::Promotion],
-                                    OpData::Alloca(Type::Int),
-                                ),
-                            )?;
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Store {
-                                        addr: result_alloca.clone(),
-                                        value: Operand::Int(1),
-                                    },
-                                ),
-                            )?;
-                            (
-                                result_alloca,
-                                self.builder.create_new_block(&mut ctx)?,
-                                self.builder.create_new_block(&mut ctx)?,
-                            )
-                        };
-
-                        let lhs_op = emit_value(self, lhs)?;
-                        {
-                            let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Br {
-                                        cond: lhs_op,
-                                        then_bb: end_block.clone(),
-                                        else_bb: rhs_block.clone(),
-                                    },
-                                ),
-                            )?;
-                        }
-
-                        self.builder.set_current_block(rhs_block)?;
-                        let rhs_op = emit_value(self, rhs)?;
-                        {
-                            let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Store {
-                                        addr: result_alloca.clone(),
-                                        value: rhs_op,
-                                    },
-                                ),
-                            )?;
-                            self.builder.create(
-                                &mut ctx,
-                                ir::Op::new(
-                                    Type::Void,
-                                    vec![],
-                                    OpData::Jump {
-                                        target_bb: end_block.clone(),
-                                    },
-                                ),
-                            )?;
-                        }
-
-                        self.builder.set_current_block(end_block)?;
-                        let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
-                        let load_result = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(
-                                Type::Int,
-                                vec![],
-                                OpData::Load {
-                                    addr: result_alloca,
-                                },
-                            ),
-                        )?;
-                        return Ok(Some(load_result));
-                    }
-                    _ => {}
                 }
 
-                let lhs_op = emit_value(self, lhs)?;
-                let rhs_op = emit_value(self, rhs)?;
-                let mut ctx = context_or_err!(self, "BinaryOp outside function");
+                fn emit_code(
+                    builder: &mut Builder,
+                    ctx: &mut BuilderContext,
+                    lhs: Operand,
+                    rhs: Operand,
+                    op: ast::Op,
+                    typ: Type,
+                ) -> Result<Operand, String> {
+                    let op_data = match op {
+                        ast::Op::Add => {
+                            if typ == Type::Int {
+                                OpData::AddI { lhs, rhs }
+                            } else {
+                                OpData::AddF { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Sub => {
+                            if typ == Type::Int {
+                                OpData::SubI { lhs, rhs }
+                            } else {
+                                OpData::SubF { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Mul => {
+                            if typ == Type::Int {
+                                OpData::MulI { lhs, rhs }
+                            } else {
+                                OpData::MulF { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Div => {
+                            if typ == Type::Int {
+                                OpData::DivI { lhs, rhs }
+                            } else {
+                                OpData::DivF { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Mod => {
+                            if typ == Type::Int {
+                                OpData::ModI { lhs, rhs }
+                            } else {
+                                return Err("Mod operator only supports Int type".to_string());
+                            }
+                        }
+                        ast::Op::Eq => {
+                            if typ == Type::Int {
+                                OpData::SEq { lhs, rhs }
+                            } else {
+                                OpData::OEq { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Ne => {
+                            if typ == Type::Int {
+                                OpData::SNe { lhs, rhs }
+                            } else {
+                                OpData::ONe { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Gt => {
+                            if typ == Type::Int {
+                                OpData::SGt { lhs, rhs }
+                            } else {
+                                OpData::OGt { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Lt => {
+                            if typ == Type::Int {
+                                OpData::SLt { lhs, rhs }
+                            } else {
+                                OpData::OLt { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Ge => {
+                            if typ == Type::Int {
+                                OpData::SGe { lhs, rhs }
+                            } else {
+                                OpData::OGe { lhs, rhs }
+                            }
+                        }
+                        ast::Op::Le => {
+                            if typ == Type::Int {
+                                OpData::SLe { lhs, rhs }
+                            } else {
+                                OpData::OLe { lhs, rhs }
+                            }
+                        }
+                        ast::Op::And | ast::Op::Or => unreachable!("And/Or handled above"),
+                        _ => return Err(format!("Unsupported binary operator {:?} in Emit", op)),
+                    };
 
-                let op_data = match op {
-                    ast::Op::Add => {
-                        if typ == Type::Int {
-                            OpData::AddI {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::AddF {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Sub => {
-                        if typ == Type::Int {
-                            OpData::SubI {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::SubF {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Mul => {
-                        if typ == Type::Int {
-                            OpData::MulI {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::MulF {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Div => {
-                        if typ == Type::Int {
-                            OpData::DivI {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::DivF {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Mod => {
-                        if typ == Type::Int {
-                            OpData::ModI {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            return Err("Mod operator only supports Int type".to_string());
-                        }
-                    }
-                    ast::Op::Eq => {
-                        if typ == Type::Int {
-                            OpData::SEq {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::OEq {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Ne => {
-                        if typ == Type::Int {
-                            OpData::SNe {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::ONe {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Gt => {
-                        if typ == Type::Int {
-                            OpData::SGt {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::OGt {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Lt => {
-                        if typ == Type::Int {
-                            OpData::SLt {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::OLt {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Ge => {
-                        if typ == Type::Int {
-                            OpData::SGe {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::OGe {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::Le => {
-                        if typ == Type::Int {
-                            OpData::SLe {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        } else {
-                            OpData::OLe {
-                                lhs: lhs_op,
-                                rhs: rhs_op,
-                            }
-                        }
-                    }
-                    ast::Op::And | ast::Op::Or => unreachable!("And/Or handled above"),
-                    _ => return Err(format!("Unsupported binary operator {:?} in Emit", op)),
-                };
+                    let bin_op = builder.create(ctx, ir::Op::new(typ, vec![], op_data))?;
+                    Ok(bin_op)
+                }
 
-                let bin_op = self
-                    .builder
-                    .create(&mut ctx, ir::Op::new(typ, vec![], op_data))?;
-                Ok(Some(bin_op))
+                let mut res = Operand::Value(0);
+                for (idx, op_id) in op_list.iter().rev().enumerate() {
+                    let (lhs, rhs, op_kind) = match &self.ast[*op_id] {
+                        Node::BinaryOp { lhs, op, rhs, .. } => (*lhs, *rhs, op.clone()),
+                        _ => {
+                            return Err(format!(
+                                "Expected BinaryOp node, got {:?}",
+                                self.ast[*op_id]
+                            ))
+                        }
+                    };
+
+                    // Do short-circuit evaluation individually, since their emit behavior differ from normal op.
+                    match op_kind {
+                        ast::Op::And => {
+                            let (result_alloca, rhs_block, end_block) = {
+                                let mut ctx =
+                                    context_or_err!(self, "BinaryOp And outside function");
+                                let result_alloca = self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Pointer {
+                                            base: Box::new(Type::Int),
+                                        },
+                                        vec![Attr::Promotion],
+                                        OpData::Alloca(Type::Int),
+                                    ),
+                                )?;
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Store {
+                                            addr: result_alloca.clone(),
+                                            value: Operand::Int(0),
+                                        },
+                                    ),
+                                )?;
+                                (
+                                    result_alloca,
+                                    self.builder.create_new_block(&mut ctx)?,
+                                    self.builder.create_new_block(&mut ctx)?,
+                                )
+                            };
+
+                            let lhs_op = if idx == 0 {
+                                emit_rval(self, lhs)?
+                            } else {
+                                // It's impossibe that res is not a Value operand,
+                                // since the only way to get a non-Value operand is from a short-circuit op, which must be the first op in the list.
+                                res
+                            };
+                            {
+                                let mut ctx =
+                                    context_or_err!(self, "BinaryOp And outside function");
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Br {
+                                            cond: lhs_op,
+                                            then_bb: rhs_block.clone(),
+                                            else_bb: end_block.clone(),
+                                        },
+                                    ),
+                                )?;
+                            }
+
+                            self.builder.set_current_block(rhs_block)?;
+                            let rhs_op = emit_rval(self, rhs)?;
+                            {
+                                let mut ctx =
+                                    context_or_err!(self, "BinaryOp And outside function");
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Store {
+                                            addr: result_alloca.clone(),
+                                            value: rhs_op,
+                                        },
+                                    ),
+                                )?;
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Jump {
+                                            target_bb: end_block.clone(),
+                                        },
+                                    ),
+                                )?;
+                            }
+
+                            self.builder.set_current_block(end_block)?;
+                            let mut ctx = context_or_err!(self, "BinaryOp And outside function");
+                            let load_result = self.builder.create(
+                                &mut ctx,
+                                ir::Op::new(
+                                    Type::Int,
+                                    vec![],
+                                    OpData::Load {
+                                        addr: result_alloca,
+                                    },
+                                ),
+                            )?;
+                            res = load_result;
+                            continue;
+                        }
+                        ast::Op::Or => {
+                            let (result_alloca, rhs_block, end_block) = {
+                                let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
+                                let result_alloca = self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Pointer {
+                                            base: Box::new(Type::Int),
+                                        },
+                                        vec![Attr::Promotion],
+                                        OpData::Alloca(Type::Int),
+                                    ),
+                                )?;
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Store {
+                                            addr: result_alloca.clone(),
+                                            value: Operand::Int(1),
+                                        },
+                                    ),
+                                )?;
+                                (
+                                    result_alloca,
+                                    self.builder.create_new_block(&mut ctx)?,
+                                    self.builder.create_new_block(&mut ctx)?,
+                                )
+                            };
+
+                            let lhs_op = if idx == 0 { emit_rval(self, lhs)? } else { res };
+                            {
+                                let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Br {
+                                            cond: lhs_op,
+                                            then_bb: end_block.clone(),
+                                            else_bb: rhs_block.clone(),
+                                        },
+                                    ),
+                                )?;
+                            }
+
+                            self.builder.set_current_block(rhs_block)?;
+                            let rhs_op = emit_rval(self, rhs)?;
+                            {
+                                let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Store {
+                                            addr: result_alloca.clone(),
+                                            value: rhs_op,
+                                        },
+                                    ),
+                                )?;
+                                self.builder.create(
+                                    &mut ctx,
+                                    ir::Op::new(
+                                        Type::Void,
+                                        vec![],
+                                        OpData::Jump {
+                                            target_bb: end_block.clone(),
+                                        },
+                                    ),
+                                )?;
+                            }
+
+                            self.builder.set_current_block(end_block)?;
+                            let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
+                            let load_result = self.builder.create(
+                                &mut ctx,
+                                ir::Op::new(
+                                    Type::Int,
+                                    vec![],
+                                    OpData::Load {
+                                        addr: result_alloca,
+                                    },
+                                ),
+                            )?;
+                            res = load_result;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    let lhs_op = if idx == 0 {
+                        emit_rval(self, lhs)?
+                    } else {
+                        // It's impossibe that res is not a Value operand,
+                        // since the only way to get a non-Value operand is from a short-circuit op, which must be the first op in the list.
+                        res
+                    };
+                    let rhs_op = emit_rval(self, rhs)?;
+                    let new_op_id = emit_code(
+                        &mut self.builder,
+                        &mut context_or_err!(self, "BinaryOp outside function"),
+                        lhs_op,
+                        rhs_op,
+                        op_kind,
+                        match &self.ast[*op_id] {
+                            Node::BinaryOp { typ, .. } => typ.clone(),
+                            _ => {
+                                return Err(format!(
+                                    "Expected BinaryOp node, got {:?}",
+                                    self.ast[*op_id]
+                                ))
+                            }
+                        },
+                    )?;
+                    res = new_op_id;
+                }
+                Ok(Some(res))
             }
             Node::UnaryOp { typ, op, operand } => {
+                crate::debug::info!("Emitting UnaryOp node with operator {:?}", op);
                 let typ = typ.clone();
                 let op = op.clone();
                 let operand = *operand;
 
-                let operand_op = emit_value(self, operand)?;
+                let operand_op = emit_rval(self, operand)?;
                 let mut ctx = context_or_err!(self, "UnaryOp outside function");
 
                 let op_data = match op {

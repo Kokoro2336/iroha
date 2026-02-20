@@ -147,6 +147,24 @@ where
             })
             .collect()
     }
+
+    // Replace the data at idx with new_item.
+    pub fn replace(&mut self, idx: usize, new_item: T) -> Result<(), String> {
+        if idx >= self.storage.len() {
+            return Err(format!("IndexedArena replace: index {} out of bounds", idx));
+        }
+        if matches!(
+            self.storage.get(idx),
+            Some(ArenaItem::None) | Some(ArenaItem::NewIndex(_))
+        ) {
+            return Err(format!(
+                "IndexedArena replace: index {} points to None or NewIndex",
+                idx
+            ));
+        }
+        self.storage[idx] = ArenaItem::Data(new_item);
+        Ok(())
+    }
 }
 
 impl<T> Index<usize> for IndexedArena<T>

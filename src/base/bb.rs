@@ -81,23 +81,16 @@ impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
 
     fn gc(&mut self) -> Vec<ArenaItem<BasicBlock>> {
         let new_arena: Vec<ArenaItem<BasicBlock>> = vec![];
-        let old_arena = std::mem::replace(&mut self.storage, new_arena);
+        let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
 
         // Transport
-        // CFG is a complex graph, reorder the layout seems impossible, so we just iterate the original storage directly.
-        let old_arena = old_arena
-            .into_iter()
-            .map(|mut item| {
-                if matches!(item, ArenaItem::Data(_)) {
-                    let new_idx = self.storage.len();
-                    let data = item.replace(new_idx);
-                    self.storage.push(data);
-                    ArenaItem::NewIndex(new_idx)
-                } else {
-                    ArenaItem::None
-                }
-            })
-            .collect::<Vec<ArenaItem<BasicBlock>>>();
+        old_arena.iter_mut().for_each(|item| {
+            if matches!(item, ArenaItem::Data(_)) {
+                let new_idx = self.storage.len();
+                let data = item.replace(new_idx);
+                self.storage.push(data);
+            }
+        });
 
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<BasicBlock>>| {
             *idx = match old_arena.get(*idx) {
@@ -171,22 +164,16 @@ impl Arena<Function> for IndexedArena<Function> {
 
     fn gc(&mut self) -> Vec<ArenaItem<Function>> {
         let new_arena: Vec<ArenaItem<Function>> = vec![];
-        let old_arena = std::mem::replace(&mut self.storage, new_arena);
+        let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
 
         // Transport
-        let old_arena = old_arena
-            .into_iter()
-            .map(|mut item| {
-                if matches!(item, ArenaItem::Data(_)) {
-                    let new_idx = self.storage.len();
-                    let data = item.replace(new_idx);
-                    self.storage.push(data);
-                    ArenaItem::NewIndex(new_idx)
-                } else {
-                    ArenaItem::None
-                }
-            })
-            .collect::<Vec<ArenaItem<Function>>>();
+        old_arena.iter_mut().for_each(|item| {
+            if matches!(item, ArenaItem::Data(_)) {
+                let new_idx = self.storage.len();
+                let data = item.replace(new_idx);
+                self.storage.push(data);
+            }
+        });
 
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Function>>| {
             *idx = match old_arena.get(*idx) {

@@ -62,8 +62,15 @@ impl<'a> DCE<'a> {
                 Some(idx) => &this.program.funcs[idx],
                 None => panic!("DCE: not in a function"),
             };
-            if this.is_dead(operand) && !func.dfg[operand.clone()].is_impure() {
-                this.worklist.push((operand.clone(), bb_id.clone()));
+            match operand {
+                Operand::Value(id) => {
+                    let op_id = *id;
+                    if this.is_dead(operand) && !func.dfg[op_id].is_impure() {
+                        this.worklist.push((operand.clone(), bb_id.clone()));
+                    }
+                }
+                Operand::Global(_) | Operand::Int(_) | Operand::Float(_) | Operand::Undefined => { /* do nothing */ }
+                _ => panic!("DCE: operand is not a value or basic block: {:?}", operand),
             }
         }
         for func_id in self.program.funcs.collect_internal() {
@@ -71,14 +78,11 @@ impl<'a> DCE<'a> {
             while let Some((op_id, bb_id)) = self.worklist.pop() {
                 let mut ctx = context_or_err!(self, "DCE: no context in run");
                 self.builder.set_current_block(bb_id.clone());
-                self.builder
+                let removed_op = self.builder
                     .remove_op(&mut ctx, op_id.clone(), bb_id.clone());
 
                 // Check the operands of the removed instruction
-                let op_type = {
-                    let dfg = &self.program.funcs[func_id].dfg;
-                    OpType::from(&dfg[op_id.clone()].data)
-                };
+                let op_type = OpType::from(&removed_op.data);
                 match op_type {
                     OpType::AddF
                     | OpType::SubF
@@ -108,8 +112,7 @@ impl<'a> DCE<'a> {
                     | OpType::OGe
                     | OpType::OLe => {
                         let (lhs, rhs) = {
-                            let dfg = &self.program.funcs[func_id].dfg;
-                            match &dfg[op_id.clone()].data {
+                            match removed_op.data {
                                 OpData::AddF { lhs, rhs }
                                 | OpData::SubF { lhs, rhs }
                                 | OpData::MulF { lhs, rhs }
@@ -145,8 +148,7 @@ impl<'a> DCE<'a> {
                     }
                     OpType::Sitofp | OpType::Fptosi => {
                         let value = {
-                            let dfg = &self.program.funcs[func_id].dfg;
-                            match &dfg[op_id.clone()].data {
+                            match removed_op.data {
                                 OpData::Sitofp { value } | OpData::Fptosi { value } => {
                                     value.clone()
                                 }
@@ -158,8 +160,7 @@ impl<'a> DCE<'a> {
                     // In DCE, Load is pure.
                     OpType::Load => {
                         let addr = {
-                            let dfg = &self.program.funcs[func_id].dfg;
-                            match &dfg[op_id.clone()].data {
+                            match removed_op.data {
                                 OpData::Load { addr } => addr.clone(),
                                 _ => unreachable!(),
                             }
@@ -168,8 +169,7 @@ impl<'a> DCE<'a> {
                     }
                     OpType::GEP => {
                         let (base, indices) = {
-                            let dfg = &self.program.funcs[func_id].dfg;
-                            match &dfg[op_id.clone()].data {
+                            match removed_op.data {
                                 OpData::GEP { base, indices } => (base.clone(), indices.clone()),
                                 _ => unreachable!(),
                             }

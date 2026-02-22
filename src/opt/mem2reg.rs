@@ -485,47 +485,51 @@ impl<'a> InsertPhi<'a> {
                         };
                         // Insert phi
                         // Use guard to save the old context
-                        let guard = BuilderGuard::new(&self.builder);
+                        let phi_op_id = {
+                            let mut guard = BuilderGuard::new(&mut self.builder);
 
-                        self.builder.set_current_block(Operand::BB(frontier));
+                            guard.set_current_block(Operand::BB(frontier));
 
-                        // Get type of the variable from one of its original defs.
-                        let var_type = {
-                            let func = &self.program.funcs[func_id];
-                            let origin_op_id = match self.var_to_op.get(&idx) {
-                                Some(id) => *id,
-                                None => {
-                                    panic!("InsertPhi: variable has no original definition")
+                            // Get type of the variable from one of its original defs.
+                            let var_type = {
+                                let func = &self.program.funcs[func_id];
+                                let origin_op_id = match self.var_to_op.get(&idx) {
+                                    Some(id) => *id,
+                                    None => {
+                                        panic!("InsertPhi: variable has no original definition")
+                                    }
+                                };
+
+                                // This is an alloca
+                                let origin_op = &func.dfg[origin_op_id];
+                                match &origin_op.typ {
+                                    Type::Pointer { base } => *base.clone(),
+                                    _ => {
+                                        panic!("InsertPhi: original definition is not a pointer")
+                                    }
                                 }
                             };
 
-                            // This is an alloca
-                            let origin_op = &func.dfg[origin_op_id];
-                            match &origin_op.typ {
-                                Type::Pointer { base } => *base.clone(),
-                                _ => {
-                                    panic!("InsertPhi: original definition is not a pointer")
-                                }
-                            }
+                            let mut ctx = context_or_err!(
+                                self,
+                                "InsertPhi: No current function context found"
+                            );
+                            guard.create_at_head(
+                                &mut ctx,
+                                Op::new(
+                                    // We don't know the inst's result type yet
+                                    var_type,
+                                    vec![Attr::OldIdx(Operand::Value(self.var_to_op[&idx]))],
+                                    OpData::Phi {
+                                        // Hold the place with dummy incoming. We will update it later.
+                                        incoming: vec![
+                                            (Operand::Value(0), Operand::BB(0));
+                                            preds_num
+                                        ],
+                                    },
+                                ),
+                            )
                         };
-
-                        let mut ctx =
-                            context_or_err!(self, "InsertPhi: No current function context found");
-                        let phi_op_id = self.builder.create_at_head(
-                            &mut ctx,
-                            Op::new(
-                                // We don't know the inst's result type yet
-                                var_type,
-                                vec![Attr::OldIdx(Operand::Value(self.var_to_op[&idx]))],
-                                OpData::Phi {
-                                    // Hold the place with dummy incoming. We will update it later.
-                                    incoming: vec![(Operand::Value(0), Operand::BB(0)); preds_num],
-                                },
-                            ),
-                        );
-
-                        // Restore the old context
-                        guard.restore(&mut self.builder);
 
                         // Record the phi's OpId.
                         phi_ids.push((phi_op_id, Operand::BB(frontier)));
@@ -697,7 +701,7 @@ impl<'a> Renaming<'a> {
             match op_data {
                 OpData::Store { addr, value } => {
                     match addr {
-                        Operand::Value(_) => {},
+                        Operand::Value(_) => {}
                         // We won't promote global variables.
                         Operand::Global(_) => continue,
                         _ => panic!("Renaming: store address is not a value or global"),
@@ -711,7 +715,7 @@ impl<'a> Renaming<'a> {
                 }
                 OpData::Load { addr } => {
                     match addr {
-                        Operand::Value(_) => {},
+                        Operand::Value(_) => {}
                         // We won't promote global variables.
                         Operand::Global(_) => continue,
                         _ => panic!("Renaming: store address is not a value or global"),

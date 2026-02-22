@@ -2,6 +2,8 @@ use crate::base::ir::*;
 use crate::base::LoopInfo;
 use crate::utils::arena::{Arena, ArenaItem};
 
+use std::ops::{Deref, DerefMut};
+
 macro_rules! acquire_cfg {
     ($ctx:ident, $msg:expr) => {
         if $ctx.cfg.is_none() {
@@ -30,27 +32,49 @@ pub struct Builder {
     pub current_inst: Option<Operand>,
 }
 
-pub struct BuilderGuard {
-    pub loop_stack: Vec<LoopInfo>,
+pub struct BuilderGuard<'a> {
+    pub builder: &'a mut Builder,
+    loop_stack: Vec<LoopInfo>,
     // current basic block
-    pub current_block: Option<Operand>,
+    current_block: Option<Operand>,
     // current instruction
-    pub current_inst: Option<Operand>,
+    current_inst: Option<Operand>,
 }
 
-impl BuilderGuard {
-    pub fn new(builder: &Builder) -> Self {
+impl<'a> BuilderGuard<'a> {
+    pub fn new(builder: &'a mut Builder) -> Self {
+        let loop_stack = builder.loop_stack.clone();
+        let current_block = builder.current_block.clone();
+        let current_inst = builder.current_inst.clone();
         Self {
-            loop_stack: builder.loop_stack.clone(),
-            current_block: builder.current_block.clone(),
-            current_inst: builder.current_inst.clone(),
+            builder,
+            loop_stack,
+            current_block,
+            current_inst,
         }
     }
+}
 
-    pub fn restore(self, builder: &mut Builder) {
-        builder.loop_stack = self.loop_stack;
-        builder.current_block = self.current_block;
-        builder.current_inst = self.current_inst;
+// Transparent Proxy
+impl Deref for BuilderGuard<'_> {
+    type Target = Builder;
+
+    fn deref(&self) -> &Self::Target {
+        self.builder
+    }
+}
+
+impl DerefMut for BuilderGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.builder
+    }
+}
+
+impl Drop for BuilderGuard<'_> {
+    fn drop(&mut self) {
+        self.builder.loop_stack = self.loop_stack.clone();
+        self.builder.current_block = self.current_block.clone();
+        self.builder.current_inst = self.current_inst.clone();
     }
 }
 
@@ -247,10 +271,6 @@ impl Builder {
 
     pub fn remove_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder remove_users: ctx.dfg is None");
-        crate::debug::info!(
-            "Builder remove_users: removing users of {:?}",
-            dfg[op.get_op_id()],
-        );
         let data = dfg[op.get_op_id()].data.clone();
 
         match data {
@@ -654,7 +674,7 @@ impl Builder {
         }
     }
 
-    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
+    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) -> Op {
         // remove uses first, otherwise we may have use-after-free in the DFG.
         self.remove_uses(ctx, op.clone());
         // Remove control flow info if needed
@@ -662,19 +682,6 @@ impl Builder {
 
         let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
         let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
-        crate::debug::info!(
-            "Builder remove_op: {:?} users after removed: {:?}",
-            op,
-            dfg[op.get_op_id()]
-                .users
-                .iter()
-                .map(|user| {
-                    let op = &dfg[user.get_op_id()];
-                    format!("{:?}: {:?}", user, op)
-                })
-                .collect::<Vec<String>>()
-                .join(", ")
-        );
 
         let op_id = op.get_op_id();
         let bb_id = bb.get_bb_id();
@@ -708,6 +715,7 @@ impl Builder {
                     .join(", ")
             );
         }
+        removed_op
     }
 
     // Move the instruction to the front of specific position(operantion) in another basic block.

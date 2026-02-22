@@ -507,55 +507,69 @@ impl Arena<Op> for IndexedArena<Op> {
     }
 
     fn gc(&mut self) -> Vec<ArenaItem<Op>> {
-        let mut new_arena: Vec<ArenaItem<Op>> = vec![];
+        let new_arena: Vec<ArenaItem<Op>> = vec![];
+        let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
 
         // Transport
-        for item in self.storage.iter_mut() {
-            // check if the slot is occupied by data
-            if matches!(item, ArenaItem::Data(_)) {
-                let new_idx = new_arena.len();
-                let data = item.replace(new_idx);
-                new_arena.push(data);
-            }
-        }
+        old_arena
+            .iter_mut()
+            .for_each(|item| {
+                if matches!(item, ArenaItem::Data(_)) {
+                    let new_idx = self.storage.len();
+                    let data = item.replace(new_idx);
+                    self.storage.push(data);
+                }
+            });
 
-        let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
+        let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
                 _ => panic!("DFG gc: index {} not found", *idx),
             };
-            Ok(())
         };
 
         if let Some(entry) = self.entry.as_mut() {
-            remap_idx(entry, &self.storage);
+            remap_idx(entry, &old_arena);
         }
 
         for idx in self.map.values_mut() {
-            remap_idx(idx, &self.storage);
+            remap_idx(idx, &old_arena);
         }
 
-        let remap_value =
-            |operand: &mut Operand, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
-                if !matches!(operand, Operand::Value(_)) {
-                    return Ok(());
-                }
-                let old_idx = operand.get_op_id();
-                *operand = match old_arena.get(old_idx) {
-                    Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
-                    _ => return Err(format!("DFG gc: op index {} not found", old_idx)),
-                };
-                Ok(())
+        let remap_value = |operand: &mut Operand, old_arena: &Vec<ArenaItem<Op>>| {
+            if !matches!(operand, Operand::Value(_)) {
+                return;
+            }
+            let old_idx = operand.get_op_id();
+            *operand = match old_arena.get(old_idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
+                _ => panic!(
+                    "DFG gc: index {} not found for operand {:?}",
+                    old_idx, operand
+                ),
             };
+        };
 
         // rewrite idx
-        for item in new_arena.iter_mut() {
+        for item in self.storage.iter_mut() {
+            crate::debug::info!("GC: processing item {:?}", item);
             // item can't be any other variant than Data here
             if let ArenaItem::Data(node) = item {
                 // rewrite uses
                 for use_idx in node.users.iter_mut() {
-                    remap_value(use_idx, &self.storage);
+                    remap_value(use_idx, &old_arena);
                 }
+
+                // rewrite Attr
+                node.attrs.iter_mut().for_each(|attr| {
+                    match attr {
+                        Attr::OldIdx(op) => remap_value(op, &old_arena),
+                        Attr::GlobalArray { .. }
+                        | Attr::Name(_)
+                        | Attr::Promotion
+                        | Attr::FuncName(_) => { /* no idx to rewrite */ }
+                    }
+                });
 
                 // rewrite operands excluding BBId
                 match &mut node.data {
@@ -586,48 +600,48 @@ impl Arena<Op> for IndexedArena<Op> {
                     | OpData::OLt { lhs, rhs }
                     | OpData::OGe { lhs, rhs }
                     | OpData::OLe { lhs, rhs } => {
-                        remap_value(lhs, &self.storage);
-                        remap_value(rhs, &self.storage);
+                        remap_value(lhs, &old_arena);
+                        remap_value(rhs, &old_arena);
                     }
 
                     OpData::Sitofp { value } | OpData::Fptosi { value } => {
-                        remap_value(value, &self.storage);
+                        remap_value(value, &old_arena);
                     }
                     OpData::Store { addr, value } => {
-                        remap_value(addr, &self.storage);
-                        remap_value(value, &self.storage);
+                        remap_value(addr, &old_arena);
+                        remap_value(value, &old_arena);
                     }
                     OpData::Load { addr } => {
-                        remap_value(addr, &self.storage);
+                        remap_value(addr, &old_arena);
                     }
                     OpData::Call { args, .. } => {
                         for arg in args.iter_mut() {
-                            remap_value(arg, &self.storage);
+                            remap_value(arg, &old_arena);
                         }
                     }
                     OpData::Br { cond, .. } => {
-                        remap_value(cond, &self.storage);
+                        remap_value(cond, &old_arena);
                     }
                     OpData::Ret { value } => {
                         if let Some(val) = value {
-                            remap_value(val, &self.storage);
+                            remap_value(val, &old_arena);
                         }
                     }
 
                     OpData::GEP { base, indices } => {
-                        remap_value(base, &self.storage);
+                        remap_value(base, &old_arena);
                         for index in indices.iter_mut() {
-                            remap_value(index, &self.storage);
+                            remap_value(index, &old_arena);
                         }
                     }
 
                     OpData::Move { value, .. } => {
-                        remap_value(value, &self.storage);
+                        remap_value(value, &old_arena);
                     }
 
                     OpData::Phi { incoming } => {
                         for (value, _bb_id) in incoming.iter_mut() {
-                            remap_value(value, &self.storage);
+                            remap_value(value, &old_arena);
                         }
                     }
 
@@ -643,7 +657,7 @@ impl Arena<Op> for IndexedArena<Op> {
         }
 
         // replace old storage
-        std::mem::replace(&mut self.storage, new_arena)
+        old_arena
     }
 }
 
@@ -669,7 +683,7 @@ impl IndexedArena<Op> {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
             _ => panic!(
                 "Operand is not a valid data: {}: {:?}",
                 op_idx.clone(),
@@ -698,7 +712,7 @@ impl IndexedArena<Op> {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
 

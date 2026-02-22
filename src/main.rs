@@ -127,11 +127,11 @@ fn main() -> Result<()> {
     let mut ir = Mem2Reg::new(ir).run();
     info!("Finish Running Mem2Reg. IR after Mem2Reg.");
 
-    // info!("Start Running DCE.");
-    // DCE::new(&mut ir).run();
-    // info!("Finish Running DCE. Start running compaction pass.");
-    // Compaction::new(&mut ir).run();
-    // info!("Finish Running Compaction.");
+    info!("Start Running DCE.");
+    DCE::new(&mut ir).run();
+    info!("Finish Running DCE. Start running compaction pass.");
+    Compaction::new(&mut ir).run();
+    info!("Finish Running Compaction.");
 
     info!("Start Dumping LLVM IR.");
     let ir = {

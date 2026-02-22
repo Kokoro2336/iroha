@@ -653,7 +653,7 @@ impl IndexedArena<Op> {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
         let node = &mut self[op_id];
@@ -670,13 +670,23 @@ impl IndexedArena<Op> {
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
             Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
-            _ => panic!("Operand is not a valid data: {:?}", op_idx),
+            _ => panic!(
+                "Operand is not a valid data: {}: {:?}",
+                op_idx.clone(),
+                self[op_idx]
+            ),
         };
         let node = &mut self[op_id];
         if let Some(pos) = node.users.iter().position(|x| *x == use_idx) {
             node.users.remove(pos);
         } else {
-            panic!("Use {:?} not found in users of op {:?}", use_idx, op_idx);
+            panic!(
+                "Use {}: {:?} not found in users of op {}: {:?}",
+                use_idx.clone(),
+                self[use_idx],
+                op_idx.clone(),
+                self[op_idx]
+            );
         }
     }
 
@@ -729,7 +739,7 @@ impl IndexedArena<Op> {
                 };
             }
 
-            OpData::Sitofp { value: value } | OpData::Fptosi { value: value } => {
+            OpData::Sitofp { value } | OpData::Fptosi { value } => {
                 if *value == old {
                     *value = new.clone();
                 };

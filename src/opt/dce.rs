@@ -71,7 +71,8 @@ impl<'a> DCE<'a> {
             while let Some((op_id, bb_id)) = self.worklist.pop() {
                 let mut ctx = context_or_err!(self, "DCE: no context in run");
                 self.builder.set_current_block(bb_id.clone());
-                self.builder.remove_op(&mut ctx, op_id.clone(), bb_id.clone());
+                self.builder
+                    .remove_op(&mut ctx, op_id.clone(), bb_id.clone());
 
                 // Check the operands of the removed instruction
                 let op_type = {

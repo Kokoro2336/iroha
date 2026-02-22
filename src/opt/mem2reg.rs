@@ -640,16 +640,6 @@ impl<'a> Renaming<'a> {
                     Operand::Value(id) => id,
                     _ => panic!("Renaming: allocas contains non-op"),
                 };
-                let alloca_typ = {
-                    let dfg = ctx.dfg.as_ref().unwrap();
-                    let origin_op = &dfg[alloca.clone()];
-                    match &origin_op.typ {
-                        Type::Pointer { base } => *base.clone(),
-                        _ => {
-                            panic!("Renaming: original definition is not a pointer")
-                        }
-                    }
-                };
 
                 // raise alloca to the entry block if it's not already in the entry block
                 if bb_id != entry {
@@ -706,30 +696,40 @@ impl<'a> Renaming<'a> {
 
             match op_data {
                 OpData::Store { addr, value } => {
-                    if let Operand::Value(addr_id) = addr {
-                        if let Some(&var_id) = self.op_to_var.get(&addr_id) {
-                            // Push the OpId which produces the new value.
-                            self.versions[var_id].push(value.clone());
-                            self.removed.push((inst.clone(), Operand::BB(bb_id)));
-                        }
+                    match addr {
+                        Operand::Value(_) => {},
+                        // We won't promote global variables.
+                        Operand::Global(_) => continue,
+                        _ => panic!("Renaming: store address is not a value or global"),
+                    };
+
+                    if let Some(&var_id) = self.op_to_var.get(&addr.get_op_id()) {
+                        // Push the OpId which produces the new value.
+                        self.versions[var_id].push(value);
+                        self.removed.push((inst, Operand::BB(bb_id)));
                     }
                 }
                 OpData::Load { addr } => {
-                    if let Operand::Value(addr_id) = addr {
-                        if let Some(&var_id) = self.op_to_var.get(&addr_id) {
-                            if let Some(version) = self.versions[var_id].last() {
-                                // Replace the load with the current version
-                                let new_val = version.clone();
-                                let mut ctx = context_or_err!(
-                                    self,
-                                    "Renaming: No current function context found"
-                                );
-                                self.builder
-                                    .replace_all_uses(&mut ctx, inst.clone(), new_val);
-                                self.removed.push((inst.clone(), Operand::BB(bb_id)));
-                            } else {
-                                panic!("Renaming: load from variable {} before any store", var_id);
-                            }
+                    match addr {
+                        Operand::Value(_) => {},
+                        // We won't promote global variables.
+                        Operand::Global(_) => continue,
+                        _ => panic!("Renaming: store address is not a value or global"),
+                    };
+
+                    if let Some(&var_id) = self.op_to_var.get(&addr.get_op_id()) {
+                        if let Some(version) = self.versions[var_id].last() {
+                            // Replace the load with the current version
+                            let new_val = version.clone();
+                            let mut ctx = context_or_err!(
+                                self,
+                                "Renaming: No current function context found"
+                            );
+                            self.builder
+                                .replace_all_uses(&mut ctx, inst.clone(), new_val);
+                            self.removed.push((inst, Operand::BB(bb_id)));
+                        } else {
+                            panic!("Renaming: load from variable {} before any store", var_id);
                         }
                     }
                 }
@@ -798,16 +798,17 @@ impl<'a> Renaming<'a> {
 
                 if let Some(&var_id) = self.op_to_var.get(&op_id) {
                     if let Some(version) = self.versions[var_id].last().cloned() {
-                        let func = &mut self.program.funcs[acquire_cur_func_id!(self)];
-                        let phi_op = &mut func.dfg[phi.clone()];
                         // Update phi incoming
-                        match &mut phi_op.data {
-                            OpData::Phi { incoming } => {
-                                // Ensure incoming is large enough (it should be)
-                                incoming[k] = (version, Operand::BB(bb_id));
-                            }
-                            _ => panic!("Renaming: expected phi op"),
-                        }
+                        self.builder.insert_phi_incoming(
+                            &mut context_or_err!(
+                                self,
+                                "Renaming: No current function context found"
+                            ),
+                            phi.clone(),
+                            k,
+                            version,
+                            Operand::BB(bb_id),
+                        );
                     } else {
                         panic!(
                             "Renaming: no version available for variable {}, which means it is used before any store",

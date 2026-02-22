@@ -676,10 +676,10 @@ impl Emit {
                 None
             }
             Node::VarAccess { name, .. } => {
-                if let Some(global_id) = self.globals.get(name) {
-                    Some(global_id.clone())
-                } else if let Some(ptr_addr) = self.syms.get(name) {
+                if let Some(ptr_addr) = self.syms.get(name) {
                     Some(ptr_addr.clone())
+                } else if let Some(global_id) = self.globals.get(name) {
+                    Some(global_id.clone())
                 } else {
                     panic!("VarAccess: variable {} not found in syms or globals", name)
                 }
@@ -698,14 +698,15 @@ impl Emit {
                 let ptr_typ = Type::Pointer {
                     base: Box::new(typ),
                 };
-                let ptr_addr = if let Some(global_id) = self.globals.get(&name) {
+                let ptr_addr = 
+                if let Some(local_ptr) = self.syms.get(&name) {
                     self.builder.create(
                         &mut ctx,
                         ir::Op::new(
                             ptr_typ,
                             vec![],
                             OpData::GEP {
-                                base: global_id.clone(),
+                                base: local_ptr.clone(),
                                 indices: std::iter::once(Operand::Index(0))
                                     .chain(index_ops.into_iter())
                                     .collect(),
@@ -732,23 +733,22 @@ impl Emit {
                             },
                         ),
                     )
-                } else {
-                    let local_ptr = self.syms.get(&name).unwrap_or_else(|| {
-                        panic!("ArrayAccess: local array {} not found in syms", name)
-                    });
+                } else if let Some(global_id) = self.globals.get(&name) {
                     self.builder.create(
                         &mut ctx,
                         ir::Op::new(
                             ptr_typ,
                             vec![],
                             OpData::GEP {
-                                base: local_ptr.clone(),
+                                base: global_id.clone(),
                                 indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
+                                    .chain(index_ops)
                                     .collect(),
                             },
                         ),
                     )
+                } else {
+                    panic!("ArrayAccess: array {} not found in globals", name)
                 };
                 Some(ptr_addr)
             }

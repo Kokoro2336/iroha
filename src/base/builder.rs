@@ -156,7 +156,7 @@ impl Builder {
     }
 
     // constructing data flow
-    pub fn add_users(&mut self, ctx: &mut BuilderContext, op: Operand) {
+    pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder add_users: ctx.dfg is None");
         let data = dfg[op.get_op_id()].data.clone();
 
@@ -245,8 +245,12 @@ impl Builder {
         }
     }
 
-    pub fn remove_users(&mut self, ctx: &mut BuilderContext, op: Operand) {
+    pub fn remove_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder remove_users: ctx.dfg is None");
+        crate::debug::info!(
+            "Builder remove_users: removing users of {:?}",
+            dfg[op.get_op_id()],
+        );
         let data = dfg[op.get_op_id()].data.clone();
 
         match data {
@@ -395,9 +399,7 @@ impl Builder {
             | OpData::OLt { .. }
             | OpData::OGe { .. }
             | OpData::OLe { .. }
-            | OpData::Declare { .. } => {
-                unreachable!("Builder add_control_flow: not a control flow instruction")
-            }
+            | OpData::Declare { .. } => { /* do nothing */ }
         }
     }
 
@@ -465,9 +467,7 @@ impl Builder {
             | OpData::OLt { .. }
             | OpData::OGe { .. }
             | OpData::OLe { .. }
-            | OpData::Declare { .. } => {
-                unreachable!("Builder remove_control_flow: not a control flow instruction")
-            }
+            | OpData::Declare { .. } => { /* do nothing*/ }
         }
     }
 
@@ -564,11 +564,9 @@ impl Builder {
                     op_id
                 };
                 // add uses
-                self.add_users(ctx, op_id.clone());
+                self.add_uses(ctx, op_id.clone());
                 // add control flow info if needed
-                if is_inner_control_flow {
-                    self.add_control_flow(ctx, op_id.clone());
-                }
+                self.add_control_flow(ctx, op_id.clone());
                 // We don't update current_inst, so that the next created instruction is still before the same instruction
                 op_id
             }
@@ -650,15 +648,35 @@ impl Builder {
 
     pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder replace_all_uses: ctx.dfg is None");
-        let uses = dfg[old.get_op_id()].users.clone();
+        let uses = &dfg[old.get_op_id()].users.clone();
         for use_op in uses {
-            dfg.replace_use(use_op, old.clone(), new.clone());
+            dfg.replace_use(use_op.clone(), old.clone(), new.clone());
         }
+        // clear uses of old operand, since it has been replaced by new operand. This is important to avoid use-after-free when we remove the old operand later.
+        dfg[old.get_op_id()].users.clear();
     }
 
     pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
+        // remove uses first, otherwise we may have use-after-free in the DFG.
+        self.remove_uses(ctx, op.clone());
+        // Remove control flow info if needed
+        self.remove_control_flow(ctx, op.clone());
+
         let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
         let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
+        crate::debug::info!(
+            "Builder remove_op: {:?} users after removed: {:?}",
+            op,
+            dfg[op.get_op_id()]
+                .users
+                .iter()
+                .map(|user| {
+                    let op = &dfg[user.get_op_id()];
+                    format!("{:?}: {:?}", user, op)
+                })
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
 
         let op_id = op.get_op_id();
         let bb_id = bb.get_bb_id();
@@ -679,13 +697,19 @@ impl Builder {
         // Check the users of the remove op. For now, if users exist, we just panic.
         if !removed_op.users.is_empty() {
             panic!(
-                "Builder remove_op: instruction {:?} still has users after removal",
-                op
+                "Builder remove_op: instruction {:?} still has users after removal. users: {:?}",
+                removed_op,
+                removed_op
+                    .users
+                    .iter()
+                    .map(|user| {
+                        let op = &dfg[user.get_op_id()];
+                        format!("{:?}: {:?}", user, op)
+                    })
+                    .collect::<Vec<String>>()
+                    .join(", ")
             );
         }
-        // remove uses
-        // Remove control flow info if needed
-        if removed_op.is_inner_control_flow() {}
     }
 
     // Move the instruction to the front of specific position(operantion) in another basic block.
@@ -728,6 +752,28 @@ impl Builder {
             }
         } else {
             new_bb.cur.push(op.clone());
+        }
+    }
+
+    pub fn insert_phi_incoming(
+        &mut self,
+        ctx: &mut BuilderContext,
+        phi: Operand,
+        idx: usize,
+        value: Operand,
+        bb: Operand,
+    ) {
+        let dfg = acquire_dfg!(ctx, "Builder insert_phi_incoming: ctx.dfg is None");
+
+        let phi_id = phi.get_op_id();
+
+        // Check if the phi already has an incoming from the bb. If yes, we just update the value.
+        if let OpData::Phi { incoming } = &mut dfg[phi_id].data {
+            incoming[idx] = (value.clone(), bb);
+            // add uses. do not use self.add_users since it will add use for the phi node itself, which is not what we want.
+            dfg.add_use(value, phi.clone());
+        } else {
+            panic!("Builder insert_phi_incoming: not a phi node");
         }
     }
 }

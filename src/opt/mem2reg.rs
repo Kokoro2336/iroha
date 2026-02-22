@@ -799,7 +799,7 @@ impl<'a> Renaming<'a> {
                 if let Some(&var_id) = self.op_to_var.get(&op_id) {
                     if let Some(version) = self.versions[var_id].last().cloned() {
                         // Update phi incoming
-                        self.builder.insert_phi_incoming(
+                        self.builder.add_phi_incoming(
                             &mut context_or_err!(
                                 self,
                                 "Renaming: No current function context found"

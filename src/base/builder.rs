@@ -652,8 +652,6 @@ impl Builder {
         for use_op in uses {
             dfg.replace_use(use_op.clone(), old.clone(), new.clone());
         }
-        // clear uses of old operand, since it has been replaced by new operand. This is important to avoid use-after-free when we remove the old operand later.
-        dfg[old.get_op_id()].users.clear();
     }
 
     pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
@@ -755,7 +753,7 @@ impl Builder {
         }
     }
 
-    pub fn insert_phi_incoming(
+    pub fn add_phi_incoming(
         &mut self,
         ctx: &mut BuilderContext,
         phi: Operand,

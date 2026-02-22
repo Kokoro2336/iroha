@@ -188,7 +188,6 @@ impl Semantic {
                         for id in op_list.into_iter().filter(|id| *id != node_id) {
                             self.ast.remove(id);
                         }
-                        self.ast.remove(operand_id);
                         Ok(operand_type)
                     }
                     Op::Minus | Op::Not => {
@@ -207,13 +206,12 @@ impl Semantic {
 
                         let res_id = if op_list.len() % 2 == 0 {
                             // Even count: unary chain cancels out.
-                            let operand = self.ast[operand_id].clone();
+                            let operand = self.ast.remove(operand_id);
                             self.ast.replace(node_id, operand);
                             // Remove redundant unary chain nodes and duplicated operand node.
                             for id in op_list.into_iter().filter(|id| *id != node_id) {
                                 self.ast.remove(id);
                             }
-                            self.ast.remove(operand_id);
                             return Ok(operand_type);
                         } else {
                             // Odd count: keep one operator at the root and point directly to base operand.

@@ -703,6 +703,7 @@ impl IndexedArena<Op> {
         };
 
         let op = &mut self[op_id];
+        // Update Use
         match &mut op.data {
             OpData::AddI { lhs, rhs }
             | OpData::SubI { lhs, rhs }
@@ -804,5 +805,9 @@ impl IndexedArena<Op> {
             | OpData::Jump { .. }
             | OpData::Declare { .. } => { /* no operands to replace */ }
         }
+        // Delete old user
+        self.remove_use(old, op_idx.clone());
+        // Add new user
+        self.add_use(new, op_idx);
     }
 }

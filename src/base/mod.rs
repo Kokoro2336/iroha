@@ -16,3 +16,4 @@ pub mod ir {
     pub use crate::base::bb::*;
     pub use crate::base::op::*;
 }
+pub(crate) use pass::{context, context_or_err};

@@ -33,7 +33,6 @@ impl Parser {
     fn take_node(&mut self, id: NodeId) -> Node {
         self.ast
             .remove(id)
-            .unwrap_or_else(|e| panic!("Parser take_node failed at {}: {}", id, e))
     }
 
     // early constant folding optimization

@@ -3,9 +3,8 @@
  * Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
  */
 use crate::base::ir::{Attr, Op, OpData, OpType, Operand, Program};
-use crate::base::{Builder, BuilderContext, BuilderGuard, Pass, Type};
+use crate::base::{context_or_err, Builder, BuilderContext, BuilderGuard, Pass, Type};
 use crate::debug::info;
-use crate::frontend::context_or_err;
 use crate::utils::bitset::BitSet;
 
 use std::collections::HashMap;
@@ -14,7 +13,7 @@ macro_rules! acquire_cur_func_id {
     ($self:ident) => {
         match $self.current_function {
             Some(func_id) => func_id,
-            None => return Err("No current function set".to_string()),
+            None => panic!("No current function set"),
         }
     };
 }
@@ -75,7 +74,7 @@ impl<'a> BuildDomTree<'a> {
         }
     }
 
-    fn init(&mut self, func: usize) -> Result<(), String> {
+    fn init(&mut self, func: usize) {
         self.current_function = Some(func);
         let func = &self.program.funcs[func];
 
@@ -94,10 +93,9 @@ impl<'a> BuildDomTree<'a> {
         self.min = (0..n).collect();
 
         self.visited = BitSet::new();
-        Ok(())
     }
 
-    fn dfs(&mut self, src: usize) -> Result<(), String> {
+    fn dfs(&mut self, src: usize) {
         self.visited.insert(src);
         let dfs_num = self.dfn_cnt;
         self.dfn[src] = dfs_num;
@@ -112,20 +110,19 @@ impl<'a> BuildDomTree<'a> {
             block.succs.len()
         };
 
-        (0..succs_len).try_for_each(|i| {
+        (0..succs_len).for_each(|i| {
             let succ = {
                 let func = &self.program.funcs[func_idx];
                 let block = &func.cfg[src];
                 match &block.succs[i] {
                     Operand::BB(id) => *id,
-                    _ => return Err("BuildDomTree: successor is not a basic block".to_string()),
+                    _ => panic!("BuildDomTree: successor is not a basic block"),
                 }
             };
             if !self.visited.contains(succ) {
                 self.father[succ] = src;
-                self.dfs(succ)?;
+                self.dfs(succ);
             }
-            Ok(())
         })
     }
 
@@ -154,7 +151,7 @@ impl<'a> BuildDomTree<'a> {
         }
     }
 
-    pub fn build(&mut self) -> Result<Vec<DomTree>, String> {
+    pub fn build(&mut self) -> Vec<DomTree> {
         // Init dom trees first
         self.dom_trees = vec![vec![]; self.program.funcs.storage.len()];
 
@@ -165,9 +162,9 @@ impl<'a> BuildDomTree<'a> {
                 None => continue,
             };
 
-            self.init(idx)?;
+            self.init(idx);
             info!("Start DFS traversal.");
-            self.dfs(head)?;
+            self.dfs(head);
 
             info!("DFS traversal completed. Start computing dominators.");
             let num_visited = self.dfn_cnt;
@@ -238,7 +235,7 @@ impl<'a> BuildDomTree<'a> {
             // export dom tree
             self.dom_trees[idx] = self.export();
         }
-        Ok(std::mem::take(&mut self.dom_trees))
+        std::mem::take(&mut self.dom_trees)
     }
 
     // FuncId -> DomTree
@@ -275,21 +272,20 @@ impl<'a> BuildDomFrontier<'a> {
         }
     }
 
-    pub fn init(&mut self, func_id: usize) -> Result<(), String> {
+    pub fn init(&mut self, func_id: usize) {
         let func = &self.program.funcs[func_id];
         self.current_function = Some(func_id);
         self.frontiers[func_id] = vec![vec![]; func.cfg.storage.len()];
-        Ok(())
     }
 
-    pub fn is_dom(&self, dominator: usize, dominatee: usize) -> Result<bool, String> {
+    pub fn is_dom(&self, dominator: usize, dominatee: usize) -> bool {
         let func_id = acquire_cur_func_id!(self);
 
         let dom_num = {
             let dom_tree = &self.dom_trees[func_id];
             dom_tree[dominator].len()
         };
-        Ok(if self.dom_trees[func_id][dominator].contains(&dominatee) {
+        if self.dom_trees[func_id][dominator].contains(&dominatee) {
             true
         } else {
             // If not direct child, check recursively
@@ -298,12 +294,12 @@ impl<'a> BuildDomFrontier<'a> {
                     let dom_tree = &self.dom_trees[func_id];
                     dom_tree[dominator][child]
                 };
-                self.is_dom(child, dominatee).unwrap_or(false)
+                self.is_dom(child, dominatee)
             })
-        })
+        }
     }
 
-    pub fn compute(&mut self, bb_id: usize) -> Result<(), String> {
+    pub fn compute(&mut self, bb_id: usize) {
         let func_id = acquire_cur_func_id!(self);
 
         let succs = {
@@ -313,7 +309,7 @@ impl<'a> BuildDomFrontier<'a> {
             for op in &block.succs {
                 match op {
                     Operand::BB(id) => succs.push(*id),
-                    _ => return Err("DomFrontier: successor is not a basic block".to_string()),
+                    _ => panic!("DomFrontier: successor is not a basic block"),
                 }
             }
             succs
@@ -321,7 +317,7 @@ impl<'a> BuildDomFrontier<'a> {
 
         // Local frontier
         for succ in succs {
-            if !self.is_dom(bb_id, succ)? {
+            if !self.is_dom(bb_id, succ) {
                 self.frontiers[func_id][bb_id].push(succ);
             }
         }
@@ -329,19 +325,18 @@ impl<'a> BuildDomFrontier<'a> {
         let children_num = self.dom_trees[func_id][bb_id].len();
         for child_idx in 0..children_num {
             let child = self.dom_trees[func_id][bb_id][child_idx];
-            self.compute(child)?;
+            self.compute(child);
             let child_frontier_len = self.frontiers[func_id][child].len();
             for i in 0..child_frontier_len {
                 let w = self.frontiers[func_id][child][i];
-                if !self.is_dom(bb_id, w)? {
+                if !self.is_dom(bb_id, w) {
                     self.frontiers[func_id][bb_id].push(w);
                 }
             }
         }
-        Ok(())
     }
 
-    pub fn build(&mut self) -> Result<Vec<DomFrontier>, String> {
+    pub fn build(&mut self) -> Vec<DomFrontier> {
         // Init frontiers first
         self.frontiers = vec![vec![]; self.program.funcs.storage.len()];
 
@@ -351,10 +346,10 @@ impl<'a> BuildDomFrontier<'a> {
                 Some(id) => id,
                 None => continue,
             };
-            self.init(idx)?;
-            self.compute(head)?;
+            self.init(idx);
+            self.compute(head);
         }
-        Ok(std::mem::take(&mut self.frontiers))
+        std::mem::take(&mut self.frontiers)
     }
 }
 
@@ -403,7 +398,7 @@ impl<'a> InsertPhi<'a> {
         }
     }
 
-    pub fn init(&mut self, idx: usize) -> Result<(), String> {
+    pub fn init(&mut self, idx: usize) {
         self.op_to_var.clear();
         self.var_to_op.clear();
         self.var_counter = 0;
@@ -412,10 +407,7 @@ impl<'a> InsertPhi<'a> {
             self.current_function = Some(idx);
             let func = &self.program.funcs[idx];
             let cfg_len = func.cfg.storage.len();
-            let mut ctx = context_or_err!(
-                self,
-                "InsertPhi: No current function context found".to_string()
-            );
+            let mut ctx = context_or_err!(self, "InsertPhi: No current function context found");
             (cfg_len, self.builder.get_all_ops(&mut ctx, OpType::Alloca))
         };
 
@@ -423,7 +415,7 @@ impl<'a> InsertPhi<'a> {
         for alloca in allocas.into_iter() {
             let op_id = match alloca {
                 Operand::Value(id) => id,
-                _ => return Err("InsertPhi: allocas contains non-op".to_string()),
+                _ => panic!("InsertPhi: allocas contains non-op"),
             };
             let var_id = self.var_counter;
             self.var_counter += 1;
@@ -443,45 +435,36 @@ impl<'a> InsertPhi<'a> {
             let func = &self.program.funcs[func_id];
             let block = &func.cfg[bb_id];
             for op_id_operand in &block.cur {
-                let op_id = match op_id_operand {
-                    Operand::Value(id) => *id,
-                    _ => return Err("InsertPhi: cur contains non-op".to_string()),
-                };
-
-                let op = &func.dfg[op_id];
+                let op = &func.dfg[op_id_operand.clone()];
                 if op.is(OpType::Store) {
-                    let addr_id = match &op.data {
-                        OpData::Store { addr, .. } => match addr {
-                            Operand::Value(id) => *id,
-                            Operand::Global(_) => continue, // We won't promote global variables.
-                            _ => return Err("InsertPhi: store address is not an op".to_string()),
-                        },
-                        _ => return Err("InsertPhi: expected store op".to_string()),
+                    let addr = match &op.data {
+                        OpData::Store { addr, .. } => addr,
+                        _ => panic!("InsertPhi: expected store op"),
                     };
 
-                    let addr = &func.dfg[addr_id];
-                    if !addr
-                        .attrs
-                        .iter()
-                        .any(|attr| matches!(attr, Attr::Promotion))
-                    {
-                        // If the store address doesn't have OldIdx attribute, it might not be a relevant store for mem2reg (e.g., global or array), so we skip it.
-                        continue;
-                    }
+                    if let Operand::Value(addr_id) = addr {
+                        let addr_op = &func.dfg[addr.clone()];
+                        if !addr_op
+                            .attrs
+                            .iter()
+                            .any(|attr| matches!(attr, Attr::Promotion))
+                        {
+                            // If the store address doesn't have OldIdx attribute, it might not be a relevant store for mem2reg (e.g., global or array), so we skip it.
+                            continue;
+                        }
 
-                    if let Some(&var_id) = self.op_to_var.get(&addr_id) {
-                        self.defsites[var_id].push(bb_id);
-                        self.origins[bb_id].push(var_id);
+                        if let Some(&var_id) = self.op_to_var.get(addr_id) {
+                            self.defsites[var_id].push(bb_id);
+                            self.origins[bb_id].push(var_id);
+                        }
                     }
                     // If it's not in op_to_var, it might not be a relevant store for mem2reg (e.g., global or array), so we skip it.
                 }
             }
         }
-
-        Ok(())
     }
 
-    pub fn insert(&mut self) -> Result<Vec<(Operand, Operand)>, String> {
+    pub fn insert(&mut self) -> Vec<(Operand, Operand)> {
         let mut phi_ids = vec![];
 
         let defsites_len = self.defsites.len();
@@ -504,7 +487,7 @@ impl<'a> InsertPhi<'a> {
                         // Use guard to save the old context
                         let guard = BuilderGuard::new(&self.builder);
 
-                        self.builder.set_current_block(Operand::BB(frontier))?;
+                        self.builder.set_current_block(Operand::BB(frontier));
 
                         // Get type of the variable from one of its original defs.
                         let var_type = {
@@ -512,8 +495,7 @@ impl<'a> InsertPhi<'a> {
                             let origin_op_id = match self.var_to_op.get(&idx) {
                                 Some(id) => *id,
                                 None => {
-                                    return Err("InsertPhi: variable has no original definition"
-                                        .to_string())
+                                    panic!("InsertPhi: variable has no original definition")
                                 }
                             };
 
@@ -522,8 +504,7 @@ impl<'a> InsertPhi<'a> {
                             match &origin_op.typ {
                                 Type::Pointer { base } => *base.clone(),
                                 _ => {
-                                    return Err("InsertPhi: original definition is not a pointer"
-                                        .to_string())
+                                    panic!("InsertPhi: original definition is not a pointer")
                                 }
                             }
                         };
@@ -541,7 +522,7 @@ impl<'a> InsertPhi<'a> {
                                     incoming: vec![(Operand::Value(0), Operand::BB(0)); preds_num],
                                 },
                             ),
-                        )?;
+                        );
 
                         // Restore the old context
                         guard.restore(&mut self.builder);
@@ -557,22 +538,21 @@ impl<'a> InsertPhi<'a> {
                 }
             }
         }
-        Ok(phi_ids)
+        phi_ids
     }
 
-    pub fn run(&mut self) -> Result<Vec<Vec<(Operand, Operand)>>, String> {
+    pub fn run(&mut self) -> Vec<Vec<(Operand, Operand)>> {
         self.phi_ids = vec![vec![]; self.program.funcs.storage.len()];
         self.program
             .funcs
             .collect_internal()
             .into_iter()
-            .try_for_each(|idx| -> Result<(), String> {
-                self.init(idx)?;
-                let phi_ids = self.insert()?;
+            .for_each(|idx| {
+                self.init(idx);
+                let phi_ids = self.insert();
                 self.phi_ids.push(phi_ids);
-                Ok(())
-            })?;
-        Ok(std::mem::take(&mut self.phi_ids))
+            });
+        std::mem::take(&mut self.phi_ids)
     }
 }
 
@@ -614,7 +594,7 @@ impl<'a> Renaming<'a> {
         }
     }
 
-    fn init(&mut self) -> Result<(), String> {
+    fn init(&mut self) {
         self.op_to_var.clear();
         self.var_to_op.clear();
         self.var_counter = 0;
@@ -623,23 +603,20 @@ impl<'a> Renaming<'a> {
             let func = &self.program.funcs[acquire_cur_func_id!(self)];
             let entry = match func.cfg.entry {
                 Some(id) => id,
-                None => return Err("Renaming: function has no entry block".to_string()),
+                None => panic!("Renaming: function has no entry block"),
             };
             let bbs = func.cfg.collect();
             (entry, bbs)
         };
 
-        self.builder.set_current_block(Operand::BB(entry))?;
+        self.builder.set_current_block(Operand::BB(entry));
         let func_id = acquire_cur_func_id!(self);
         // For each block, we check if it contains an alloca. If it does, we move the alloca to the entry block.
         for bb_id in bbs {
             let allocas = {
-                let mut ctx = context_or_err!(
-                    self,
-                    "Renaming: No current function context found".to_string()
-                );
+                let mut ctx = context_or_err!(self, "Renaming: No current function context found");
                 self.builder
-                    .get_all_ops_in_block(&mut ctx, Operand::BB(bb_id), OpType::Alloca)?
+                    .get_all_ops_in_block(&mut ctx, Operand::BB(bb_id), OpType::Alloca)
             };
 
             // Filter allocas that are not promoted (e.g., those without the Promotion attribute). We won't promote them, so we can just ignore them in renaming.
@@ -647,10 +624,7 @@ impl<'a> Renaming<'a> {
                 .into_iter()
                 .filter(|alloca| {
                     let func = &self.program.funcs[func_id];
-                    let alloca_op = &func.dfg[match alloca {
-                        Operand::Value(id) => *id,
-                        _ => return false,
-                    }];
+                    let alloca_op = &func.dfg[alloca.clone()];
                     alloca_op
                         .attrs
                         .iter()
@@ -658,24 +632,21 @@ impl<'a> Renaming<'a> {
                 })
                 .collect();
 
-            let mut ctx = context_or_err!(
-                self,
-                "Renaming: No current function context found".to_string()
-            );
+            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
 
             // Initialize the map between OpId and VarId
             for alloca in promoted_allocas {
                 let op_id = match alloca {
                     Operand::Value(id) => id,
-                    _ => return Err("Renaming: allocas contains non-op".to_string()),
+                    _ => panic!("Renaming: allocas contains non-op"),
                 };
                 let alloca_typ = {
                     let dfg = ctx.dfg.as_ref().unwrap();
-                    let origin_op = &dfg[op_id];
+                    let origin_op = &dfg[alloca.clone()];
                     match &origin_op.typ {
                         Type::Pointer { base } => *base.clone(),
                         _ => {
-                            return Err("Renaming: original definition is not a pointer".to_string())
+                            panic!("Renaming: original definition is not a pointer")
                         }
                     }
                 };
@@ -684,12 +655,12 @@ impl<'a> Renaming<'a> {
                 if bb_id != entry {
                     self.builder.move_op_to_bb_at(
                         &mut ctx,
-                        Operand::Value(op_id),
+                        alloca.clone(),
                         Operand::BB(bb_id),
                         Operand::BB(entry),
                         // Entry block has at least one jump.
                         Some(Operand::Value(0)),
-                    )?;
+                    );
                 }
 
                 let var_id = self.var_counter;
@@ -705,11 +676,9 @@ impl<'a> Renaming<'a> {
         // In SSA form, we can treat it as undef, so we can just simply give all vars a Operand::Undefined.
         // This is a common practice in SSA construction to handle uninitialized variables.
         self.versions = vec![vec![Operand::Undefined]; self.var_counter];
-
-        Ok(())
     }
 
-    fn rename(&mut self, bb_id: usize) -> Result<(), String> {
+    fn rename(&mut self, bb_id: usize) {
         // Record current "frame pointer"
         for var in 0..self.versions.len() {
             self.records[var].push(self.versions[var].len());
@@ -726,63 +695,41 @@ impl<'a> Renaming<'a> {
 
         // 1. Process instructions in current block
         for inst in insts {
-            let op_id = match inst {
-                Operand::Value(id) => id,
-                _ => return Err("Renaming: cur contains non-op".to_string()),
-            };
-
             // We need to access op data.
             // We can't hold `op` borrow across replace_all_uses (which takes &mut ctx).
             // So we clone the necessary data or just check type first.
             let (op_data, op_attrs) = {
                 let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                let op = &func.dfg[op_id];
+                let op = &func.dfg[inst.clone()];
                 (op.data.clone(), op.attrs.clone())
             };
 
             match op_data {
                 OpData::Store { addr, value } => {
-                    let addr_id = match addr {
-                        Operand::Value(id) => id,
-                        // We won't promote global variables.
-                        Operand::Global(_) => continue,
-                        _ => return Err("Renaming: store address is not an op".to_string()),
-                    };
-
-                    if let Some(&var_id) = self.op_to_var.get(&addr_id) {
-                        // Push the OpId which produces the new value.
-                        self.versions[var_id].push(value.clone());
-                        self.removed
-                            .push((Operand::Value(op_id), Operand::BB(bb_id)));
+                    if let Operand::Value(addr_id) = addr {
+                        if let Some(&var_id) = self.op_to_var.get(&addr_id) {
+                            // Push the OpId which produces the new value.
+                            self.versions[var_id].push(value.clone());
+                            self.removed.push((inst.clone(), Operand::BB(bb_id)));
+                        }
                     }
                 }
                 OpData::Load { addr } => {
-                    let addr_id = match addr {
-                        Operand::Value(id) => id,
-                        Operand::Global(_) => continue,
-                        _ => return Err("Renaming: load address is not an op".to_string()),
-                    };
-
-                    if let Some(&var_id) = self.op_to_var.get(&addr_id) {
-                        if let Some(version) = self.versions[var_id].last() {
-                            // Replace the load with the current version
-                            let new_val = version.clone();
-                            let mut ctx = context_or_err!(
-                                self,
-                                "Renaming: No current function context found".to_string()
-                            );
-                            self.builder.replace_all_uses(
-                                &mut ctx,
-                                Operand::Value(op_id),
-                                new_val,
-                            )?;
-                            self.removed
-                                .push((Operand::Value(op_id), Operand::BB(bb_id)));
-                        } else {
-                            return Err(format!(
-                                "Renaming: load from variable {} before any store",
-                                var_id
-                            ));
+                    if let Operand::Value(addr_id) = addr {
+                        if let Some(&var_id) = self.op_to_var.get(&addr_id) {
+                            if let Some(version) = self.versions[var_id].last() {
+                                // Replace the load with the current version
+                                let new_val = version.clone();
+                                let mut ctx = context_or_err!(
+                                    self,
+                                    "Renaming: No current function context found"
+                                );
+                                self.builder
+                                    .replace_all_uses(&mut ctx, inst.clone(), new_val);
+                                self.removed.push((inst.clone(), Operand::BB(bb_id)));
+                            } else {
+                                panic!("Renaming: load from variable {} before any store", var_id);
+                            }
                         }
                     }
                 }
@@ -796,7 +743,7 @@ impl<'a> Renaming<'a> {
                     });
                     if let Some(var_op_id) = var_op {
                         if let Some(&var_id) = self.op_to_var.get(&var_op_id) {
-                            self.versions[var_id].push(Operand::Value(op_id));
+                            self.versions[var_id].push(inst.clone());
                         }
                     }
                 }
@@ -806,15 +753,10 @@ impl<'a> Renaming<'a> {
 
         // 2. Process successors
         for succ in succs {
-            let succ_id = match succ {
-                Operand::BB(id) => id,
-                _ => return Err("Renaming: successor is not a basic block".to_string()),
-            };
-
             // Calculate k (predecessor index)
             let k = {
                 let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                let succ_block = &func.cfg[succ_id];
+                let succ_block = &func.cfg[succ.clone()];
                 succ_block
                     .preds
                     .iter()
@@ -822,32 +764,24 @@ impl<'a> Renaming<'a> {
                         Operand::BB(id) => *id == bb_id,
                         _ => false,
                     })
-                    .ok_or_else(|| {
-                        "Renaming: predecessor not found in successor's preds".to_string()
-                    })?
+                    .unwrap_or_else(|| {
+                        panic!("Renaming: predecessor not found in successor's preds")
+                    })
             };
 
             // Get all phis in successor
             let phis = {
-                let mut ctx = context_or_err!(
-                    self,
-                    "Renaming: No current function context found".to_string()
-                );
+                let mut ctx = context_or_err!(self, "Renaming: No current function context found");
                 self.builder
-                    .get_all_ops_in_block(&mut ctx, Operand::BB(succ_id), OpType::Phi)?
+                    .get_all_ops_in_block(&mut ctx, succ.clone(), OpType::Phi)
             };
 
             for phi in phis {
-                let phi_id = match phi {
-                    Operand::Value(id) => id,
-                    _ => return Err("Renaming: phi contains non-op".to_string()),
-                };
-
                 // Check if this phi is one we track (has a var_id)
                 // Update phi incoming
                 let op_id = {
                     let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                    let phi_op = &func.dfg[phi_id];
+                    let phi_op = &func.dfg[phi.clone()];
                     let op_id = phi_op
                         .attrs
                         .iter()
@@ -858,33 +792,33 @@ impl<'a> Renaming<'a> {
                                 None
                             }
                         })
-                        .ok_or_else(|| "Renaming: phi op missing OldIdx attribute".to_string())?;
+                        .unwrap_or_else(|| panic!("Renaming: phi op missing OldIdx attribute"));
                     op_id
                 };
 
                 if let Some(&var_id) = self.op_to_var.get(&op_id) {
                     if let Some(version) = self.versions[var_id].last().cloned() {
                         let func = &mut self.program.funcs[acquire_cur_func_id!(self)];
-                        let phi_op = &mut func.dfg[phi_id];
+                        let phi_op = &mut func.dfg[phi.clone()];
                         // Update phi incoming
                         match &mut phi_op.data {
                             OpData::Phi { incoming } => {
                                 // Ensure incoming is large enough (it should be)
                                 incoming[k] = (version, Operand::BB(bb_id));
                             }
-                            _ => return Err("Renaming: expected phi op".to_string()),
+                            _ => panic!("Renaming: expected phi op"),
                         }
                     } else {
-                        return Err(format!(
+                        panic!(
                             "Renaming: no version available for variable {}, which means it is used before any store",
                             var_id
-                        ));
+                        );
                     }
                 } else {
-                    return Err(format!(
+                    panic!(
                         "Renaming: phi's variable not found in map, op_id: {}, op_map: {:?}",
                         op_id, self.op_to_var
-                    ));
+                    );
                 }
             }
         }
@@ -893,27 +827,25 @@ impl<'a> Renaming<'a> {
         // Clone children list to avoid borrow
         let children = self.dom_trees[acquire_cur_func_id!(self)][bb_id].clone();
         for child_id in children {
-            self.rename(child_id)?;
+            self.rename(child_id);
         }
 
         // Restore the "frame pointer"
         for var in 0..self.versions.len() {
             let record = match self.records[var].pop() {
                 Some(r) => r,
-                None => return Err("Renaming: record stack underflow".to_string()),
+                None => panic!("Renaming: record stack underflow"),
             };
             self.versions[var].truncate(record);
         }
-
-        Ok(())
     }
 
-    pub fn run(&mut self) -> Result<(), String> {
+    pub fn run(&mut self) {
         // remove load/store is done in rename
 
         for idx in self.program.funcs.collect_internal() {
             self.current_function = Some(idx);
-            self.init()?;
+            self.init();
             let head = {
                 let func = &self.program.funcs[idx];
                 match func.cfg.entry {
@@ -921,16 +853,15 @@ impl<'a> Renaming<'a> {
                     None => continue,
                 }
             };
-            self.rename(head)?;
+            self.rename(head);
 
             // Clean up removed ops for this function
             let mut ctx = context_or_err!(self, "Renaming: No current function context found");
             for (op, bb) in &self.removed {
-                self.builder.remove_op(&mut ctx, op.clone(), bb.clone())?;
+                self.builder.remove_op(&mut ctx, op.clone(), bb.clone());
             }
             self.removed.clear();
         }
-        Ok(())
     }
 }
 
@@ -957,110 +888,89 @@ impl<'a> RemoveTrivialPhi<'a> {
         }
     }
 
-    pub fn init(&mut self, idx: usize) -> Result<(), String> {
+    pub fn remove(&mut self, idx: usize) {
         self.current_function = Some(idx);
         self.worklist = self.phi_ids[idx].clone();
 
         enum CheckType {
             Empty,
-            Single(Operand, Operand), // (OpId, BBId)
+            Single(Operand), // (OpId, BBId)
             Multiple,
         }
-        fn check(ctx: &mut BuilderContext, phi_id: usize) -> Result<CheckType, String> {
+        fn check(ctx: &mut BuilderContext, phi: Operand) -> CheckType {
             let dfg = ctx.dfg.as_ref().unwrap();
-            let phi_op = &dfg[phi_id];
+            let phi_op = &dfg[phi.clone()];
             match &phi_op.data {
                 OpData::Phi { incoming } => {
                     let mut distinct: Vec<(Operand, Operand)> = vec![];
                     for (value, bb_id) in incoming.iter() {
-                        if matches!(value, Operand::Undefined)
-                            || matches!(value, Operand::Value(id) if *id == phi_id)
-                        {
+                        if matches!(value, Operand::Undefined) || *value == phi {
                             continue;
                         }
 
                         if distinct.iter().all(|(v, _)| *v != *value) {
                             distinct.push((value.clone(), bb_id.clone()));
                             if distinct.len() > 1 {
-                                return Ok(CheckType::Multiple);
+                                return CheckType::Multiple;
                             }
                         }
                     }
 
                     if distinct.is_empty() {
-                        Ok(CheckType::Empty)
+                        CheckType::Empty
                     } else {
-                        let (value, bb_id) = distinct.pop().unwrap();
-                        Ok(CheckType::Single(value, bb_id))
+                        let (value, _) = distinct.pop().unwrap();
+                        CheckType::Single(value)
                     }
                 }
-                _ => Err("RemoveTrivialPhi: expected phi op".to_string()),
+                _ => panic!("RemoveTrivialPhi: expected phi op"),
             }
         }
 
         // Check whether the phi_ids are valid
         while let Some((phi_id, bb_id)) = self.worklist.pop() {
-            let phi_id = match phi_id {
-                Operand::Value(id) => id,
-                _ => return Err("RemoveTrivialPhi: phi_ids contains non-op".to_string()),
-            };
             let uses = {
                 let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                func.dfg[phi_id].uses.clone()
+                func.dfg[phi_id.clone()].users.clone()
             };
             let mut ctx =
                 context_or_err!(self, "RemoveTrivialPhi: No current function context found");
-            match check(&mut ctx, phi_id)? {
+            match check(&mut ctx, phi_id.clone()) {
                 CheckType::Empty => {
-                    self.builder.replace_all_uses(
-                        &mut ctx,
-                        Operand::Value(phi_id),
-                        Operand::Undefined,
-                    )?;
+                    self.builder
+                        .replace_all_uses(&mut ctx, phi_id.clone(), Operand::Undefined);
                     for user in uses {
-                        let user = match user {
-                            Operand::Value(id) => id,
-                            _ => return Err("RemoveTrivialPhi: use contains non-op".to_string()),
-                        };
                         if matches!(
-                            check(&mut ctx, user)?,
-                            CheckType::Empty | CheckType::Single(_, _)
+                            check(&mut ctx, user.clone()),
+                            CheckType::Empty | CheckType::Single(_)
                         ) {
-                            self.worklist.push((Operand::Value(user), bb_id.clone()));
+                            self.worklist.push((user, bb_id.clone()));
                         }
                     }
-                    self.builder
-                        .remove_op(&mut ctx, Operand::Value(phi_id), bb_id)?;
+                    self.builder.remove_op(&mut ctx, phi_id, bb_id);
                 }
-                CheckType::Single(value, _) => {
+                CheckType::Single(value) => {
                     self.builder
-                        .replace_all_uses(&mut ctx, Operand::Value(phi_id), value)?;
+                        .replace_all_uses(&mut ctx, phi_id.clone(), value);
                     for user in uses {
-                        let user = match user {
-                            Operand::Value(id) => id,
-                            _ => return Err("RemoveTrivialPhi: use contains non-op".to_string()),
-                        };
                         if matches!(
-                            check(&mut ctx, user)?,
-                            CheckType::Empty | CheckType::Single(_, _)
+                            check(&mut ctx, user.clone()),
+                            CheckType::Empty | CheckType::Single(_)
                         ) {
-                            self.worklist.push((Operand::Value(user), bb_id.clone()));
+                            self.worklist.push((user, bb_id.clone()));
                         }
                     }
-                    self.builder
-                        .remove_op(&mut ctx, Operand::Value(phi_id), bb_id)?;
+                    self.builder.remove_op(&mut ctx, phi_id, bb_id);
                 }
                 CheckType::Multiple => {}
             }
         }
-        Ok(())
     }
 
-    pub fn run(&mut self) -> Result<(), String> {
+    pub fn run(&mut self) {
         for idx in self.program.funcs.collect_internal() {
-            self.init(idx)?;
+            self.remove(idx);
         }
-        Ok(())
     }
 }
 
@@ -1075,37 +985,37 @@ impl Mem2Reg {
 }
 
 impl Pass<Program> for Mem2Reg {
-    fn run(&mut self) -> Result<Program, String> {
+    fn run(&mut self) -> Program {
         // 1. Build dominator tree
         info!("Start building dominator tree.");
         let mut dom_builder = BuildDomTree::new(&mut self.program);
-        let dom_trees = dom_builder.build()?;
+        let dom_trees = dom_builder.build();
         info!("Dominator tree built: {:?}", dom_trees);
 
         // 2. Build dominator frontier
         info!("Start building dominator frontier.");
         let mut df_builder = BuildDomFrontier::new(&mut self.program, dom_trees.clone());
-        let frontiers = df_builder.build()?;
+        let frontiers = df_builder.build();
         info!("Dominator frontier built: {:?}", frontiers);
 
         // 3. Insert Phi nodes
         info!("Start inserting phi nodes.");
         let mut phi_inserter = InsertPhi::new(&mut self.program, frontiers);
-        let phi_ids = phi_inserter.run()?;
+        let phi_ids = phi_inserter.run();
         info!("Phi nodes inserted.");
 
         // 4. Rename variables
         info!("Start renaming variables.");
         let mut renamer = Renaming::new(&mut self.program, dom_trees);
-        renamer.run()?;
+        renamer.run();
         info!("Variables renamed.");
 
         // 5. Remove trivial phi nodes
         info!("Start removing trivial phi nodes.");
         let mut remover = RemoveTrivialPhi::new(&mut self.program, phi_ids);
-        remover.run()?;
+        remover.run();
         info!("Trivial phi nodes removed.");
 
-        Ok(std::mem::take(&mut self.program))
+        std::mem::take(&mut self.program)
     }
 }

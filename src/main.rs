@@ -86,15 +86,17 @@ fn main() -> Result<()> {
             .parse(&mut parser, &input_str)
             .unwrap();
         // set entry point to the root of the AST
-        if let Err(e) = parser.ast.set_entry(root_id) {
-            panic!("Failed to set AST entry: {}", e);
-        }
+        parser.ast.set_entry(root_id);
         // Clean up the AST.
-        info!("Start collecting garbage in AST. Total slot num: {}", parser.ast.storage.len());
-        if let Err(e) = parser.ast.gc() {
-            panic!("Failed to clean up AST: {}", e);
-        }
-        info!("Finish collecting garbage in AST. Slot num after gc: {}", parser.ast.storage.len());
+        info!(
+            "Start collecting garbage in AST. Total slot num: {}",
+            parser.ast.storage.len()
+        );
+        parser.ast.gc();
+        info!(
+            "Finish collecting garbage in AST. Slot num after gc: {}",
+            parser.ast.storage.len()
+        );
         parser.take()
     };
     // info!("\nParsed result: {:#?}", result);
@@ -105,7 +107,7 @@ fn main() -> Result<()> {
         match pass.run() {
             Ok(res) => res,
             Err(e) => {
-                panic!("Semantic Analysis Error: {}", e);
+                panic!("Semantic Error: {}", e);
             }
         }
     };
@@ -118,27 +120,11 @@ fn main() -> Result<()> {
     }
 
     info!("Start Emitting.");
-    let ir = {
-        let mut emitter = Emit::new(result);
-        match emitter.run() {
-            Ok(res) => res,
-            Err(e) => {
-                panic!("Emit Error: {}", e);
-            }
-        }
-    };
+    let ir = Emit::new(result).run();
     info!("Finish Emitting.");
 
     info!("Start Running Mem2Reg.");
-    let ir = {
-        let mut pass = Mem2Reg::new(ir);
-        match pass.run() {
-            Ok(res) => res,
-            Err(e) => {
-                panic!("Mem2Reg Error: {}", e);
-            }
-        }
-    };
+    let ir = Mem2Reg::new(ir).run();
     info!("Finish Running Mem2Reg. IR after Mem2Reg.");
 
     info!("Start Dumping LLVM IR.");
@@ -148,13 +134,7 @@ fn main() -> Result<()> {
             .and_then(|s| s.to_str())
             .unwrap_or("output")
             .to_string();
-        let mut pass = DumpLlvmPass::new(ir, filename);
-        match pass.run() {
-            Ok(res) => res,
-            Err(e) => {
-                panic!("DumpLlvmPass Error: {}", e);
-            }
-        }
+        DumpLlvmPass::new(ir, filename).run()
     };
     info!("Finish Dumping LLVM IR.");
 

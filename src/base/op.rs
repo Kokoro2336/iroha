@@ -1,3 +1,4 @@
+use std::ops::{Index, IndexMut};
 use std::vec::Vec;
 use strum_macros::EnumDiscriminants;
 
@@ -203,6 +204,21 @@ impl OpData {
     pub fn is_inner_control_flow(&self) -> bool {
         matches!(self, OpData::Br { .. } | OpData::Jump { .. })
     }
+
+    pub fn is_impure(&self) -> bool {
+        matches!(
+            self,
+            // In DCE, Load is pure.
+            OpData::Call { .. }
+                | OpData::Store { .. }
+                | OpData::Br { .. }
+                | OpData::Jump { .. }
+                | OpData::Ret { .. }
+                | OpData::Move { .. }
+                | OpData::GlobalAlloca(_)
+                | OpData::Declare { .. }
+        )
+    }
 }
 
 impl std::fmt::Display for Op {
@@ -210,11 +226,11 @@ impl std::fmt::Display for Op {
         match &self.data {
             OpData::GetArg(idx) => write!(f, "get_arg <idx = {}>", idx),
             OpData::GEP { base, indices } => {
-                write!(f, "gep {}, [", base)?;
+                write!(f, "gep {}, [", base);
                 for (i, index) in indices.iter().enumerate() {
-                    write!(f, "{}", index)?;
+                    write!(f, "{}", index);
                     if i != indices.len() - 1 {
-                        write!(f, ", ")?;
+                        write!(f, ", ");
                     }
                 }
                 write!(f, "]")
@@ -281,11 +297,11 @@ impl std::fmt::Display for Op {
             OpData::Store { addr, value } => write!(f, "store {}, {}", addr, value),
             OpData::Load { addr } => write!(f, "load {}", addr),
             OpData::Phi { incoming } => {
-                write!(f, "phi [")?;
+                write!(f, "phi [");
                 for (i, (value, bb_id)) in incoming.iter().enumerate() {
-                    write!(f, "({}, {})", value, bb_id)?;
+                    write!(f, "({}, {})", value, bb_id);
                     if i != incoming.len() - 1 {
-                        write!(f, ", ")?;
+                        write!(f, ", ");
                     }
                 }
                 write!(f, "]")
@@ -305,12 +321,32 @@ impl std::fmt::Display for Op {
     }
 }
 
+impl Index<Operand> for DFG {
+    type Output = Op;
+
+    fn index(&self, index: Operand) -> &Self::Output {
+        match index {
+            Operand::Value(id) => self.get(id).unwrap(),
+            _ => panic!("DFG index: expected Operand::Value, got {:?}", index),
+        }
+    }
+}
+
+impl IndexMut<Operand> for DFG {
+    fn index_mut(&mut self, index: Operand) -> &mut Self::Output {
+        match index {
+            Operand::Value(id) => self.get_mut(id).unwrap(),
+            _ => panic!("DFG index_mut: expected Operand::Value, got {:?}", index),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Op {
     pub typ: Type,
     pub attrs: Vec<Attr>,
     pub data: OpData,
-    pub uses: Vec<Operand>,
+    pub users: Vec<Operand>,
 }
 
 impl Op {
@@ -319,7 +355,7 @@ impl Op {
             typ,
             attrs,
             data,
-            uses: vec![],
+            users: vec![],
         }
     }
 
@@ -329,6 +365,10 @@ impl Op {
 
     pub fn is_inner_control_flow(&self) -> bool {
         self.data.is_inner_control_flow()
+    }
+
+    pub fn is_impure(&self) -> bool {
+        self.data.is_impure()
     }
 }
 
@@ -350,52 +390,52 @@ pub enum Operand {
 }
 
 impl Operand {
-    pub fn get_op_id(&self) -> Result<usize, String> {
+    pub fn get_op_id(&self) -> usize {
         match self {
-            Operand::Value(op_id) => Ok(*op_id),
-            _ => Err("Operand is not an OpId".to_string()),
+            Operand::Value(op_id) => *op_id,
+            _ => panic!("Operand is not a Value operand: {:?}", self),
         }
     }
-    pub fn get_bb_id(&self) -> Result<usize, String> {
+    pub fn get_bb_id(&self) -> usize {
         match self {
-            Operand::BB(bb_id) => Ok(*bb_id),
-            _ => Err("Operand is not a BBId".to_string()),
+            Operand::BB(bb_id) => *bb_id,
+            _ => panic!("Operand is not a BBId: {:?}", self),
         }
     }
-    pub fn get_global_id(&self) -> Result<usize, String> {
+    pub fn get_global_id(&self) -> usize {
         match self {
-            Operand::Global(global_id) => Ok(*global_id),
-            _ => Err("Operand is not a GlobalId".to_string()),
+            Operand::Global(global_id) => *global_id,
+            _ => panic!("Operand is not a GlobalId: {:?}", self),
         }
     }
-    pub fn get_int(&self) -> Result<i32, String> {
+    pub fn get_int(&self) -> i32 {
         match self {
-            Operand::Int(value) => Ok(*value),
-            _ => Err("Operand is not an Int".to_string()),
+            Operand::Int(value) => *value,
+            _ => panic!("Operand is not an Int: {:?}", self),
         }
     }
-    pub fn get_float(&self) -> Result<f32, String> {
+    pub fn get_float(&self) -> f32 {
         match self {
-            Operand::Float(value) => Ok(*value),
-            _ => Err("Operand is not a Float".to_string()),
+            Operand::Float(value) => *value,
+            _ => panic!("Operand is not a Float: {:?}", self),
         }
     }
-    pub fn get_param_id(&self) -> Result<u32, String> {
+    pub fn get_param_id(&self) -> u32 {
         match self {
-            Operand::ParamId(param_id) => Ok(*param_id),
-            _ => Err("Operand is not a ParamId".to_string()),
+            Operand::ParamId(param_id) => *param_id,
+            _ => panic!("Operand is not a ParamId: {:?}", self),
         }
     }
-    pub fn get_func_id(&self) -> Result<usize, String> {
+    pub fn get_func_id(&self) -> usize {
         match self {
-            Operand::Func(func_id) => Ok(*func_id),
-            _ => Err("Operand is not a FuncId".to_string()),
+            Operand::Func(func_id) => *func_id,
+            _ => panic!("Operand is not a FuncId: {:?}", self),
         }
     }
-    pub fn get_reg(&self) -> Result<Reg, String> {
+    pub fn get_reg(&self) -> Reg {
         match self {
-            Operand::Reg(reg) => Ok(*reg),
-            _ => Err("Operand is not a Reg".to_string()),
+            Operand::Reg(reg) => *reg,
+            _ => panic!("Operand is not a Reg: {:?}", self),
         }
     }
 }
@@ -456,17 +496,17 @@ impl std::fmt::Display for Attr {
 
 // impl dfg
 impl Arena<Op> for IndexedArena<Op> {
-    fn remove(&mut self, idx: usize) -> Result<Op, String> {
+    fn remove(&mut self, idx: usize) -> Op {
         // mark this slot as deleted
         if let ArenaItem::Data(data) = std::mem::replace(&mut self.storage[idx], ArenaItem::None) {
             // if the slot is occupied by data, mark it as deleted and return the data
-            Ok(data)
+            data
         } else {
-            Err("ArenaItem is not Op Data".to_string())
+            panic!("DFG remove: index {} is not occupied by data", idx);
         }
     }
 
-    fn gc(&mut self) -> Result<Vec<ArenaItem<Op>>, String> {
+    fn gc(&mut self) -> Vec<ArenaItem<Op>> {
         let mut new_arena: Vec<ArenaItem<Op>> = vec![];
 
         // Transport
@@ -482,17 +522,17 @@ impl Arena<Op> for IndexedArena<Op> {
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| -> Result<(), String> {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
-                _ => return Err(format!("DFG gc: index {} not found", *idx)),
+                _ => panic!("DFG gc: index {} not found", *idx),
             };
             Ok(())
         };
 
         if let Some(entry) = self.entry.as_mut() {
-            remap_idx(entry, &self.storage)?;
+            remap_idx(entry, &self.storage);
         }
 
         for idx in self.map.values_mut() {
-            remap_idx(idx, &self.storage)?;
+            remap_idx(idx, &self.storage);
         }
 
         let remap_value =
@@ -500,7 +540,7 @@ impl Arena<Op> for IndexedArena<Op> {
                 if !matches!(operand, Operand::Value(_)) {
                     return Ok(());
                 }
-                let old_idx = operand.get_op_id()?;
+                let old_idx = operand.get_op_id();
                 *operand = match old_arena.get(old_idx) {
                     Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
                     _ => return Err(format!("DFG gc: op index {} not found", old_idx)),
@@ -513,8 +553,8 @@ impl Arena<Op> for IndexedArena<Op> {
             // item can't be any other variant than Data here
             if let ArenaItem::Data(node) = item {
                 // rewrite uses
-                for use_idx in node.uses.iter_mut() {
-                    remap_value(use_idx, &self.storage)?;
+                for use_idx in node.users.iter_mut() {
+                    remap_value(use_idx, &self.storage);
                 }
 
                 // rewrite operands excluding BBId
@@ -546,48 +586,48 @@ impl Arena<Op> for IndexedArena<Op> {
                     | OpData::OLt { lhs, rhs }
                     | OpData::OGe { lhs, rhs }
                     | OpData::OLe { lhs, rhs } => {
-                        remap_value(lhs, &self.storage)?;
-                        remap_value(rhs, &self.storage)?;
+                        remap_value(lhs, &self.storage);
+                        remap_value(rhs, &self.storage);
                     }
 
                     OpData::Sitofp { value } | OpData::Fptosi { value } => {
-                        remap_value(value, &self.storage)?;
+                        remap_value(value, &self.storage);
                     }
                     OpData::Store { addr, value } => {
-                        remap_value(addr, &self.storage)?;
-                        remap_value(value, &self.storage)?;
+                        remap_value(addr, &self.storage);
+                        remap_value(value, &self.storage);
                     }
                     OpData::Load { addr } => {
-                        remap_value(addr, &self.storage)?;
+                        remap_value(addr, &self.storage);
                     }
                     OpData::Call { args, .. } => {
                         for arg in args.iter_mut() {
-                            remap_value(arg, &self.storage)?;
+                            remap_value(arg, &self.storage);
                         }
                     }
                     OpData::Br { cond, .. } => {
-                        remap_value(cond, &self.storage)?;
+                        remap_value(cond, &self.storage);
                     }
                     OpData::Ret { value } => {
                         if let Some(val) = value {
-                            remap_value(val, &self.storage)?;
+                            remap_value(val, &self.storage);
                         }
                     }
 
                     OpData::GEP { base, indices } => {
-                        remap_value(base, &self.storage)?;
+                        remap_value(base, &self.storage);
                         for index in indices.iter_mut() {
-                            remap_value(index, &self.storage)?;
+                            remap_value(index, &self.storage);
                         }
                     }
 
                     OpData::Move { value, .. } => {
-                        remap_value(value, &self.storage)?;
+                        remap_value(value, &self.storage);
                     }
 
                     OpData::Phi { incoming } => {
                         for (value, _bb_id) in incoming.iter_mut() {
-                            remap_value(value, &self.storage)?;
+                            remap_value(value, &self.storage);
                         }
                     }
 
@@ -603,150 +643,156 @@ impl Arena<Op> for IndexedArena<Op> {
         }
 
         // replace old storage
-        Ok(std::mem::replace(&mut self.storage, new_arena))
+        std::mem::replace(&mut self.storage, new_arena)
     }
 }
 
 impl IndexedArena<Op> {
-    pub fn add_use(&mut self, op_idx: Operand, use_idx: Operand) -> Result<(), String> {
+    pub fn add_use(&mut self, op_idx: Operand, use_idx: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return Ok(()),
-            _ => return Err(format!("Operand is not a valid data: {:?}", op_idx)),
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
+            _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
+        let node = &mut self[op_id];
+        // Check whether the use already exists to avoid duplicates
+        if node.users.contains(&use_idx) {
+            return;
+        }
+        node.users.push(use_idx);
+    }
 
-        if let Some(node) = self.get_mut(op_id)? {
-            node.uses.push(use_idx);
-            Ok(())
+    pub fn remove_use(&mut self, op_idx: Operand, use_idx: Operand) {
+        let op_id = match op_idx {
+            Operand::Value(op_id) => op_id,
+            // literals don't have uses in the DFG
+            // For global variables, we don't maintain uses in the DFG, so just return.
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
+            _ => panic!("Operand is not a valid data: {:?}", op_idx),
+        };
+        let node = &mut self[op_id];
+        if let Some(pos) = node.users.iter().position(|x| *x == use_idx) {
+            node.users.remove(pos);
         } else {
-            Err(format!("DFG add_use: op index {} not found", op_id))
+            panic!("Use {:?} not found in users of op {:?}", use_idx, op_idx);
         }
     }
 
     // @param op_idx: the op whose uses we want to replace with new operand. e.g. "add %1, %2"
     // @param old: the old use we want to replace with e.g. %1 in "add %1, %2"
     // @param new: the new use we want to replace with e.g. %3 in "add %3, %2"
-    pub fn replace_use(
-        &mut self,
-        op_idx: Operand,
-        old: Operand,
-        new: Operand,
-    ) -> Result<(), String> {
+    pub fn replace_use(&mut self, op_idx: Operand, old: Operand, new: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return Ok(()),
-            _ => return Err("Operand is not a valid data".to_string()),
+            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) => return,
+            _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
 
-        if let Some(op) = self.get_mut(op_id)? {
-            match &mut op.data {
-                OpData::AddI { lhs, rhs }
-                | OpData::SubI { lhs, rhs }
-                | OpData::MulI { lhs, rhs }
-                | OpData::DivI { lhs, rhs }
-                | OpData::ModI { lhs, rhs }
-                | OpData::SNe { lhs, rhs }
-                | OpData::SEq { lhs, rhs }
-                | OpData::SGt { lhs, rhs }
-                | OpData::SLt { lhs, rhs }
-                | OpData::SGe { lhs, rhs }
-                | OpData::SLe { lhs, rhs }
-                | OpData::And { lhs, rhs }
-                | OpData::Or { lhs, rhs }
-                | OpData::Xor { lhs, rhs }
-                | OpData::Shl { lhs, rhs }
-                | OpData::Shr { lhs, rhs }
-                | OpData::Sar { lhs, rhs }
-                | OpData::AddF { lhs, rhs }
-                | OpData::SubF { lhs, rhs }
-                | OpData::MulF { lhs, rhs }
-                | OpData::DivF { lhs, rhs }
-                | OpData::ONe { lhs, rhs }
-                | OpData::OEq { lhs, rhs }
-                | OpData::OGt { lhs, rhs }
-                | OpData::OLt { lhs, rhs }
-                | OpData::OGe { lhs, rhs }
-                | OpData::OLe { lhs, rhs } => {
-                    if *lhs == old {
-                        *lhs = new.clone();
-                    };
-                    if *rhs == old {
-                        *rhs = new.clone();
-                    };
-                }
-
-                OpData::Sitofp { value: value } | OpData::Fptosi { value: value } => {
-                    if *value == old {
-                        *value = new.clone();
-                    };
-                }
-                OpData::Store { addr, value } => {
-                    if *addr == old {
-                        *addr = new.clone();
-                    };
-                    if *value == old {
-                        *value = new.clone();
-                    };
-                }
-                OpData::Load { addr } => {
-                    if *addr == old {
-                        *addr = new.clone();
-                    };
-                }
-                OpData::Call { args, .. } => {
-                    for arg in args.iter_mut() {
-                        if *arg == old {
-                            *arg = new.clone();
-                        };
-                    }
-                }
-                OpData::Br { cond, .. } => {
-                    if *cond == old {
-                        *cond = new.clone();
-                    };
-                }
-                OpData::Ret { value } => {
-                    if let Some(val) = value {
-                        if *val == old {
-                            *val = new.clone();
-                        };
-                    }
-                }
-                OpData::GEP { base, indices } => {
-                    if *base == old {
-                        *base = new.clone();
-                    };
-                    for index in indices.iter_mut() {
-                        if *index == old {
-                            *index = new.clone();
-                        };
-                    }
-                }
-                OpData::Move { value, .. } => {
-                    if *value == old {
-                        *value = new.clone();
-                    };
-                }
-                OpData::Phi { incoming } => {
-                    for (value, _bb_id) in incoming.iter_mut() {
-                        if *value == old {
-                            *value = new.clone();
-                        };
-                    }
-                }
-                OpData::GlobalAlloca { .. }
-                | OpData::GetArg { .. }
-                | OpData::Alloca(_)
-                | OpData::Jump { .. }
-                | OpData::Declare { .. } => { /* no operands to replace */ }
+        let op = &mut self[op_id];
+        match &mut op.data {
+            OpData::AddI { lhs, rhs }
+            | OpData::SubI { lhs, rhs }
+            | OpData::MulI { lhs, rhs }
+            | OpData::DivI { lhs, rhs }
+            | OpData::ModI { lhs, rhs }
+            | OpData::SNe { lhs, rhs }
+            | OpData::SEq { lhs, rhs }
+            | OpData::SGt { lhs, rhs }
+            | OpData::SLt { lhs, rhs }
+            | OpData::SGe { lhs, rhs }
+            | OpData::SLe { lhs, rhs }
+            | OpData::And { lhs, rhs }
+            | OpData::Or { lhs, rhs }
+            | OpData::Xor { lhs, rhs }
+            | OpData::Shl { lhs, rhs }
+            | OpData::Shr { lhs, rhs }
+            | OpData::Sar { lhs, rhs }
+            | OpData::AddF { lhs, rhs }
+            | OpData::SubF { lhs, rhs }
+            | OpData::MulF { lhs, rhs }
+            | OpData::DivF { lhs, rhs }
+            | OpData::ONe { lhs, rhs }
+            | OpData::OEq { lhs, rhs }
+            | OpData::OGt { lhs, rhs }
+            | OpData::OLt { lhs, rhs }
+            | OpData::OGe { lhs, rhs }
+            | OpData::OLe { lhs, rhs } => {
+                if *lhs == old {
+                    *lhs = new.clone();
+                };
+                if *rhs == old {
+                    *rhs = new.clone();
+                };
             }
-            Ok(())
-        } else {
-            Err("DFG replace_use: op index not found".to_string())
+
+            OpData::Sitofp { value: value } | OpData::Fptosi { value: value } => {
+                if *value == old {
+                    *value = new.clone();
+                };
+            }
+            OpData::Store { addr, value } => {
+                if *addr == old {
+                    *addr = new.clone();
+                };
+                if *value == old {
+                    *value = new.clone();
+                };
+            }
+            OpData::Load { addr } => {
+                if *addr == old {
+                    *addr = new.clone();
+                };
+            }
+            OpData::Call { args, .. } => {
+                for arg in args.iter_mut() {
+                    if *arg == old {
+                        *arg = new.clone();
+                    };
+                }
+            }
+            OpData::Br { cond, .. } => {
+                if *cond == old {
+                    *cond = new.clone();
+                };
+            }
+            OpData::Ret { value } => {
+                if let Some(val) = value {
+                    if *val == old {
+                        *val = new.clone();
+                    };
+                }
+            }
+            OpData::GEP { base, indices } => {
+                if *base == old {
+                    *base = new.clone();
+                };
+                for index in indices.iter_mut() {
+                    if *index == old {
+                        *index = new.clone();
+                    };
+                }
+            }
+            OpData::Move { value, .. } => {
+                if *value == old {
+                    *value = new.clone();
+                };
+            }
+            OpData::Phi { incoming } => {
+                for (value, _bb_id) in incoming.iter_mut() {
+                    if *value == old {
+                        *value = new.clone();
+                    };
+                }
+            }
+            OpData::GlobalAlloca { .. }
+            | OpData::GetArg { .. }
+            | OpData::Alloca(_)
+            | OpData::Jump { .. }
+            | OpData::Declare { .. } => { /* no operands to replace */ }
         }
     }
 }

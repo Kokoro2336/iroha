@@ -179,14 +179,6 @@ impl Emit {
                     self.syms.enter_scope();
 
                     for (i, (arg_name, arg_typ)) in params.iter().enumerate() {
-                        let get_arg = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(
-                                arg_typ.clone(),
-                                vec![Attr::Name(arg_name.clone())],
-                                OpData::GetArg(Operand::ParamId(i as u32)),
-                            ),
-                        );
                         let alloca = self.builder.create(
                             &mut ctx,
                             ir::Op::new(
@@ -208,7 +200,11 @@ impl Emit {
                                 vec![],
                                 OpData::Store {
                                     addr: alloca.clone(),
-                                    value: get_arg,
+                                    value: Operand::Param {
+                                        idx: i,
+                                        name: arg_name.clone(),
+                                        typ: arg_typ.clone(),
+                                    },
                                 },
                             ),
                         );
@@ -698,8 +694,7 @@ impl Emit {
                 let ptr_typ = Type::Pointer {
                     base: Box::new(typ),
                 };
-                let ptr_addr = 
-                if let Some(local_ptr) = self.syms.get(&name) {
+                let ptr_addr = if let Some(local_ptr) = self.syms.get(&name) {
                     self.builder.create(
                         &mut ctx,
                         ir::Op::new(

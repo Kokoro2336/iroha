@@ -698,7 +698,8 @@ impl<'a> Renaming<'a> {
             match op_data {
                 OpData::Store { addr, value } => {
                     match addr {
-                        Operand::Value(_) => {}
+                        // Local variables, including parameter and local vars defined.
+                        Operand::Value(_) | Operand::Param { .. } => {}
                         // We won't promote global variables.
                         Operand::Global(_) => continue,
                         _ => panic!("Renaming: store address is not a value or global"),
@@ -860,7 +861,7 @@ impl<'a> Renaming<'a> {
             // Clean up removed ops for this function
             let mut ctx = context_or_err!(self, "Renaming: No current function context found");
             for (op, bb) in &self.removed {
-                self.builder.remove_op(&mut ctx, op.clone(), bb.clone());
+                self.builder.remove_op(&mut ctx, op.clone(), Some(bb.clone()));
             }
             self.removed.clear();
         }
@@ -977,16 +978,18 @@ impl<'a> RemoveTrivialPhi<'a> {
                                 .find(|(id, _)| *id == user)
                                 .map(|(id, bb)| {
                                     // We should check whether the user phi is already in the worklist to avoid duplicate entries.
-                                    if !self.worklist.iter().any(|(w_id, w_bb, w_check_result)| {
-                                        *w_id == *id
-                                    }) {
+                                    if !self
+                                        .worklist
+                                        .iter()
+                                        .any(|(w_id, w_bb, w_check_result)| *w_id == *id)
+                                    {
                                         self.worklist.push((id.clone(), bb.clone(), check_result));
                                     }
                                 });
                         }
                     }
                     self.builder.set_current_block(bb_id.clone());
-                    self.builder.remove_op(&mut ctx, phi_id, bb_id);
+                    self.builder.remove_op(&mut ctx, phi_id, Some(bb_id));
                 }
                 CheckType::Single(value) => {
                     crate::debug::info!("Remove trivial phi {:?} with value {:?}", phi_id, value);
@@ -1003,16 +1006,18 @@ impl<'a> RemoveTrivialPhi<'a> {
                                 .find(|(id, _)| *id == user)
                                 .map(|(id, bb)| {
                                     // We should check whether the user phi is already in the worklist to avoid duplicate entries.
-                                    if !self.worklist.iter().any(|(w_id, w_bb, w_check_result)| {
-                                        *w_id == *id
-                                    }) {
+                                    if !self
+                                        .worklist
+                                        .iter()
+                                        .any(|(w_id, w_bb, w_check_result)| *w_id == *id)
+                                    {
                                         self.worklist.push((id.clone(), bb.clone(), check_result));
                                     }
                                 });
                         }
                     }
                     self.builder.set_current_block(bb_id.clone());
-                    self.builder.remove_op(&mut ctx, phi_id, bb_id);
+                    self.builder.remove_op(&mut ctx, phi_id, Some(bb_id));
                 }
                 CheckType::Ignore => {}
             }

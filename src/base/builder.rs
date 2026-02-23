@@ -182,14 +182,29 @@ impl Builder {
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder add_users: ctx.dfg is None");
+        let globals = &mut ctx.globals;
         let data = dfg[op.get_op_id()].data.clone();
 
         match data {
             OpData::Load { addr } => {
-                dfg.add_use(addr, op);
+                if matches!(addr, Operand::Global(_)) {
+                    // For global variables, we don't maintain uses in the DFG, so just return.
+                    globals.add_use(addr, op.clone());
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.add_use(addr, op);
+                } else {
+                    panic!("Builder add_uses: Load address operand is not Value or Global");
+                }
             }
             OpData::Store { addr, value } => {
-                dfg.add_use(addr, op.clone());
+                if matches!(addr, Operand::Global(_)) {
+                    // For global variables, we don't maintain uses in the DFG, so just return.
+                    globals.add_use(addr, op.clone());
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.add_use(addr, op.clone());
+                } else {
+                    panic!("Builder add_uses: Store address operand is not Value or Global");
+                }
                 dfg.add_use(value, op);
             }
             OpData::Br { cond, .. } => {
@@ -249,11 +264,15 @@ impl Builder {
             }
 
             OpData::GEP { base, indices } => {
-                dfg.add_use(base, op.clone());
+                if matches!(base, Operand::Global(_)) {
+                    globals.add_use(base, op.clone());
+                } else if matches!(base, Operand::Value(_)) {
+                    dfg.add_use(base, op.clone());
+                } else {
+                    panic!("Builder add_uses: GEP base operand is not Value or Global");
+                }
                 for index in indices {
-                    if matches!(index, Operand::Value(_)) {
-                        dfg.add_use(index, op.clone());
-                    }
+                    dfg.add_use(index, op.clone());
                 }
             }
 
@@ -263,7 +282,6 @@ impl Builder {
 
             // GlobalAlloca: Do not maintain uses for global alloca
             OpData::GlobalAlloca(_)
-            | OpData::GetArg(_)
             // ?
             | OpData::Alloca(_)
             | OpData::Jump {..}
@@ -274,14 +292,27 @@ impl Builder {
     // Remove CURRENT Op from Another one's USERS.
     pub fn remove_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder remove_users: ctx.dfg is None");
+        let globals = &mut ctx.globals;
         let data = dfg[op.get_op_id()].data.clone();
 
         match data {
             OpData::Load { addr } => {
-                dfg.remove_use(addr, op);
+                if matches!(addr, Operand::Global(_)) {
+                    globals.remove_use(addr, op);
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.remove_use(addr, op);
+                } else {
+                    panic!("Builder remove_uses: Load address operand is not Value or Global");
+                }
             }
             OpData::Store { addr, value } => {
-                dfg.remove_use(addr, op.clone());
+                if matches!(addr, Operand::Global(_)) {
+                    globals.remove_use(addr, op.clone());
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.remove_use(addr, op.clone());
+                } else {
+                    panic!("Builder remove_uses: Store address operand is not Value or Global");
+                }
                 dfg.remove_use(value, op);
             }
             OpData::Br { cond, .. } => {
@@ -347,21 +378,32 @@ impl Builder {
             }
 
             OpData::GEP { base, indices } => {
-                dfg.remove_use(base, op.clone());
+                if matches!(base, Operand::Global(_)) {
+                    globals.remove_use(base, op.clone());
+                } else if matches!(base, Operand::Value(_)) {
+                    dfg.remove_use(base, op.clone());
+                } else {
+                    panic!("Builder remove_uses: GEP base operand is not Value or Global");
+                }
                 for index in indices {
-                    if matches!(index, Operand::Value(_)) {
-                        dfg.remove_use(index, op.clone());
-                    }
+                    dfg.remove_use(index, op.clone());
                 }
             }
             OpData::Move { value, .. } => {
                 dfg.remove_use(value, op);
             }
             OpData::GlobalAlloca(_)
-            | OpData::GetArg(_)
             | OpData::Alloca(_)
             | OpData::Jump { .. }
             | OpData::Declare { .. } => { /* do nothing */ }
+        }
+    }
+
+    pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) {
+        let dfg = acquire_dfg!(ctx, "Builder replace_all_uses: ctx.dfg is None");
+        let uses = &dfg[old.get_op_id()].users.clone();
+        for use_op in uses {
+            dfg.replace_use(use_op.clone(), old.clone(), new.clone());
         }
     }
 
@@ -406,7 +448,6 @@ impl Builder {
             | OpData::Alloca(_)
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
-            | OpData::GetArg { .. }
             | OpData::Call { .. }
             | OpData::Move { .. }
             | OpData::GEP { .. }
@@ -474,7 +515,6 @@ impl Builder {
             | OpData::Alloca(_)
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
-            | OpData::GetArg { .. }
             | OpData::Call { .. }
             | OpData::Move { .. }
             | OpData::GEP { .. }
@@ -517,8 +557,8 @@ impl Builder {
                 let op_id = globals.alloc(op);
                 Operand::Global(op_id)
             }
-            OpData::GetArg(_)
-            | OpData::GEP { .. }
+
+            OpData::GEP { .. }
             | OpData::Move { .. }
             | OpData::AddI { .. }
             | OpData::SubI { .. }
@@ -673,15 +713,7 @@ impl Builder {
         ops
     }
 
-    pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) {
-        let dfg = acquire_dfg!(ctx, "Builder replace_all_uses: ctx.dfg is None");
-        let uses = &dfg[old.get_op_id()].users.clone();
-        for use_op in uses {
-            dfg.replace_use(use_op.clone(), old.clone(), new.clone());
-        }
-    }
-
-    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) -> Op {
+    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Option<Operand>) -> Op {
         // remove uses first, otherwise we may have use-after-free in the DFG.
         self.remove_uses(ctx, op.clone());
         // Remove control flow info if needed
@@ -690,22 +722,37 @@ impl Builder {
         let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
         let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
 
-        let op_id = op.get_op_id();
-        let bb_id = bb.get_bb_id();
-        let bb = &mut cfg[bb_id];
+        let removed_op = match dfg[op.get_op_id()].data.clone() {
+            OpData::GlobalAlloca(_) => {
+                // For global alloca, we just remove it from the global variables, and do not maintain uses for it in the DFG, so we can just return here.
+                let globals = &mut ctx.globals;
+                globals.remove(op.get_op_id())
+            }
+            _ => {
+                let op_id = op.get_op_id();
+                let bb_id = match bb {
+                    Some(bb) => bb.get_bb_id(),
+                    None => panic!(
+                        "Builder remove_op: bb is None when removing instruction {:?}",
+                        op
+                    ),
+                };
+                let bb = &mut cfg[bb_id];
 
-        // remove from bb
-        if let Some(pos) = bb.cur.iter().position(|id| id.get_op_id() == op_id) {
-            bb.cur.remove(pos);
-        } else {
-            panic!(
-                "Builder remove_op: instruction {:?} not found in current_block {:?}",
-                op, bb_id
-            );
-        }
+                // remove from bb
+                if let Some(pos) = bb.cur.iter().position(|id| id.get_op_id() == op_id) {
+                    bb.cur.remove(pos);
+                } else {
+                    panic!(
+                        "Builder remove_op: instruction {:?} not found in current_block {:?}",
+                        op, bb_id
+                    );
+                }
 
-        // remove from dfg
-        let removed_op = dfg.remove(op_id);
+                // remove from dfg
+                dfg.remove(op_id)
+            }
+        };
         // Check the users of the remove op. For now, if users exist, we just panic.
         if !removed_op.users.is_empty() {
             panic!(

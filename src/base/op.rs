@@ -4,6 +4,7 @@ use strum_macros::EnumDiscriminants;
 
 use crate::asm::config::Reg;
 use crate::base::Type;
+use crate::debug::info;
 use crate::frontend::ast::Literal;
 use crate::utils::arena::*;
 
@@ -16,7 +17,6 @@ pub type DFG = IndexedArena<Op>;
 pub enum OpData {
     // customized instructions for convenience
     GlobalAlloca(u32),
-    GetArg(Operand),
     // getelementptr
     GEP {
         base: Operand,
@@ -230,7 +230,6 @@ impl OpData {
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data {
-            OpData::GetArg(idx) => write!(f, "get_arg <idx = {}>", idx),
             OpData::GEP { base, indices } => {
                 write!(f, "gep {}, [", base);
                 for (i, index) in indices.iter().enumerate() {
@@ -390,8 +389,9 @@ pub enum Operand {
     Float(f32),
     // for GEP: Raw integer index
     Index(usize),
-    // for GetArg
-    ParamId(u32),
+    // Param
+    Param { idx: usize, name: String, typ: Type },
+    // for move
     Reg(Reg),
     // for phi
     Undefined,
@@ -428,12 +428,6 @@ impl Operand {
             _ => panic!("Operand is not a Float: {:?}", self),
         }
     }
-    pub fn get_param_id(&self) -> u32 {
-        match self {
-            Operand::ParamId(param_id) => *param_id,
-            _ => panic!("Operand is not a ParamId: {:?}", self),
-        }
-    }
     pub fn get_func_id(&self) -> usize {
         match self {
             Operand::Func(func_id) => *func_id,
@@ -456,8 +450,8 @@ impl std::fmt::Display for Operand {
             Operand::Global(global_id) => write!(f, "@{}", global_id),
             Operand::Int(value) => write!(f, "{}", value),
             Operand::Float(value) => write!(f, "{}", value),
+            Operand::Param { idx, .. } => write!(f, "%arg{}", idx),
             Operand::Index(index) => write!(f, "{}", index),
-            Operand::ParamId(param_id) => write!(f, "{}", param_id),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
             Operand::Reg(reg) => write!(f, "{}", reg),
             Operand::Undefined => write!(f, "undefined"),
@@ -527,10 +521,19 @@ impl Arena<Op> for IndexedArena<Op> {
             }
         });
 
+        info!(
+            "DFG GC: {} ops collected.",
+            old_arena.len() - self.storage.len()
+        );
+
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
-                _ => panic!("DFG gc: index {} is not a valid NewIndex: {:?}", *idx, old_arena.get(*idx)),
+                _ => panic!(
+                    "DFG gc: index {} is not a valid NewIndex: {:?}",
+                    *idx,
+                    old_arena.get(*idx)
+                ),
             };
         };
 
@@ -653,10 +656,7 @@ impl Arena<Op> for IndexedArena<Op> {
                         }
                     }
 
-                    // Get global should be processed outside of gc()
-                    // TODO: As long as program global arena is not changed, the indices are stable.
                     OpData::GlobalAlloca { .. }
-                    | OpData::GetArg { .. }
                     | OpData::Alloca(_)
                     | OpData::Jump { .. }
                     | OpData::Declare { .. } => { /* no operands to rewrite */ }
@@ -673,9 +673,14 @@ impl IndexedArena<Op> {
     pub fn add_use(&mut self, op_idx: Operand, use_idx: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
+            Operand::Global(global_id) => global_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
+            Operand::Int(_)
+            | Operand::Float(_)
+            | Operand::Undefined
+            | Operand::Param { .. }
+            | Operand::Index(_) => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
         let node = &mut self[op_id];
@@ -690,9 +695,14 @@ impl IndexedArena<Op> {
     pub fn remove_use(&mut self, op_idx: Operand, use_idx: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
+            Operand::Global(global_id) => global_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
+            Operand::Int(_)
+            | Operand::Float(_)
+            | Operand::Undefined
+            | Operand::Param { .. }
+            | Operand::Index(_) => return,
             _ => panic!(
                 "Operand is not a valid data: {}: {:?}",
                 op_idx.clone(),
@@ -719,9 +729,14 @@ impl IndexedArena<Op> {
     pub fn replace_use(&mut self, op_idx: Operand, old: Operand, new: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
+            Operand::Global(global_id) => global_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
+            Operand::Int(_)
+            | Operand::Float(_)
+            | Operand::Undefined
+            | Operand::Param { .. }
+            | Operand::Index(_) => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
 
@@ -825,7 +840,6 @@ impl IndexedArena<Op> {
                 }
             }
             OpData::GlobalAlloca { .. }
-            | OpData::GetArg { .. }
             | OpData::Alloca(_)
             | OpData::Jump { .. }
             | OpData::Declare { .. } => { /* no operands to replace */ }

@@ -30,11 +30,12 @@ impl<'a> DCE<'a> {
             None => panic!("DCE: not in a function"),
         };
         let dfg = &current_func.dfg;
-        let op_id = match operand {
-            Operand::Value(id) => *id,
+        let globals = &self.program.globals;
+        match operand {
+            Operand::Value(id) => dfg[*id].users.is_empty(),
+            Operand::Global(id) => globals[*id].users.is_empty(),
             _ => panic!("DCE: operand is not a value"),
-        };
-        dfg[op_id].users.is_empty()
+        }
     }
 
     pub fn init(&mut self, func_id: usize) {
@@ -56,7 +57,7 @@ impl<'a> DCE<'a> {
         }
     }
 
-    pub fn run(&mut self) {
+    fn run(&mut self) {
         fn check(this: &mut DCE, operand: &Operand, bb_id: &Operand) {
             let func = match this.current_function {
                 Some(idx) => &this.program.funcs[idx],
@@ -69,7 +70,17 @@ impl<'a> DCE<'a> {
                         this.worklist.push((operand.clone(), bb_id.clone()));
                     }
                 }
-                Operand::Global(_) | Operand::Int(_) | Operand::Float(_) | Operand::Undefined | Operand::Index(_) => { /* do nothing */ }
+                Operand::Global(id) => {
+                    let global_id = *id;
+                    if this.is_dead(operand) && !this.program.globals[global_id].is_impure() {
+                        this.worklist.push((operand.clone(), bb_id.clone()));
+                    }
+                }
+                Operand::Int(_)
+                | Operand::Float(_)
+                | Operand::Undefined
+                | Operand::Index(_)
+                | Operand::Param { .. } => { /* do nothing */ }
                 _ => panic!("DCE: operand is not a value or basic block: {:?}", operand),
             }
         }
@@ -78,8 +89,14 @@ impl<'a> DCE<'a> {
             while let Some((op_id, bb_id)) = self.worklist.pop() {
                 let mut ctx = context_or_err!(self, "DCE: no context in run");
                 self.builder.set_current_block(bb_id.clone());
-                let removed_op = self.builder
-                    .remove_op(&mut ctx, op_id.clone(), bb_id.clone());
+                let removed_op = match op_id {
+                    Operand::Global(_) => {
+                        self.builder.remove_op(&mut ctx, op_id, None)
+                    }
+                    _ => self
+                        .builder
+                        .remove_op(&mut ctx, op_id.clone(), Some(bb_id.clone())),
+                };
 
                 // Check the operands of the removed instruction
                 let op_type = OpType::from(&removed_op.data);
@@ -180,7 +197,7 @@ impl<'a> DCE<'a> {
                         }
                     }
 
-                    OpType::GetArg | OpType::Alloca | OpType::Phi => { /* do nothing */ }
+                    OpType::Alloca | OpType::Phi => { /* do nothing */ }
 
                     OpType::Call
                     | OpType::Store

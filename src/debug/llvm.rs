@@ -29,13 +29,7 @@ fn value_operand_name(id: usize, ctx: &DumpContext) -> String {
     if let Some(func) = ctx.function {
         let op = &func.dfg[id];
         if let Some(name) = op_name_attr(op) {
-            if matches!(op.data, OpData::Alloca(_)) {
-                return format!("@{}", name);
-            }
             return format!("%{}", name);
-        }
-        if matches!(op.data, OpData::Alloca(_)) {
-            return format!("@{}", id);
         }
     }
     format!("%{}", id)
@@ -80,8 +74,8 @@ impl DumpLlvm for Operand {
             Operand::Int(val) => write!(s, "{}", val)?,
             Operand::Float(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
+            Operand::Param { idx, .. } => write!(s, "%arg{}", idx)?,
             Operand::Func(id) => write!(s, "@{}", ctx.program.funcs[*id].name)?,
-            Operand::ParamId(id) => write!(s, "{}", id)?,
             Operand::Index(id) => write!(s, "{}", id)?,
             Operand::Reg(reg) => write!(s, "{:?}", reg)?,
             Operand::Undefined => write!(s, "undef")?,
@@ -506,13 +500,6 @@ impl DumpLlvm for Op {
                     }
                 }
             }
-            OpData::GetArg(idx) => {
-                let id = match idx {
-                    Operand::ParamId(id) => *id,
-                    _ => 0,
-                };
-                write!(s, "add {} %arg{}, 0", self.typ.dump_to_llvm(ctx)?, id)?;
-            }
             OpData::Move { value, reg } => {
                 write!(s, "# move {} to reg {:?}", value.dump_to_llvm(ctx)?, reg)?
             }
@@ -606,25 +593,20 @@ impl DumpLlvm for Function {
             return Ok(s);
         }
 
-        let ret_ty = if let Type::Function { return_type, .. } = &self.typ {
-            return_type.clone()
+        let (ret_ty, param_types) = if let Type::Function {
+            return_type,
+            param_types,
+        } = &self.typ
+        {
+            (return_type.clone(), param_types)
         } else {
             return Err(std::fmt::Error);
         };
 
         let mut args_str = String::new();
-        let mut get_arg_ops = vec![];
-        for (_id, op) in self.dfg.get_all_items() {
-            if let Some(op) = op {
-                if let OpData::GetArg(Operand::ParamId(id)) = &op.data {
-                    get_arg_ops.push((*id, op.typ.clone()));
-                }
-            }
-        }
-        get_arg_ops.sort_by_key(|a| a.0);
-        for (i, (id, ty)) in get_arg_ops.iter().enumerate() {
-            write!(args_str, "{} %arg{}", ty.dump_to_llvm(ctx)?, id)?;
-            if i < get_arg_ops.len() - 1 {
+        for (i, ty) in param_types.iter().enumerate() {
+            write!(args_str, "{} %arg{}", ty.dump_to_llvm(ctx)?, i)?;
+            if i < param_types.len() - 1 {
                 write!(args_str, ", ")?;
             }
         }

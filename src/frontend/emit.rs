@@ -1,6 +1,7 @@
 use crate::base::ir;
 use crate::base::ir::*;
 use crate::base::SYSY_LIB;
+use crate::base::{context, context_or_err};
 use crate::base::{Builder, BuilderContext, LoopInfo};
 use crate::base::{Pass, SymbolTable, Type};
 use crate::frontend::ast;
@@ -32,42 +33,6 @@ pub struct Emit {
     str_counter: u32,
 }
 
-macro_rules! context {
-    ($self:ident) => {
-        if let Some(func_idx) = $self.current_function {
-            let func = &mut $self.program.funcs[func_idx];
-            BuilderContext {
-                cfg: Some(&mut func.cfg),
-                dfg: Some(&mut func.dfg),
-                globals: &mut $self.program.globals,
-            }
-        } else {
-            BuilderContext {
-                cfg: None,
-                dfg: None,
-                globals: &mut $self.program.globals,
-            }
-        }
-    };
-}
-
-macro_rules! context_or_err {
-    ($self:ident, $msg:expr) => {
-        if let Some(func_idx) = $self.current_function {
-            let func = &mut $self.program.funcs[func_idx];
-            BuilderContext {
-                cfg: Some(&mut func.cfg),
-                dfg: Some(&mut func.dfg),
-                globals: &mut $self.program.globals,
-            }
-        } else {
-            return Err($msg.to_string());
-        }
-    };
-}
-
-pub(crate) use {context, context_or_err};
-
 impl Emit {
     pub fn new(ast: AST) -> Self {
         Self {
@@ -84,7 +49,7 @@ impl Emit {
         }
     }
 
-    pub fn emit(&mut self, node_id: NodeId) -> Result<Option<Operand>, String> {
+    pub fn emit(&mut self, node_id: NodeId) -> Option<Operand> {
         fn flat_to_indices(index: usize, dims: &[u32]) -> Vec<usize> {
             if dims.is_empty() {
                 return vec![];
@@ -103,9 +68,9 @@ impl Emit {
             indices
         }
 
-        fn literal_from_const_node(ast: &AST, node_id: NodeId) -> Result<Literal, String> {
+        fn literal_from_const_node(ast: &AST, node_id: NodeId) -> Literal {
             match &ast[node_id] {
-                Node::Literal(lit) => Ok(lit.clone()),
+                Node::Literal(lit) => lit.clone(),
                 Node::UnaryOp {
                     op: ast::Op::Cast(from, to),
                     operand,
@@ -113,46 +78,41 @@ impl Emit {
                 } => {
                     let lit = match &ast[*operand] {
                         Node::Literal(lit) => lit,
-                        _ => {
-                            return Err(format!(
-                                "Global initializer cast operand must be literal: {:?}",
-                                ast[*operand]
-                            ));
-                        }
+                        _ => panic!(
+                            "Global initializer cast operand must be literal: {:?}",
+                            ast[*operand]
+                        ),
                     };
 
                     match (from, to, lit) {
-                        (Type::Int, Type::Float, Literal::Int(v)) => Ok(Literal::Float(*v as f32)),
-                        (Type::Float, Type::Int, Literal::Float(v)) => Ok(Literal::Int(*v as i32)),
-                        _ => Err(format!(
+                        (Type::Int, Type::Float, Literal::Int(v)) => Literal::Float(*v as f32),
+                        (Type::Float, Type::Int, Literal::Float(v)) => Literal::Int(*v as i32),
+                        _ => panic!(
                             "Unsupported global cast initializer: from {:?}, to {:?}, lit {:?}",
                             from, to, lit
-                        )),
+                        ),
                     }
                 }
-                _ => Err(format!(
+                _ => panic!(
                     "Global initializer must be literal or cast literal: {:?}",
                     ast[node_id]
-                )),
+                ),
             }
         }
 
-        fn node_value_type(ast: &AST, node_id: NodeId) -> Result<Type, String> {
+        fn node_value_type(ast: &AST, node_id: NodeId) -> Type {
             match &ast[node_id] {
                 Node::VarAccess { typ, .. }
                 | Node::ArrayAccess { typ, .. }
                 | Node::Call { typ, .. }
                 | Node::BinaryOp { typ, .. }
-                | Node::UnaryOp { typ, .. } => Ok(typ.clone()),
-                Node::Literal(Literal::Int(_)) => Ok(Type::Int),
-                Node::Literal(Literal::Float(_)) => Ok(Type::Float),
-                Node::Literal(Literal::String(_)) => Ok(Type::Pointer {
+                | Node::UnaryOp { typ, .. } => typ.clone(),
+                Node::Literal(Literal::Int(_)) => Type::Int,
+                Node::Literal(Literal::Float(_)) => Type::Float,
+                Node::Literal(Literal::String(_)) => Type::Pointer {
                     base: Box::new(Type::Char),
-                }),
-                _ => Err(format!(
-                    "Cannot derive value type from node: {:?}",
-                    ast[node_id]
-                )),
+                },
+                _ => panic!("Cannot derive value type from node: {:?}", ast[node_id]),
             }
         }
 
@@ -163,33 +123,33 @@ impl Emit {
             )
         }
 
-        fn emit_rval(this: &mut Emit, node_id: NodeId) -> Result<Operand, String> {
-            let mut op = this.emit(node_id)?.ok_or_else(|| {
-                format!(
+        fn emit_rval(this: &mut Emit, node_id: NodeId) -> Operand {
+            let mut op = this.emit(node_id).unwrap_or_else(|| {
+                panic!(
                     "Expected value node, got statement node: {:?}",
                     this.ast[node_id]
                 )
-            })?;
+            });
 
             if is_addr_node(&this.ast, node_id) {
-                let typ = node_value_type(&this.ast, node_id)?;
+                let typ = node_value_type(&this.ast, node_id);
                 let mut ctx = context_or_err!(this, "Value load outside function");
                 op = this.builder.create(
                     &mut ctx,
                     ir::Op::new(typ, vec![], OpData::Load { addr: op }),
-                )?;
+                );
             }
 
-            Ok(op)
+            op
         }
 
         match &self.ast[node_id] {
             Node::DeclAggr { decls } => {
                 let ids: Vec<NodeId> = decls.clone();
                 for id in ids {
-                    self.emit(id)?;
+                    self.emit(id);
                 }
-                Ok(None)
+                None
             }
             Node::FnDecl {
                 name,
@@ -206,7 +166,7 @@ impl Emit {
                     name.clone(),
                     false,
                     typ,
-                ))?);
+                )));
 
                 if let Some(func_id) = self.current_function {
                     self.func_ids.insert(name, func_id);
@@ -214,8 +174,8 @@ impl Emit {
 
                 {
                     let mut ctx = context_or_err!(self, "Function not found");
-                    let block_id = self.builder.create_new_block(&mut ctx)?;
-                    self.builder.set_current_block(block_id)?;
+                    let block_id = self.builder.create_new_block(&mut ctx);
+                    self.builder.set_current_block(block_id);
                     self.syms.enter_scope();
 
                     for (i, (arg_name, arg_typ)) in params.iter().enumerate() {
@@ -226,7 +186,7 @@ impl Emit {
                                 vec![Attr::Name(arg_name.clone())],
                                 OpData::GetArg(Operand::ParamId(i as u32)),
                             ),
-                        )?;
+                        );
                         let alloca = self.builder.create(
                             &mut ctx,
                             ir::Op::new(
@@ -240,7 +200,7 @@ impl Emit {
                                 },
                                 OpData::Alloca(arg_typ.clone()),
                             ),
-                        )?;
+                        );
                         self.builder.create(
                             &mut ctx,
                             ir::Op::new(
@@ -251,11 +211,11 @@ impl Emit {
                                     value: get_arg,
                                 },
                             ),
-                        )?;
+                        );
                         self.syms.insert(arg_name.clone(), alloca);
                     }
 
-                    let body_block_id = self.builder.create_new_block(&mut ctx)?;
+                    let body_block_id = self.builder.create_new_block(&mut ctx);
                     self.builder.create(
                         &mut ctx,
                         ir::Op::new(
@@ -265,22 +225,22 @@ impl Emit {
                                 target_bb: body_block_id.clone(),
                             },
                         ),
-                    )?;
-                    self.builder.set_current_block(body_block_id)?;
+                    );
+                    self.builder.set_current_block(body_block_id);
                 }
 
-                self.emit(body)?;
+                self.emit(body);
                 self.syms.exit_scope();
-                Ok(None)
+                None
             }
             Node::Block { statements } => {
                 let ids: Vec<NodeId> = statements.clone();
                 self.syms.enter_scope();
                 for stmt in ids {
-                    self.emit(stmt)?;
+                    self.emit(stmt);
                 }
                 self.syms.exit_scope();
-                Ok(None)
+                None
             }
             Node::VarDecl {
                 name,
@@ -297,7 +257,7 @@ impl Emit {
 
                 if is_global {
                     let init_literals = if let Some(init_id) = init_value {
-                        Some(vec![literal_from_const_node(&self.ast, init_id)?])
+                        Some(vec![literal_from_const_node(&self.ast, init_id)])
                     } else {
                         None
                     };
@@ -320,7 +280,7 @@ impl Emit {
                             ],
                             OpData::GlobalAlloca(typ.size_in_bytes()),
                         ),
-                    )?;
+                    );
                     self.globals.insert(name, alloca);
                 } else {
                     let alloca = {
@@ -334,12 +294,12 @@ impl Emit {
                                 vec![Attr::Name(name.clone()), Attr::Promotion],
                                 OpData::Alloca(typ.clone()),
                             ),
-                        )?
+                        )
                     };
                     self.syms.insert(name, alloca.clone());
 
                     if let Some(init_id) = init_value {
-                        let value = emit_rval(self, init_id)?;
+                        let value = emit_rval(self, init_id);
                         let mut ctx = context_or_err!(self, "Local variable init outside function");
                         self.builder.create(
                             &mut ctx,
@@ -351,10 +311,10 @@ impl Emit {
                                     value,
                                 },
                             ),
-                        )?;
+                        );
                     }
                 }
-                Ok(None)
+                None
             }
             Node::VarArray {
                 name,
@@ -371,7 +331,7 @@ impl Emit {
                     let values = if let Some(ids) = init_values {
                         let mut vals = vec![];
                         for id in ids {
-                            vals.push(literal_from_const_node(&self.ast, id)?);
+                            vals.push(literal_from_const_node(&self.ast, id));
                         }
                         Some(vals)
                     } else {
@@ -396,12 +356,12 @@ impl Emit {
                             ],
                             OpData::GlobalAlloca(typ.size_in_bytes()),
                         ),
-                    )?;
+                    );
                     self.globals.insert(name, alloca);
                 } else {
                     let (dims, base) = match &typ {
                         Type::Array { dims, base } => (dims.clone(), *base.clone()),
-                        _ => return Err("VarArray typ is not Array".to_string()),
+                        _ => panic!("VarArray typ is not Array"),
                     };
 
                     let alloca = {
@@ -415,13 +375,13 @@ impl Emit {
                                 vec![Attr::Name(name.clone())],
                                 OpData::Alloca(typ.clone()),
                             ),
-                        )?
+                        )
                     };
                     self.syms.insert(name, alloca.clone());
 
                     if let Some(init_ids) = init_values {
                         for (flat_idx, init_id) in init_ids.iter().enumerate() {
-                            let value = emit_rval(self, *init_id)?;
+                            let value = emit_rval(self, *init_id);
                             let idxs = flat_to_indices(flat_idx, &dims);
 
                             let mut ctx =
@@ -440,15 +400,15 @@ impl Emit {
                                             .collect(),
                                     },
                                 ),
-                            )?;
+                            );
                             self.builder.create(
                                 &mut ctx,
                                 ir::Op::new(Type::Void, vec![], OpData::Store { addr, value }),
-                            )?;
+                            );
                         }
                     }
                 }
-                Ok(None)
+                None
             }
             Node::ConstArray {
                 name,
@@ -470,7 +430,7 @@ impl Emit {
                 let values = if let Some(ids) = init_values {
                     let mut vals = vec![];
                     for id in ids {
-                        vals.push(literal_from_const_node(&self.ast, id)?);
+                        vals.push(literal_from_const_node(&self.ast, id));
                     }
                     Some(vals)
                 } else {
@@ -495,22 +455,22 @@ impl Emit {
                         ],
                         OpData::GlobalAlloca(typ.size_in_bytes()),
                     ),
-                )?;
+                );
                 self.globals.insert(emitted_name, alloca);
-                Ok(None)
+                None
             }
             Node::Return(expr) => {
                 let expr = *expr;
                 let value = match expr {
-                    Some(e) => Some(emit_rval(self, e)?),
+                    Some(e) => Some(emit_rval(self, e)),
                     None => None,
                 };
                 let mut ctx = context_or_err!(self, "Return outside function");
                 self.builder.create(
                     &mut ctx,
                     ir::Op::new(Type::Void, vec![], OpData::Ret { value }),
-                )?;
-                Ok(None)
+                );
+                None
             }
             Node::If {
                 condition,
@@ -524,17 +484,17 @@ impl Emit {
                 let (then_bb, else_bb, end_bb) = {
                     let mut ctx = context_or_err!(self, "If statement outside function");
                     (
-                        self.builder.create_new_block(&mut ctx)?,
+                        self.builder.create_new_block(&mut ctx),
                         if else_block.is_some() {
-                            Some(self.builder.create_new_block(&mut ctx)?)
+                            Some(self.builder.create_new_block(&mut ctx))
                         } else {
                             None
                         },
-                        self.builder.create_new_block(&mut ctx)?,
+                        self.builder.create_new_block(&mut ctx),
                     )
                 };
 
-                let cond = emit_rval(self, condition)?;
+                let cond = emit_rval(self, condition);
                 {
                     let mut ctx = context_or_err!(self, "If statement outside function");
                     self.builder.create(
@@ -548,11 +508,11 @@ impl Emit {
                                 else_bb: else_bb.clone().unwrap_or_else(|| end_bb.clone()),
                             },
                         ),
-                    )?;
+                    );
                 }
 
-                self.builder.set_current_block(then_bb)?;
-                self.emit(then_block)?;
+                self.builder.set_current_block(then_bb);
+                self.emit(then_block);
                 {
                     let mut ctx = context_or_err!(self, "If statement outside function");
                     self.builder.create(
@@ -564,13 +524,13 @@ impl Emit {
                                 target_bb: end_bb.clone(),
                             },
                         ),
-                    )?;
+                    );
                 }
 
                 if let Some(else_id) = else_block {
                     let else_bb_id = else_bb.expect("Else block must exist");
-                    self.builder.set_current_block(else_bb_id)?;
-                    self.emit(else_id)?;
+                    self.builder.set_current_block(else_bb_id);
+                    self.emit(else_id);
                     let mut ctx = context_or_err!(self, "If statement outside function");
                     self.builder.create(
                         &mut ctx,
@@ -581,11 +541,11 @@ impl Emit {
                                 target_bb: end_bb.clone(),
                             },
                         ),
-                    )?;
+                    );
                 }
 
-                self.builder.set_current_block(end_bb)?;
-                Ok(None)
+                self.builder.set_current_block(end_bb);
+                None
             }
             Node::While { condition, body } => {
                 let condition = *condition;
@@ -593,9 +553,9 @@ impl Emit {
 
                 let (while_entry, while_body, while_end) = {
                     let mut ctx = context_or_err!(self, "While statement outside function");
-                    let while_entry = self.builder.create_new_block(&mut ctx)?;
-                    let while_body = self.builder.create_new_block(&mut ctx)?;
-                    let while_end = self.builder.create_new_block(&mut ctx)?;
+                    let while_entry = self.builder.create_new_block(&mut ctx);
+                    let while_body = self.builder.create_new_block(&mut ctx);
+                    let while_end = self.builder.create_new_block(&mut ctx);
 
                     self.builder.create(
                         &mut ctx,
@@ -606,12 +566,12 @@ impl Emit {
                                 target_bb: while_entry.clone(),
                             },
                         ),
-                    )?;
+                    );
                     (while_entry, while_body, while_end)
                 };
 
-                self.builder.set_current_block(while_entry.clone())?;
-                let cond = emit_rval(self, condition)?;
+                self.builder.set_current_block(while_entry.clone());
+                let cond = emit_rval(self, condition);
                 {
                     let mut ctx = context_or_err!(self, "While statement outside function");
                     self.builder.create(
@@ -625,15 +585,15 @@ impl Emit {
                                 else_bb: while_end.clone(),
                             },
                         ),
-                    )?;
+                    );
                 }
 
-                self.builder.set_current_block(while_body)?;
+                self.builder.set_current_block(while_body);
                 self.builder.push_loop(LoopInfo {
                     while_entry: Some(while_entry.clone()),
                     end_block: Some(while_end.clone()),
                 });
-                self.emit(body)?;
+                self.emit(body);
                 self.builder.pop_loop();
 
                 {
@@ -647,18 +607,18 @@ impl Emit {
                                 target_bb: while_entry,
                             },
                         ),
-                    )?;
+                    );
                 }
 
-                self.builder.set_current_block(while_end)?;
-                Ok(None)
+                self.builder.set_current_block(while_end);
+                None
             }
             Node::Break => {
                 let loop_info = self
                     .builder
                     .loop_stack
                     .last()
-                    .ok_or("Break statement not inside a loop")?;
+                    .unwrap_or_else(|| panic!("Break statement not inside a loop"));
                 let mut ctx = context_or_err!(self, "Break statement not inside a function");
                 self.builder.create(
                     &mut ctx,
@@ -669,15 +629,15 @@ impl Emit {
                             target_bb: loop_info.end_block.clone().unwrap(),
                         },
                     ),
-                )?;
-                Ok(None)
+                );
+                None
             }
             Node::Continue => {
                 let loop_info = self
                     .builder
                     .loop_stack
                     .last()
-                    .ok_or("Continue statement not inside a loop")?;
+                    .unwrap_or_else(|| panic!("Continue statement not inside a loop"));
 
                 let mut ctx = context_or_err!(self, "Continue statement not inside a function");
                 self.builder.create(
@@ -689,17 +649,17 @@ impl Emit {
                             target_bb: loop_info.while_entry.clone().unwrap(),
                         },
                     ),
-                )?;
-                Ok(None)
+                );
+                None
             }
             Node::Assign { lhs, rhs } => {
                 let lhs = *lhs;
                 let rhs = *rhs;
 
-                let rhs_op = emit_rval(self, rhs)?;
+                let rhs_op = emit_rval(self, rhs);
                 let lhs_op = self
-                    .emit(lhs)?
-                    .ok_or_else(|| "Assignment lhs should be address expression".to_string())?;
+                    .emit(lhs)
+                    .unwrap_or_else(|| panic!("Assignment lhs should be address expression"));
 
                 let mut ctx = context_or_err!(self, "Store outside function");
                 self.builder.create(
@@ -712,19 +672,16 @@ impl Emit {
                             value: rhs_op,
                         },
                     ),
-                )?;
-                Ok(None)
+                );
+                None
             }
             Node::VarAccess { name, .. } => {
-                if let Some(global_id) = self.globals.get(name) {
-                    Ok(Some(global_id.clone()))
-                } else if let Some(ptr_addr) = self.syms.get(name) {
-                    Ok(Some(ptr_addr.clone()))
+                if let Some(ptr_addr) = self.syms.get(name) {
+                    Some(ptr_addr.clone())
+                } else if let Some(global_id) = self.globals.get(name) {
+                    Some(global_id.clone())
                 } else {
-                    Err(format!(
-                        "VarAccess: variable {} not found in syms or globals",
-                        name
-                    ))
+                    panic!("VarAccess: variable {} not found in syms or globals", name)
                 }
             }
             Node::ArrayAccess { name, indices, typ } => {
@@ -734,50 +691,15 @@ impl Emit {
 
                 let mut index_ops = vec![];
                 for idx in indices {
-                    index_ops.push(emit_rval(self, idx)?);
+                    index_ops.push(emit_rval(self, idx));
                 }
 
                 let mut ctx = context_or_err!(self, "Array access outside function");
                 let ptr_typ = Type::Pointer {
                     base: Box::new(typ),
                 };
-                let ptr_addr = if let Some(global_id) = self.globals.get(&name) {
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            ptr_typ,
-                            vec![],
-                            OpData::GEP {
-                                base: global_id.clone(),
-                                indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
-                                    .collect(),
-                            },
-                        ),
-                    )?
-                } else if let Some(mangled_name) = self.mangled.get(&name) {
-                    let global_id = self.globals.get(mangled_name).ok_or(format!(
-                        "ArrayAccess: promoted const array {} not found in globals",
-                        mangled_name
-                    ))?;
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            ptr_typ,
-                            vec![],
-                            OpData::GEP {
-                                base: global_id.clone(),
-                                indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
-                                    .collect(),
-                            },
-                        ),
-                    )?
-                } else {
-                    let local_ptr = self.syms.get(&name).ok_or(format!(
-                        "ArrayAccess: local array {} not found in syms",
-                        name
-                    ))?;
+                let ptr_addr = 
+                if let Some(local_ptr) = self.syms.get(&name) {
                     self.builder.create(
                         &mut ctx,
                         ir::Op::new(
@@ -790,9 +712,45 @@ impl Emit {
                                     .collect(),
                             },
                         ),
-                    )?
+                    )
+                } else if let Some(mangled_name) = self.mangled.get(&name) {
+                    let global_id = self.globals.get(mangled_name).unwrap_or_else(|| {
+                        panic!(
+                            "ArrayAccess: promoted const array {} not found in globals",
+                            mangled_name
+                        )
+                    });
+                    self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(
+                            ptr_typ,
+                            vec![],
+                            OpData::GEP {
+                                base: global_id.clone(),
+                                indices: std::iter::once(Operand::Index(0))
+                                    .chain(index_ops.into_iter())
+                                    .collect(),
+                            },
+                        ),
+                    )
+                } else if let Some(global_id) = self.globals.get(&name) {
+                    self.builder.create(
+                        &mut ctx,
+                        ir::Op::new(
+                            ptr_typ,
+                            vec![],
+                            OpData::GEP {
+                                base: global_id.clone(),
+                                indices: std::iter::once(Operand::Index(0))
+                                    .chain(index_ops)
+                                    .collect(),
+                            },
+                        ),
+                    )
+                } else {
+                    panic!("ArrayAccess: array {} not found in globals", name)
                 };
-                Ok(Some(ptr_addr))
+                Some(ptr_addr)
             }
             Node::Call {
                 typ,
@@ -805,7 +763,7 @@ impl Emit {
 
                 let mut arg_ops = vec![];
                 for arg in args {
-                    arg_ops.push(emit_rval(self, arg)?);
+                    arg_ops.push(emit_rval(self, arg));
                 }
 
                 let mut ctx = context_or_err!(self, "Call outside function");
@@ -819,8 +777,8 @@ impl Emit {
                             args: arg_ops,
                         },
                     ),
-                )?;
-                Ok(Some(call_op))
+                );
+                Some(call_op)
             }
             Node::BinaryOp { op, .. } => {
                 let op = op.clone();
@@ -845,7 +803,7 @@ impl Emit {
                     rhs: Operand,
                     op: ast::Op,
                     typ: Type,
-                ) -> Result<Operand, String> {
+                ) -> Operand {
                     let op_data = match op {
                         ast::Op::Add => {
                             if typ == Type::Int {
@@ -879,7 +837,7 @@ impl Emit {
                             if typ == Type::Int {
                                 OpData::ModI { lhs, rhs }
                             } else {
-                                return Err("Mod operator only supports Int type".to_string());
+                                panic!("Mod operator only supports Int type");
                             }
                         }
                         ast::Op::Eq => {
@@ -925,23 +883,18 @@ impl Emit {
                             }
                         }
                         ast::Op::And | ast::Op::Or => unreachable!("And/Or handled above"),
-                        _ => return Err(format!("Unsupported binary operator {:?} in Emit", op)),
+                        _ => panic!("Unsupported binary operator {:?} in Emit", op),
                     };
 
-                    let bin_op = builder.create(ctx, ir::Op::new(typ, vec![], op_data))?;
-                    Ok(bin_op)
+                    let bin_op = builder.create(ctx, ir::Op::new(typ, vec![], op_data));
+                    bin_op
                 }
 
                 let mut res = Operand::Value(0);
                 for (idx, op_id) in op_list.iter().rev().enumerate() {
                     let (lhs, rhs, op_kind) = match &self.ast[*op_id] {
                         Node::BinaryOp { lhs, op, rhs, .. } => (*lhs, *rhs, op.clone()),
-                        _ => {
-                            return Err(format!(
-                                "Expected BinaryOp node, got {:?}",
-                                self.ast[*op_id]
-                            ))
-                        }
+                        _ => panic!("Expected BinaryOp node, got {:?}", self.ast[*op_id]),
                     };
 
                     // Do short-circuit evaluation individually, since their emit behavior differ from normal op.
@@ -959,7 +912,7 @@ impl Emit {
                                         vec![Attr::Promotion],
                                         OpData::Alloca(Type::Int),
                                     ),
-                                )?;
+                                );
                                 self.builder.create(
                                     &mut ctx,
                                     ir::Op::new(
@@ -970,16 +923,16 @@ impl Emit {
                                             value: Operand::Int(0),
                                         },
                                     ),
-                                )?;
+                                );
                                 (
                                     result_alloca,
-                                    self.builder.create_new_block(&mut ctx)?,
-                                    self.builder.create_new_block(&mut ctx)?,
+                                    self.builder.create_new_block(&mut ctx),
+                                    self.builder.create_new_block(&mut ctx),
                                 )
                             };
 
                             let lhs_op = if idx == 0 {
-                                emit_rval(self, lhs)?
+                                emit_rval(self, lhs)
                             } else {
                                 // It's impossibe that res is not a Value operand,
                                 // since the only way to get a non-Value operand is from a short-circuit op, which must be the first op in the list.
@@ -999,11 +952,11 @@ impl Emit {
                                             else_bb: end_block.clone(),
                                         },
                                     ),
-                                )?;
+                                );
                             }
 
-                            self.builder.set_current_block(rhs_block)?;
-                            let rhs_op = emit_rval(self, rhs)?;
+                            self.builder.set_current_block(rhs_block);
+                            let rhs_op = emit_rval(self, rhs);
                             {
                                 let mut ctx =
                                     context_or_err!(self, "BinaryOp And outside function");
@@ -1017,7 +970,7 @@ impl Emit {
                                             value: rhs_op,
                                         },
                                     ),
-                                )?;
+                                );
                                 self.builder.create(
                                     &mut ctx,
                                     ir::Op::new(
@@ -1027,10 +980,10 @@ impl Emit {
                                             target_bb: end_block.clone(),
                                         },
                                     ),
-                                )?;
+                                );
                             }
 
-                            self.builder.set_current_block(end_block)?;
+                            self.builder.set_current_block(end_block);
                             let mut ctx = context_or_err!(self, "BinaryOp And outside function");
                             let load_result = self.builder.create(
                                 &mut ctx,
@@ -1041,7 +994,7 @@ impl Emit {
                                         addr: result_alloca,
                                     },
                                 ),
-                            )?;
+                            );
                             res = load_result;
                             continue;
                         }
@@ -1057,7 +1010,7 @@ impl Emit {
                                         vec![Attr::Promotion],
                                         OpData::Alloca(Type::Int),
                                     ),
-                                )?;
+                                );
                                 self.builder.create(
                                     &mut ctx,
                                     ir::Op::new(
@@ -1068,15 +1021,15 @@ impl Emit {
                                             value: Operand::Int(1),
                                         },
                                     ),
-                                )?;
+                                );
                                 (
                                     result_alloca,
-                                    self.builder.create_new_block(&mut ctx)?,
-                                    self.builder.create_new_block(&mut ctx)?,
+                                    self.builder.create_new_block(&mut ctx),
+                                    self.builder.create_new_block(&mut ctx),
                                 )
                             };
 
-                            let lhs_op = if idx == 0 { emit_rval(self, lhs)? } else { res };
+                            let lhs_op = if idx == 0 { emit_rval(self, lhs) } else { res };
                             {
                                 let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
                                 self.builder.create(
@@ -1090,11 +1043,11 @@ impl Emit {
                                             else_bb: rhs_block.clone(),
                                         },
                                     ),
-                                )?;
+                                );
                             }
 
-                            self.builder.set_current_block(rhs_block)?;
-                            let rhs_op = emit_rval(self, rhs)?;
+                            self.builder.set_current_block(rhs_block);
+                            let rhs_op = emit_rval(self, rhs);
                             {
                                 let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
                                 self.builder.create(
@@ -1107,7 +1060,7 @@ impl Emit {
                                             value: rhs_op,
                                         },
                                     ),
-                                )?;
+                                );
                                 self.builder.create(
                                     &mut ctx,
                                     ir::Op::new(
@@ -1117,10 +1070,10 @@ impl Emit {
                                             target_bb: end_block.clone(),
                                         },
                                     ),
-                                )?;
+                                );
                             }
 
-                            self.builder.set_current_block(end_block)?;
+                            self.builder.set_current_block(end_block);
                             let mut ctx = context_or_err!(self, "BinaryOp Or outside function");
                             let load_result = self.builder.create(
                                 &mut ctx,
@@ -1131,7 +1084,7 @@ impl Emit {
                                         addr: result_alloca,
                                     },
                                 ),
-                            )?;
+                            );
                             res = load_result;
                             continue;
                         }
@@ -1139,13 +1092,13 @@ impl Emit {
                     }
 
                     let lhs_op = if idx == 0 {
-                        emit_rval(self, lhs)?
+                        emit_rval(self, lhs)
                     } else {
                         // It's impossibe that res is not a Value operand,
                         // since the only way to get a non-Value operand is from a short-circuit op, which must be the first op in the list.
                         res
                     };
-                    let rhs_op = emit_rval(self, rhs)?;
+                    let rhs_op = emit_rval(self, rhs);
                     let new_op_id = emit_code(
                         &mut self.builder,
                         &mut context_or_err!(self, "BinaryOp outside function"),
@@ -1154,29 +1107,24 @@ impl Emit {
                         op_kind,
                         match &self.ast[*op_id] {
                             Node::BinaryOp { typ, .. } => typ.clone(),
-                            _ => {
-                                return Err(format!(
-                                    "Expected BinaryOp node, got {:?}",
-                                    self.ast[*op_id]
-                                ))
-                            }
+                            _ => panic!("Expected BinaryOp node, got {:?}", self.ast[*op_id]),
                         },
-                    )?;
+                    );
                     res = new_op_id;
                 }
-                Ok(Some(res))
+                Some(res)
             }
             Node::UnaryOp { typ, op, operand } => {
                 let typ = typ.clone();
                 let op = op.clone();
                 let operand = *operand;
 
-                let operand_op = emit_rval(self, operand)?;
+                let operand_op = emit_rval(self, operand);
                 let mut ctx = context_or_err!(self, "UnaryOp outside function");
 
                 let op_data = match op {
                     ast::Op::Plus => {
-                        return Ok(Some(operand_op));
+                        return Some(operand_op);
                     }
                     ast::Op::Minus => {
                         if typ == Type::Int {
@@ -1198,34 +1146,34 @@ impl Emit {
                                 rhs: Operand::Int(0),
                             }
                         } else {
-                            return Err(format!(
+                            panic!(
                                 "Not operator only supports Int type: {:?}",
                                 self.ast[node_id]
-                            ));
+                            );
                         }
                     }
                     ast::Op::Cast(from, to) => match (&from, &to) {
                         (Type::Int, Type::Float) => OpData::Sitofp { value: operand_op },
                         (Type::Float, Type::Int) => OpData::Fptosi { value: operand_op },
                         _ => {
-                            return Err(format!("Unsupported cast from {:?} to {:?}", from, to));
+                            panic!("Unsupported cast from {:?} to {:?}", from, to);
                         }
                     },
                     _ => {
-                        return Err(format!(
+                        panic!(
                             "Unsupported unary operator in Emit: {:?}",
                             self.ast[node_id]
-                        ));
+                        );
                     }
                 };
 
                 let un_op = self
                     .builder
-                    .create(&mut ctx, ir::Op::new(typ, vec![], op_data))?;
-                Ok(Some(un_op))
+                    .create(&mut ctx, ir::Op::new(typ, vec![], op_data));
+                Some(un_op)
             }
-            Node::Literal(Literal::Int(val)) => Ok(Some(Operand::Int(*val))),
-            Node::Literal(Literal::Float(val)) => Ok(Some(Operand::Float(*val))),
+            Node::Literal(Literal::Int(val)) => Some(Operand::Int(*val)),
+            Node::Literal(Literal::Float(val)) => Some(Operand::Float(*val)),
             Node::Literal(Literal::String(string)) => {
                 let string = string.clone();
                 self.str_counter += 1;
@@ -1256,8 +1204,8 @@ impl Emit {
                         }],
                         OpData::GlobalAlloca(typ.size_in_bytes()),
                     ),
-                )?;
-                let ptr_typ = decay(typ)?;
+                );
+                let ptr_typ = decay(typ).unwrap_or_else(|e| panic!("{}", e));
                 let ptr_addr = self.builder.create(
                     &mut ctx,
                     ir::Op::new(
@@ -1268,21 +1216,21 @@ impl Emit {
                             indices: vec![Operand::Int(0), Operand::Int(0)],
                         },
                     ),
-                )?;
-                Ok(Some(ptr_addr))
+                );
+                Some(ptr_addr)
             }
-            _ => Ok(None),
+            _ => None,
         }
     }
 
-    pub fn emit_flattened(&mut self, _node_id: NodeId) -> Result<(), String> {
+    pub fn emit_flattened(&mut self, _node_id: NodeId) {
         todo!()
     }
 }
 
 impl Pass<Program> for Emit {
-    fn run(&mut self) -> Result<Program, String> {
-        SYSY_LIB.with(|lib| -> Result<(), String> {
+    fn run(&mut self) -> Program {
+        SYSY_LIB.with(|lib| {
             let mut ctx = context!(self);
             for (name, typ) in lib.iter() {
                 self.builder.create(
@@ -1295,24 +1243,23 @@ impl Pass<Program> for Emit {
                             typ: typ.clone(),
                         },
                     ),
-                )?;
+                );
             }
             for (name, typ) in lib.iter() {
                 let func_id =
                     self.program
                         .funcs
-                        .add(Function::new(name.to_string(), true, typ.clone()))?;
+                        .add(Function::new(name.to_string(), true, typ.clone()));
                 self.func_ids.insert(name.to_string(), func_id);
             }
-            Ok(())
-        })?;
+        });
 
         let root = self
             .ast
             .entry
-            .ok_or("Emit: AST entry is missing".to_string())?;
-        self.emit(root)?;
+            .unwrap_or_else(|| panic!("Emit: AST entry is missing"));
+        self.emit(root);
 
-        Ok(std::mem::take(&mut self.program))
+        std::mem::take(&mut self.program)
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 pub trait Pass<T> {
-    fn run(&mut self) -> Result<T, String>;
+    fn run(&mut self) -> T;
 }
 
 pub struct SymbolTable<T, U> {
@@ -42,3 +42,40 @@ impl<T: std::hash::Hash + Eq, U> SymbolTable<T, U> {
         self.tables.len()
     }
 }
+
+macro_rules! context {
+    ($self:ident) => {
+        if let Some(func_idx) = $self.current_function {
+            let func = &mut $self.program.funcs[func_idx];
+            BuilderContext {
+                cfg: Some(&mut func.cfg),
+                dfg: Some(&mut func.dfg),
+                globals: &mut $self.program.globals,
+            }
+        } else {
+            BuilderContext {
+                cfg: None,
+                dfg: None,
+                globals: &mut $self.program.globals,
+            }
+        }
+    };
+}
+
+macro_rules! context_or_err {
+    ($self:ident, $msg:expr) => {
+        if let Some(func_idx) = $self.current_function {
+            let func = &mut $self.program.funcs[func_idx];
+            BuilderContext {
+                cfg: Some(&mut func.cfg),
+                dfg: Some(&mut func.dfg),
+                globals: &mut $self.program.globals,
+            }
+        } else {
+            panic!($msg);
+        }
+    };
+}
+
+pub(crate) use {context, context_or_err};
+

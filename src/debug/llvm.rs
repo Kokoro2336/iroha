@@ -27,26 +27,24 @@ fn op_name_attr(op: &Op) -> Option<&str> {
 
 fn value_operand_name(id: usize, ctx: &DumpContext) -> String {
     if let Some(func) = ctx.function {
-        if let Ok(Some(op)) = func.dfg.get(id) {
-            if let Some(name) = op_name_attr(op) {
-                if matches!(op.data, OpData::Alloca(_)) {
-                    return format!("@{}", name);
-                }
-                return format!("%{}", name);
-            }
+        let op = &func.dfg[id];
+        if let Some(name) = op_name_attr(op) {
             if matches!(op.data, OpData::Alloca(_)) {
-                return format!("@{}", id);
+                return format!("@{}", name);
             }
+            return format!("%{}", name);
+        }
+        if matches!(op.data, OpData::Alloca(_)) {
+            return format!("@{}", id);
         }
     }
     format!("%{}", id)
 }
 
 fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
-    if let Ok(Some(op)) = ctx.program.globals.get(id) {
-        if let Some(name) = op_name_attr(op) {
-            return format!("@{}", name);
-        }
+    let op = &ctx.program.globals[id];
+    if let Some(name) = op_name_attr(op) {
+        return format!("@{}", name);
     }
     format!("@{}", id)
 }
@@ -82,10 +80,7 @@ impl DumpLlvm for Operand {
             Operand::Int(val) => write!(s, "{}", val)?,
             Operand::Float(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
-            Operand::Func(id) => match ctx.program.funcs.get(*id) {
-                Ok(Some(func)) => write!(s, "@{}", func.name)?,
-                _ => write!(s, "@func_{}", id)?,
-            },
+            Operand::Func(id) => write!(s, "@{}", ctx.program.funcs[*id].name)?,
             Operand::ParamId(id) => write!(s, "{}", id)?,
             Operand::Index(id) => write!(s, "{}", id)?,
             Operand::Reg(reg) => write!(s, "{:?}", reg)?,
@@ -106,18 +101,11 @@ impl DumpLlvm for Op {
                             base: Box::new(Type::Int),
                         };
                         if let Some(f) = ctx.function {
-                            if let Ok(Some(op)) = f.dfg.get(*id) {
-                                t = op.typ.clone();
-                            }
+                            t = f.dfg[*id].typ.clone();
                         }
                         t
                     }
-                    Operand::Global(id) => match ctx.program.globals.get(*id) {
-                        Ok(Some(op)) => op.typ.clone(),
-                        _ => Type::Pointer {
-                            base: Box::new(Type::Int),
-                        },
-                    },
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     _ => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
@@ -141,16 +129,11 @@ impl DumpLlvm for Op {
                         Operand::Value(id) => {
                             let mut t = Type::Int;
                             if let Some(f) = ctx.function {
-                                if let Ok(Some(op)) = f.dfg.get(*id) {
-                                    t = op.typ.clone();
-                                }
+                                t = f.dfg[*id].typ.clone();
                             }
                             t
                         }
-                        Operand::Global(id) => match ctx.program.globals.get(*id) {
-                            Ok(Some(op)) => op.typ.clone(),
-                            _ => Type::Int,
-                        },
+                        Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                         Operand::Int(_) => Type::Int,
                         Operand::Float(_) => Type::Float,
                         _ => Type::Int,
@@ -212,18 +195,11 @@ impl DumpLlvm for Op {
                             base: Box::new(Type::Int),
                         };
                         if let Some(f) = ctx.function {
-                            if let Ok(Some(op)) = f.dfg.get(*id) {
-                                t = op.typ.clone();
-                            }
+                            t = f.dfg[*id].typ.clone();
                         }
                         t
                     }
-                    Operand::Global(id) => match ctx.program.globals.get(*id) {
-                        Ok(Some(op)) => op.typ.clone(),
-                        _ => Type::Pointer {
-                            base: Box::new(Type::Int),
-                        },
-                    },
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     _ => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
@@ -242,16 +218,11 @@ impl DumpLlvm for Op {
                     Operand::Value(id) => {
                         let mut t = Type::Int;
                         if let Some(f) = ctx.function {
-                            if let Ok(Some(op)) = f.dfg.get(*id) {
-                                t = op.typ.clone();
-                            }
+                            t = f.dfg[*id].typ.clone();
                         }
                         t
                     }
-                    Operand::Global(id) => match ctx.program.globals.get(*id) {
-                        Ok(Some(op)) => op.typ.clone(),
-                        _ => Type::Int,
-                    },
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     Operand::Int(_) => Type::Int,
                     Operand::Float(_) => Type::Float,
                     _ => Type::Int,
@@ -262,18 +233,11 @@ impl DumpLlvm for Op {
                             base: Box::new(Type::Int),
                         };
                         if let Some(f) = ctx.function {
-                            if let Ok(Some(op)) = f.dfg.get(*id) {
-                                t = op.typ.clone();
-                            }
+                            t = f.dfg[*id].typ.clone();
                         }
                         t
                     }
-                    Operand::Global(id) => match ctx.program.globals.get(*id) {
-                        Ok(Some(op)) => op.typ.clone(),
-                        _ => Type::Pointer {
-                            base: Box::new(Type::Int),
-                        },
-                    },
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     _ => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
@@ -442,16 +406,11 @@ impl DumpLlvm for Op {
                     Operand::Value(id) => {
                         let mut t = Type::Int;
                         if let Some(f) = ctx.function {
-                            if let Ok(Some(op)) = f.dfg.get(*id) {
-                                t = op.typ.clone();
-                            }
+                            t = f.dfg[*id].typ.clone();
                         }
                         t
                     }
-                    Operand::Global(id) => match ctx.program.globals.get(*id) {
-                        Ok(Some(op)) => op.typ.clone(),
-                        _ => Type::Int,
-                    },
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     _ => Type::Int,
                 };
                 write!(
@@ -467,16 +426,11 @@ impl DumpLlvm for Op {
                     Operand::Value(id) => {
                         let mut t = Type::Float;
                         if let Some(f) = ctx.function {
-                            if let Ok(Some(op)) = f.dfg.get(*id) {
-                                t = op.typ.clone();
-                            }
+                            t = f.dfg[*id].typ.clone();
                         }
                         t
                     }
-                    Operand::Global(id) => match ctx.program.globals.get(*id) {
-                        Ok(Some(op)) => op.typ.clone(),
-                        _ => Type::Float,
-                    },
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     _ => Type::Float,
                 };
 
@@ -506,10 +460,7 @@ impl DumpLlvm for Op {
             }
             OpData::Call { func, args } => {
                 let func_name = match func {
-                    Operand::Func(id) => match ctx.program.funcs.get(*id) {
-                        Ok(Some(f)) => f.name.clone(),
-                        _ => format!("func_{}", id),
-                    },
+                    Operand::Func(id) => ctx.program.funcs[*id].name.clone(),
                     _ => "unknown".to_string(),
                 };
                 write!(s, "call {} @{}(", self.typ.dump_to_llvm(ctx)?, func_name)?;
@@ -518,16 +469,11 @@ impl DumpLlvm for Op {
                         Operand::Value(id) => {
                             let mut t = Type::Int;
                             if let Some(f) = ctx.function {
-                                if let Ok(Some(op)) = f.dfg.get(*id) {
-                                    t = op.typ.clone();
-                                }
+                                t = f.dfg[*id].typ.clone();
                             }
                             t
                         }
-                        Operand::Global(id) => match ctx.program.globals.get(*id) {
-                            Ok(Some(op)) => op.typ.clone(),
-                            _ => Type::Int,
-                        },
+                        Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                         Operand::Int(_) => Type::Int,
                         Operand::Float(_) => Type::Float,
                         _ => Type::Int,
@@ -546,15 +492,17 @@ impl DumpLlvm for Op {
             }
             OpData::Phi { incoming } => {
                 write!(s, "phi {} ", self.typ.dump_to_llvm(ctx)?)?;
-                for (i, (val, bb)) in incoming.iter().enumerate() {
-                    write!(
-                        s,
-                        "[ {}, {} ]",
-                        val.dump_to_llvm(ctx)?,
-                        bb.dump_to_llvm(ctx)?
-                    )?;
-                    if i < incoming.len() - 1 {
-                        write!(s, ", ")?;
+                for (i, phi_incoming) in incoming.iter().enumerate() {
+                    if let PhiIncoming::Data { value: val, bb } = phi_incoming {
+                        write!(
+                            s,
+                            "[ {}, {} ]",
+                            val.dump_to_llvm(ctx)?,
+                            bb.dump_to_llvm(ctx)?
+                        )?;
+                        if i < incoming.len() - 1 {
+                            write!(s, ", ")?;
+                        }
                     }
                 }
             }
@@ -627,17 +575,16 @@ impl DumpLlvm for BasicBlock {
                 Operand::Value(id) => *id,
                 _ => continue,
             };
-            if let Ok(Some(inst)) = dfg.get(inst_id) {
-                if inst.typ == Type::Void {
-                    writeln!(s, "  {}", inst.dump_to_llvm(ctx)?)?;
-                } else {
-                    writeln!(
-                        s,
-                        "  {} = {}",
-                        value_operand_name(inst_id, ctx),
-                        inst.dump_to_llvm(ctx)?
-                    )?;
-                }
+            let inst = &dfg[inst_id];
+            if inst.typ == Type::Void {
+                writeln!(s, "  {}", inst.dump_to_llvm(ctx)?)?;
+            } else {
+                writeln!(
+                    s,
+                    "  {} = {}",
+                    value_operand_name(inst_id, ctx),
+                    inst.dump_to_llvm(ctx)?
+                )?;
             }
         }
         Ok(s)
@@ -893,7 +840,7 @@ impl DumpLlvmPass {
 }
 
 impl Pass<Program> for DumpLlvmPass {
-    fn run(&mut self) -> std::result::Result<Program, String> {
+    fn run(&mut self) -> Program {
         let ctx = DumpContext {
             program: &self.program,
             function: None,
@@ -902,13 +849,13 @@ impl Pass<Program> for DumpLlvmPass {
             Ok(s) => {
                 let dump_dir = std::path::Path::new("dump_llvm");
                 if !dump_dir.exists() {
-                    std::fs::create_dir_all(dump_dir).map_err(|e| e.to_string())?;
+                    std::fs::create_dir_all(dump_dir).map_err(|e| e.to_string());
                 }
                 let file_path = dump_dir.join(format!("{}.ll", self.filename));
-                std::fs::write(file_path, s).map_err(|e| e.to_string())?;
+                std::fs::write(file_path, s).map_err(|e| e.to_string());
             }
             Err(e) => info!("Error dumping LLVM IR: {}", e),
         }
-        Ok(std::mem::take(&mut self.program))
+        std::mem::take(&mut self.program)
     }
 }

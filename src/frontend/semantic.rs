@@ -29,7 +29,7 @@ impl Semantic {
     }
 
     pub fn analyze(&mut self, node_id: NodeId) -> Result<Type, String> {
-        let node_type = self.ast.get_node_type(node_id)?;
+        let node_type = self.ast.get_node_type(node_id);
         match node_type {
             NodeType::BinaryOp => {
                 let op_kind = match &self.ast[node_id] {
@@ -182,13 +182,12 @@ impl Semantic {
                         };
                         let operand_type = self.analyze(operand_id)?;
                         // Replace the root unary node with its operand node, in place.
-                        let operand = self.ast[operand_id].clone();
-                        self.ast.replace(node_id, operand)?;
+                        let operand = self.ast.remove(operand_id);
+                        self.ast.replace(node_id, operand);
                         // Remove redundant unary chain nodes and duplicated operand node.
                         for id in op_list.into_iter().filter(|id| *id != node_id) {
-                            self.ast.remove(id)?;
+                            self.ast.remove(id);
                         }
-                        self.ast.remove(operand_id)?;
                         Ok(operand_type)
                     }
                     Op::Minus | Op::Not => {
@@ -207,13 +206,12 @@ impl Semantic {
 
                         let res_id = if op_list.len() % 2 == 0 {
                             // Even count: unary chain cancels out.
-                            let operand = self.ast[operand_id].clone();
-                            self.ast.replace(node_id, operand)?;
+                            let operand = self.ast.remove(operand_id);
+                            self.ast.replace(node_id, operand);
                             // Remove redundant unary chain nodes and duplicated operand node.
                             for id in op_list.into_iter().filter(|id| *id != node_id) {
-                                self.ast.remove(id)?;
+                                self.ast.remove(id);
                             }
-                            self.ast.remove(operand_id)?;
                             return Ok(operand_type);
                         } else {
                             // Odd count: keep one operator at the root and point directly to base operand.
@@ -222,7 +220,7 @@ impl Semantic {
                             }
                             // Remove redundant unary chain nodes, keep root and base operand.
                             for id in op_list.iter().copied().filter(|id| *id != node_id) {
-                                self.ast.remove(id)?;
+                                self.ast.remove(id);
                             }
                             operand_id
                         };
@@ -731,7 +729,7 @@ impl Semantic {
     }
 }
 
-impl Pass<AST> for Semantic {
+impl Pass<Result<AST, String>> for Semantic {
     fn run(&mut self) -> Result<AST, String> {
         self.syms.enter_scope();
         SYSY_LIB.with(|lib| {

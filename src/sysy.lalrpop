@@ -1,6 +1,7 @@
 use crate::base::Type;
 use crate::frontend::ast::*;
 use crate::frontend::parse::*;
+use crate::utils::arena::Arena;
 use std::ffi::CString;
 
 grammar(parser: &mut Parser);
@@ -16,8 +17,12 @@ pub CompUnit: NodeId = {
   <enter_scope: EnterScope> <global_objs: (GlobalObj)*> <exit_scope: ExitScope> => {
     let mut statements = vec![];
     for obj in global_objs {
-      match parser.ast[obj].clone() {
-        Node::DeclAggr { decls } => {
+      match parser.ast.get_node_type(obj) {
+        NodeType::DeclAggr => {
+          let decls = match parser.ast.remove(obj) {
+            Node::DeclAggr { decls } => decls,
+            _ => unreachable!(),
+          };
           for decl in decls {
             if matches!(parser.ast[decl], Node::VarArray { .. }) {
               let values = if let Node::VarArray { init_values, .. } = &mut parser.ast[decl] {
@@ -194,8 +199,12 @@ BType: Type = {
 Block: NodeId = "{" <enter_scope: EnterScope> <block_items: (BlockItem)*> <exit_scope: ExitScope> "}" => {
   let mut statements = vec![];
   for item in block_items {
-    match parser.ast[item].clone() {
-      Node::DeclAggr { decls } => {
+    match parser.ast.get_node_type(item) {
+      NodeType::DeclAggr => {
+        let decls = match parser.ast.remove(item) {
+          Node::DeclAggr { decls } => decls,
+          _ => unreachable!(),
+        };
         for decl in decls {
           statements.push(decl);
         }

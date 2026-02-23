@@ -216,141 +216,134 @@ impl Node {
 }
 
 impl AST {
-    pub fn get_node_type(&self, idx: usize) -> Result<NodeType, String> {
+    pub fn get_node_type(&self, idx: usize) -> NodeType {
         if idx >= self.storage.len() {
-            return Err(format!("AST get_type: index {} out of bounds", idx));
+            panic!("AST get_type: index {} out of bounds", idx);
         }
-        match self.storage.get(idx) {
-            Some(ArenaItem::Data(node)) => Ok(NodeType::from(node)),
-            _ => Err(format!("AST get_type: index {} is not a valid node", idx)),
+        match &self.storage[idx] {
+            ArenaItem::Data(node) => NodeType::from(node),
+            _ => panic!("AST get_type: index {} is not a valid node", idx),
         }
     }
 }
 
 impl Arena<Node> for AST {
-    fn remove(&mut self, idx: usize) -> Result<Node, String> {
+    fn remove(&mut self, idx: usize) -> Node {
         if idx >= self.storage.len() {
-            Err(format!("Index {} out of bounds", idx))
+            panic!("Index {} out of bounds", idx);
         } else {
             match std::mem::replace(&mut self.storage[idx], ArenaItem::None) {
-                ArenaItem::Data(node) => Ok(node),
-                _ => Err(format!("Index {} is not a valid node", idx)),
+                ArenaItem::Data(node) => node,
+                _ => panic!("Index {} is not a valid node", idx),
             }
         }
     }
 
-    fn gc(&mut self) -> Result<Vec<ArenaItem<Node>>, String> {
+    fn gc(&mut self) -> Vec<ArenaItem<Node>> {
         let new_arena: Vec<ArenaItem<Node>> = vec![];
-        let old_arena = std::mem::replace(&mut self.storage, new_arena);
+        let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
 
-        let old_arena = old_arena
-            .into_iter()
-            .map(|mut item| {
-                if matches!(item, ArenaItem::Data(_)) {
-                    let new_idx = self.storage.len();
-                    let data = item.replace(new_idx);
-                    self.storage.push(data);
-                    ArenaItem::NewIndex(new_idx)
-                } else {
-                    ArenaItem::None
-                }
-            })
-            .collect::<Vec<ArenaItem<Node>>>();
+        old_arena.iter_mut().for_each(|item| {
+            if matches!(item, ArenaItem::Data(_)) {
+                let new_idx = self.storage.len();
+                let data = item.replace(new_idx);
+                self.storage.push(data);
+            }
+        });
 
-        let remap_idx = |idx: &mut NodeId| -> Result<(), String> {
+        let remap_idx = |idx: &mut NodeId| {
             *idx = match old_arena.get(*idx).unwrap() {
                 ArenaItem::NewIndex(new_idx) => *new_idx,
-                _ => return Err("AST gc: node index not found".to_string()),
+                _ => panic!("AST gc: node index not found"),
             };
-            Ok(())
         };
 
         if let Some(entry) = self.entry.as_mut() {
-            remap_idx(entry)?;
+            remap_idx(entry);
         }
 
         for idx in self.map.values_mut() {
-            remap_idx(idx)?;
+            remap_idx(idx);
         }
 
         for item in self.storage.iter_mut() {
             if let ArenaItem::Data(node) = item {
                 match node {
                     Node::FnDecl { body, .. } => {
-                        remap_idx(body)?;
+                        remap_idx(body);
                     }
                     Node::Return(ret) => {
                         if let Some(ret) = ret {
-                            remap_idx(ret)?;
+                            remap_idx(ret);
                         }
                     }
                     Node::Block { statements } => {
                         for stmt in statements.iter_mut() {
-                            remap_idx(stmt)?;
+                            remap_idx(stmt);
                         }
                     }
                     Node::Assign { lhs, rhs, .. } => {
-                        remap_idx(lhs)?;
-                        remap_idx(rhs)?;
+                        remap_idx(lhs);
+                        remap_idx(rhs);
                     }
                     Node::If {
                         condition,
                         then_block,
                         else_block,
                     } => {
-                        remap_idx(condition)?;
-                        remap_idx(then_block)?;
+                        remap_idx(condition);
+                        remap_idx(then_block);
                         if let Some(else_block) = else_block {
-                            remap_idx(else_block)?;
+                            remap_idx(else_block);
                         }
                     }
                     Node::While {
                         condition, body, ..
                     } => {
-                        remap_idx(condition)?;
-                        remap_idx(body)?;
+                        remap_idx(condition);
+                        remap_idx(body);
                     }
                     Node::BinaryOp { lhs, rhs, .. } => {
-                        remap_idx(lhs)?;
-                        remap_idx(rhs)?;
+                        remap_idx(lhs);
+                        remap_idx(rhs);
                     }
                     Node::UnaryOp { operand, .. } => {
-                        remap_idx(operand)?;
+                        remap_idx(operand);
                     }
                     Node::Call { args, .. } => {
                         for arg in args.iter_mut() {
-                            remap_idx(arg)?;
+                            remap_idx(arg);
                         }
                     }
                     Node::VarDecl { init_value, .. } => {
                         if let Some(init_value) = init_value {
-                            remap_idx(init_value)?;
+                            remap_idx(init_value);
                         }
                     }
                     Node::ConstArray { init_values, .. } | Node::VarArray { init_values, .. } => {
                         if let Some(init_values) = init_values {
                             for init_value in init_values.iter_mut() {
-                                remap_idx(init_value)?;
+                                remap_idx(init_value);
                             }
                         }
                     }
                     Node::ArrayAccess { indices, .. } => {
                         for index in indices.iter_mut() {
-                            remap_idx(index)?;
+                            remap_idx(index);
                         }
                     }
                     Node::DeclAggr { decls } => {
                         for decl in decls.iter_mut() {
-                            remap_idx(decl)?;
+                            remap_idx(decl);
                         }
                     }
                     Node::RawDecl { raw_decls, .. } => {
                         for raw_decl in raw_decls.iter_mut() {
                             for const_exp in raw_decl.const_exps.iter_mut() {
-                                remap_idx(const_exp)?;
+                                remap_idx(const_exp);
                             }
                             if let Some(init_val) = &mut raw_decl.init_val {
-                                remap_idx(init_val)?;
+                                remap_idx(init_val);
                             }
                         }
                     }
@@ -360,15 +353,15 @@ impl Arena<Node> for AST {
                         ..
                     } => {
                         for const_exp in const_exps.iter_mut() {
-                            remap_idx(const_exp)?;
+                            remap_idx(const_exp);
                         }
                         if let Some(init_val) = init_val {
-                            remap_idx(init_val)?;
+                            remap_idx(init_val);
                         }
                     }
                     Node::ArrayInitVal { init_vals } => {
                         for init_val in init_vals.iter_mut() {
-                            remap_idx(init_val)?;
+                            remap_idx(init_val);
                         }
                     }
                     Node::Break
@@ -380,6 +373,6 @@ impl Arena<Node> for AST {
             }
         }
 
-        Ok(old_arena)
+        old_arena
     }
 }

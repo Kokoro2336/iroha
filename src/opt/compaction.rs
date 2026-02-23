@@ -13,8 +13,7 @@ impl<'a> Compaction<'a> {
 }
 
 impl<'a> Pass<()> for Compaction<'a> {
-    fn run(&mut self) -> Result<(), String> {
-        self.program.funcs.gc()?;
-        Ok(())
+    fn run(&mut self) {
+        self.program.funcs.gc();
     }
 }

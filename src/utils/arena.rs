@@ -9,8 +9,8 @@ pub trait Arena<T>
 where
     T: std::fmt::Debug,
 {
-    fn remove(&mut self, idx: usize) -> Result<T, String>;
-    fn gc(&mut self) -> Result<Vec<ArenaItem<T>>, String>;
+    fn remove(&mut self, idx: usize) -> T;
+    fn gc(&mut self) -> Vec<ArenaItem<T>>;
 }
 
 #[derive(Debug, Clone)]
@@ -67,72 +67,55 @@ where
         index
     }
 
-    pub fn add_name(&mut self, name: String, idx: usize) -> Result<(), String> {
+    pub fn add_name(&mut self, name: String, idx: usize) {
         if self.map.contains_key(&name) {
-            return Err("IndexedArena add_name: name already exists".to_string());
+            panic!("IndexedArena add_name: name already exists");
         }
         self.map.insert(name, idx);
-        Ok(())
     }
 
-    pub fn set_entry(&mut self, idx: usize) -> Result<(), String> {
+    pub fn set_entry(&mut self, idx: usize) {
+        if idx >= self.storage.len() {
+            panic!("IndexedArena set_entry: index {} out of bounds, len: {}", idx, self.storage.len());
+        }
         self.entry = Some(idx);
-        Ok(())
     }
 
-    pub fn get_by_name(&self, name: String) -> Result<Option<&T>, String> {
+    pub fn get_by_name(&self, name: String) -> Option<&T> {
         match self.map.get(&name) {
             Some(&idx) => self.get(idx),
-            None => Ok(None),
+            None => None,
         }
     }
 
-    pub fn get_mut_by_name(&mut self, name: String) -> Result<Option<&mut T>, String> {
+    pub fn get_mut_by_name(&mut self, name: String) -> Option<&mut T> {
         match self.map.get(&name) {
             Some(&idx) => self.get_mut(idx),
-            None => Ok(None),
+            None => None,
         }
     }
 
-    pub fn get(&self, idx: usize) -> Result<Option<&T>, String> {
+    pub fn get(&self, idx: usize) -> Option<&T> {
         if idx >= self.storage.len() {
-            return Err(format!("IndexedArena get: index {} out of bounds", idx));
+            panic!("IndexedArena get: index {} out of bounds, len: {}", idx, self.storage.len());
         }
-        // match None: the arena is empty
-        // match Some(AreanaItem::Data): the arena has data at idx
-        // match Some(AreanaItem::NewIndex): the arena has transported data at idx, invalid!
-        // match Some(AreanaItem::None): the arena has deleted data at idx, invalid!
-        if matches!(
-            self.storage.get(idx),
-            Some(ArenaItem::None) | Some(ArenaItem::NewIndex(_))
-        ) {
-            return Err(format!(
-                "IndexedArena get: index {} points to None or NewIndex",
-                idx
-            ));
-        }
-        match self.storage.get(idx) {
-            Some(ArenaItem::Data(node)) => Ok(Some(node)),
-            _ => Ok(None),
+        match &self.storage[idx] {
+            ArenaItem::Data(node) => Some(node),
+            ArenaItem::None | ArenaItem::NewIndex(_) => {
+                panic!("IndexedArena get: index {} points to None or NewIndex", idx);
+            }
         }
     }
 
-    pub fn get_mut(&mut self, idx: usize) -> Result<Option<&mut T>, String> {
+    pub fn get_mut(&mut self, idx: usize) -> Option<&mut T> {
         if idx >= self.storage.len() {
-            return Err(format!("IndexedArena get_mut: index {} out of bounds", idx));
+            panic!("IndexedArena get_mut: index {} out of bounds, len: {}", idx, self.storage.len());
         }
-        if matches!(
-            self.storage.get(idx),
-            Some(ArenaItem::None) | Some(ArenaItem::NewIndex(_))
-        ) {
-            return Err(format!(
-                "IndexedArena get_mut: index {} points to None or NewIndex",
-                idx
-            ));
-        }
-        match self.storage.get_mut(idx) {
-            Some(ArenaItem::Data(node)) => Ok(Some(node)),
-            _ => Ok(None),
+        match &mut self.storage[idx] {
+            ArenaItem::Data(node) => Some(node),
+            ArenaItem::None | ArenaItem::NewIndex(_) => {
+                panic!("IndexedArena get_mut: index {} points to None or NewIndex", idx);
+            }
         }
     }
 
@@ -149,21 +132,20 @@ where
     }
 
     // Replace the data at idx with new_item.
-    pub fn replace(&mut self, idx: usize, new_item: T) -> Result<(), String> {
+    pub fn replace(&mut self, idx: usize, new_item: T) {
         if idx >= self.storage.len() {
-            return Err(format!("IndexedArena replace: index {} out of bounds", idx));
+            panic!("IndexedArena replace: index {} out of bounds", idx);
         }
         if matches!(
             self.storage.get(idx),
             Some(ArenaItem::None) | Some(ArenaItem::NewIndex(_))
         ) {
-            return Err(format!(
+            panic!(
                 "IndexedArena replace: index {} points to None or NewIndex",
                 idx
-            ));
+            );
         }
         self.storage[idx] = ArenaItem::Data(new_item);
-        Ok(())
     }
 }
 
@@ -174,7 +156,7 @@ where
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
-        self.get(index).unwrap().unwrap()
+        self.get(index).unwrap()
     }
 }
 
@@ -183,7 +165,7 @@ where
     T: std::fmt::Debug,
 {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        self.get_mut(index).unwrap().unwrap()
+        self.get_mut(index).unwrap()
     }
 }
 
@@ -194,7 +176,7 @@ where
     type Output = T;
 
     fn index(&self, index: String) -> &Self::Output {
-        self.get_by_name(index).unwrap().unwrap()
+        self.get_by_name(index).unwrap()
     }
 }
 
@@ -203,6 +185,6 @@ where
     T: std::fmt::Debug,
 {
     fn index_mut(&mut self, index: String) -> &mut Self::Output {
-        self.get_mut_by_name(index).unwrap().unwrap()
+        self.get_mut_by_name(index).unwrap()
     }
 }

@@ -492,15 +492,17 @@ impl DumpLlvm for Op {
             }
             OpData::Phi { incoming } => {
                 write!(s, "phi {} ", self.typ.dump_to_llvm(ctx)?)?;
-                for (i, (val, bb)) in incoming.iter().enumerate() {
-                    write!(
-                        s,
-                        "[ {}, {} ]",
-                        val.dump_to_llvm(ctx)?,
-                        bb.dump_to_llvm(ctx)?
-                    )?;
-                    if i < incoming.len() - 1 {
-                        write!(s, ", ")?;
+                for (i, phi_incoming) in incoming.iter().enumerate() {
+                    if let PhiIncoming::Data { value: val, bb } = phi_incoming {
+                        write!(
+                            s,
+                            "[ {}, {} ]",
+                            val.dump_to_llvm(ctx)?,
+                            bb.dump_to_llvm(ctx)?
+                        )?;
+                        if i < incoming.len() - 1 {
+                            write!(s, ", ")?;
+                        }
                     }
                 }
             }

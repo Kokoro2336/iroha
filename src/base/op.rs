@@ -174,7 +174,7 @@ pub enum OpData {
         addr: Operand,
     },
     Phi {
-        incoming: Vec<(Operand, Operand)>, // Vec<(value, bb_id)>
+        incoming: Vec<PhiIncoming>, // Vec<(value, bb_id)>
     },
     Alloca(Type),
 
@@ -194,6 +194,12 @@ pub enum OpData {
     Ret {
         value: Option<Operand>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum PhiIncoming {
+    Data { value: Operand, bb: Operand },
+    None,
 }
 
 impl OpData {
@@ -298,10 +304,12 @@ impl std::fmt::Display for Op {
             OpData::Load { addr } => write!(f, "load {}", addr),
             OpData::Phi { incoming } => {
                 write!(f, "phi [");
-                for (i, (value, bb_id)) in incoming.iter().enumerate() {
-                    write!(f, "({}, {})", value, bb_id);
-                    if i != incoming.len() - 1 {
-                        write!(f, ", ");
+                for (i, phi_incoming) in incoming.iter().enumerate() {
+                    if let PhiIncoming::Data { value, bb } = phi_incoming {
+                        write!(f, "({}, {})", value, bb);
+                        if i != incoming.len() - 1 {
+                            write!(f, ", ");
+                        }
                     }
                 }
                 write!(f, "]")
@@ -511,30 +519,29 @@ impl Arena<Op> for IndexedArena<Op> {
         let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
 
         // Transport
-        old_arena
-            .iter_mut()
-            .for_each(|item| {
-                if matches!(item, ArenaItem::Data(_)) {
-                    let new_idx = self.storage.len();
-                    let data = item.replace(new_idx);
-                    self.storage.push(data);
-                }
-            });
+        old_arena.iter_mut().for_each(|item| {
+            if matches!(item, ArenaItem::Data(_)) {
+                let new_idx = self.storage.len();
+                let data = item.replace(new_idx);
+                self.storage.push(data);
+            }
+        });
 
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
-                _ => panic!("DFG gc: index {} not found", *idx),
+                _ => panic!("DFG gc: index {} is not a valid NewIndex: {:?}", *idx, old_arena.get(*idx)),
             };
         };
 
-        if let Some(entry) = self.entry.as_mut() {
-            remap_idx(entry, &old_arena);
-        }
+        // TODO: Remap Index when using Invaded List.
+        // if let Some(entry) = self.entry.as_mut() {
+        //     remap_idx(entry, &old_arena);
+        // }
 
-        for idx in self.map.values_mut() {
-            remap_idx(idx, &old_arena);
-        }
+        // for idx in self.map.values_mut() {
+        //     remap_idx(idx, &old_arena);
+        // }
 
         let remap_value = |operand: &mut Operand, old_arena: &Vec<ArenaItem<Op>>| {
             if !matches!(operand, Operand::Value(_)) {
@@ -552,7 +559,6 @@ impl Arena<Op> for IndexedArena<Op> {
 
         // rewrite idx
         for item in self.storage.iter_mut() {
-            crate::debug::info!("GC: processing item {:?}", item);
             // item can't be any other variant than Data here
             if let ArenaItem::Data(node) = item {
                 // rewrite uses
@@ -640,8 +646,10 @@ impl Arena<Op> for IndexedArena<Op> {
                     }
 
                     OpData::Phi { incoming } => {
-                        for (value, _bb_id) in incoming.iter_mut() {
-                            remap_value(value, &old_arena);
+                        for phi_incoming in incoming.iter_mut() {
+                            if let PhiIncoming::Data { value, .. } = phi_incoming {
+                                remap_value(value, &old_arena);
+                            }
                         }
                     }
 
@@ -678,6 +686,7 @@ impl IndexedArena<Op> {
         node.users.push(use_idx);
     }
 
+    // Remove use_idx from the users of op_idx.
     pub fn remove_use(&mut self, op_idx: Operand, use_idx: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
@@ -807,10 +816,12 @@ impl IndexedArena<Op> {
                 };
             }
             OpData::Phi { incoming } => {
-                for (value, _bb_id) in incoming.iter_mut() {
-                    if *value == old {
-                        *value = new.clone();
-                    };
+                for phi_incoming in incoming.iter_mut() {
+                    if let PhiIncoming::Data { value, .. } = phi_incoming {
+                        if *value == old {
+                            *value = new.clone();
+                        };
+                    }
                 }
             }
             OpData::GlobalAlloca { .. }

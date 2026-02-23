@@ -114,10 +114,10 @@ fn main() -> Result<()> {
     info!("Finish Semantic Analysis.");
 
     // Try to dump graph to log file
-    if cli.graph {
-        info!("Dumping AST graph.");
-        info!("Skip AST graph dump: GraphNode is not implemented for enum AST node yet.");
-    }
+    // if cli.graph {
+    //     info!("Dumping AST graph.");
+    //     info!("Skip AST graph dump: GraphNode is not implemented for enum AST node yet.");
+    // }
 
     info!("Start Emitting.");
     let ir = Emit::new(result).run();

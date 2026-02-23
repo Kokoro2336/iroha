@@ -241,21 +241,15 @@ impl Arena<Node> for AST {
 
     fn gc(&mut self) -> Vec<ArenaItem<Node>> {
         let new_arena: Vec<ArenaItem<Node>> = vec![];
-        let old_arena = std::mem::replace(&mut self.storage, new_arena);
+        let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
 
-        let old_arena = old_arena
-            .into_iter()
-            .map(|mut item| {
-                if matches!(item, ArenaItem::Data(_)) {
-                    let new_idx = self.storage.len();
-                    let data = item.replace(new_idx);
-                    self.storage.push(data);
-                    ArenaItem::NewIndex(new_idx)
-                } else {
-                    ArenaItem::None
-                }
-            })
-            .collect::<Vec<ArenaItem<Node>>>();
+        old_arena.iter_mut().for_each(|item| {
+            if matches!(item, ArenaItem::Data(_)) {
+                let new_idx = self.storage.len();
+                let data = item.replace(new_idx);
+                self.storage.push(data);
+            }
+        });
 
         let remap_idx = |idx: &mut NodeId| {
             *idx = match old_arena.get(*idx).unwrap() {

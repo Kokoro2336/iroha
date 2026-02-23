@@ -69,7 +69,7 @@ impl<'a> DCE<'a> {
                         this.worklist.push((operand.clone(), bb_id.clone()));
                     }
                 }
-                Operand::Global(_) | Operand::Int(_) | Operand::Float(_) | Operand::Undefined => { /* do nothing */ }
+                Operand::Global(_) | Operand::Int(_) | Operand::Float(_) | Operand::Undefined | Operand::Index(_) => { /* do nothing */ }
                 _ => panic!("DCE: operand is not a value or basic block: {:?}", operand),
             }
         }

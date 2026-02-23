@@ -2,7 +2,7 @@
  * SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
  * Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
  */
-use crate::base::ir::{Attr, Op, OpData, OpType, Operand, Program};
+use crate::base::ir::{Attr, Op, OpData, OpType, Operand, PhiIncoming, Program};
 use crate::base::{context_or_err, Builder, BuilderContext, BuilderGuard, Pass, Type};
 use crate::debug::info;
 use crate::utils::bitset::BitSet;
@@ -353,7 +353,7 @@ impl<'a> BuildDomFrontier<'a> {
     }
 }
 
-pub struct InsertPhi<'a> {
+struct InsertPhi<'a> {
     program: &'a mut Program,
     builder: Builder,
     // Former computed frontiers
@@ -522,10 +522,7 @@ impl<'a> InsertPhi<'a> {
                                     vec![Attr::OldIdx(Operand::Value(self.var_to_op[&idx]))],
                                     OpData::Phi {
                                         // Hold the place with dummy incoming. We will update it later.
-                                        incoming: vec![
-                                            (Operand::Value(0), Operand::BB(0));
-                                            preds_num
-                                        ],
+                                        incoming: vec![PhiIncoming::None; preds_num],
                                     },
                                 ),
                             )
@@ -554,13 +551,13 @@ impl<'a> InsertPhi<'a> {
             .for_each(|idx| {
                 self.init(idx);
                 let phi_ids = self.insert();
-                self.phi_ids.push(phi_ids);
+                self.phi_ids[idx] = phi_ids;
             });
         std::mem::take(&mut self.phi_ids)
     }
 }
 
-pub struct Renaming<'a> {
+struct Renaming<'a> {
     program: &'a mut Program,
     builder: Builder,
     dom_trees: Vec<DomTree>,
@@ -870,13 +867,19 @@ impl<'a> Renaming<'a> {
     }
 }
 
-pub struct RemoveTrivialPhi<'a> {
+enum CheckType {
+    Empty,           // No non-phi incoming value. We can replace the phi with undef.
+    Single(Operand), // The single non-phi incoming value. We can replace the phi with this value.
+    Ignore,          // Multiple or non-phi
+}
+
+struct RemoveTrivialPhi<'a> {
     program: &'a mut Program,
     builder: Builder,
     phi_ids: Vec<Vec<(Operand, Operand)>>,
 
     // Ancillary state fields
-    worklist: Vec<(Operand, Operand)>,
+    worklist: Vec<(Operand, Operand, CheckType)>, // Vec of (PhiId, BBId, CheckType)
 
     // State function
     current_function: Option<usize>,
@@ -893,88 +896,133 @@ impl<'a> RemoveTrivialPhi<'a> {
         }
     }
 
-    pub fn remove(&mut self, idx: usize) {
-        self.current_function = Some(idx);
-        self.worklist = self.phi_ids[idx].clone();
-
-        enum CheckType {
-            Empty,
-            Single(Operand), // (OpId, BBId)
-            Multiple,
-        }
-        fn check(ctx: &mut BuilderContext, phi: Operand) -> CheckType {
-            let dfg = ctx.dfg.as_ref().unwrap();
-            let phi_op = &dfg[phi.clone()];
-            match &phi_op.data {
-                OpData::Phi { incoming } => {
-                    let mut distinct: Vec<(Operand, Operand)> = vec![];
-                    for (value, bb_id) in incoming.iter() {
-                        if matches!(value, Operand::Undefined) || *value == phi {
-                            continue;
-                        }
-
-                        if distinct.iter().all(|(v, _)| *v != *value) {
-                            distinct.push((value.clone(), bb_id.clone()));
-                            if distinct.len() > 1 {
-                                return CheckType::Multiple;
-                            }
-                        }
+    pub fn check(ctx: &mut BuilderContext, phi: Operand) -> CheckType {
+        let dfg = ctx.dfg.as_ref().unwrap();
+        let phi_op = &dfg[phi.clone()];
+        match &phi_op.data {
+            OpData::Phi { incoming } => {
+                let mut distinct: Vec<(Operand, Operand)> = vec![];
+                for phi_incoming in incoming.iter() {
+                    let (value, bb_id) = match phi_incoming {
+                        PhiIncoming::Data { value, bb } => (value, bb),
+                        PhiIncoming::None => continue,
+                    };
+                    if matches!(value, Operand::Undefined) || *value == phi {
+                        continue;
                     }
 
-                    if distinct.is_empty() {
-                        CheckType::Empty
-                    } else {
-                        let (value, _) = distinct.pop().unwrap();
-                        CheckType::Single(value)
+                    if distinct.iter().all(|(v, _)| *v != *value) {
+                        distinct.push((value.clone(), bb_id.clone()));
+                        if distinct.len() > 1 {
+                            return CheckType::Ignore;
+                        }
                     }
                 }
-                _ => panic!("RemoveTrivialPhi: expected phi op"),
-            }
-        }
 
+                if distinct.is_empty() {
+                    CheckType::Empty
+                } else {
+                    let (value, _) = distinct.pop().unwrap();
+                    CheckType::Single(value)
+                }
+            }
+            // If it's not a phi, we treat it as multiple to be safe, since we only want to remove trivial phis.
+            _ => CheckType::Ignore,
+        }
+    }
+
+    fn init(&mut self, idx: usize) {
+        self.current_function = Some(idx);
+        self.worklist = self.phi_ids[idx]
+            .iter()
+            .map(|(phi_id, bb_id)| {
+                let mut ctx =
+                    context_or_err!(self, "RemoveTrivialPhi: No current function context found");
+                let check_result = Self::check(&mut ctx, phi_id.clone());
+                (phi_id.clone(), bb_id.clone(), check_result)
+            })
+            .collect();
+    }
+
+    fn remove_phi(&mut self) {
+        let idx = match self.current_function {
+            Some(i) => i,
+            None => panic!("RemoveTrivialPhi: no current function"),
+        };
         // Check whether the phi_ids are valid
-        while let Some((phi_id, bb_id)) = self.worklist.pop() {
+        while let Some((phi_id, bb_id, check_result)) = self.worklist.pop() {
             let uses = {
-                let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                func.dfg[phi_id.clone()].users.clone()
+                let func = &mut self.program.funcs[acquire_cur_func_id!(self)];
+                let phi_op = &mut func.dfg[phi_id.clone()];
+                // Remove OldIdx Attr
+                phi_op.attrs.retain(|attr| !matches!(attr, Attr::OldIdx(_)));
+                phi_op.users.clone()
             };
             let mut ctx =
                 context_or_err!(self, "RemoveTrivialPhi: No current function context found");
-            match check(&mut ctx, phi_id.clone()) {
+            match check_result {
                 CheckType::Empty => {
+                    crate::debug::info!("Remove trivial phi {:?} with undef", phi_id);
                     self.builder
                         .replace_all_uses(&mut ctx, phi_id.clone(), Operand::Undefined);
                     for user in uses {
-                        if matches!(
-                            check(&mut ctx, user.clone()),
-                            CheckType::Empty | CheckType::Single(_)
-                        ) {
-                            self.worklist.push((user, bb_id.clone()));
+                        // Ignore phi itself, since it will be removed later and should not pushed to worklist again.
+                        if user == phi_id {
+                            continue;
+                        }
+                        let check_result = Self::check(&mut ctx, user.clone());
+                        if matches!(check_result, CheckType::Empty | CheckType::Single(_)) {
+                            self.phi_ids[idx]
+                                .iter()
+                                .find(|(id, _)| *id == user)
+                                .map(|(id, bb)| {
+                                    // We should check whether the user phi is already in the worklist to avoid duplicate entries.
+                                    if !self.worklist.iter().any(|(w_id, w_bb, w_check_result)| {
+                                        *w_id == *id
+                                    }) {
+                                        self.worklist.push((id.clone(), bb.clone(), check_result));
+                                    }
+                                });
                         }
                     }
+                    self.builder.set_current_block(bb_id.clone());
                     self.builder.remove_op(&mut ctx, phi_id, bb_id);
                 }
                 CheckType::Single(value) => {
+                    crate::debug::info!("Remove trivial phi {:?} with value {:?}", phi_id, value);
                     self.builder
                         .replace_all_uses(&mut ctx, phi_id.clone(), value);
                     for user in uses {
-                        if matches!(
-                            check(&mut ctx, user.clone()),
-                            CheckType::Empty | CheckType::Single(_)
-                        ) {
-                            self.worklist.push((user, bb_id.clone()));
+                        if user == phi_id {
+                            continue;
+                        }
+                        let check_result = Self::check(&mut ctx, user.clone());
+                        if matches!(check_result, CheckType::Empty | CheckType::Single(_)) {
+                            self.phi_ids[idx]
+                                .iter()
+                                .find(|(id, _)| *id == user)
+                                .map(|(id, bb)| {
+                                    // We should check whether the user phi is already in the worklist to avoid duplicate entries.
+                                    if !self.worklist.iter().any(|(w_id, w_bb, w_check_result)| {
+                                        *w_id == *id
+                                    }) {
+                                        self.worklist.push((id.clone(), bb.clone(), check_result));
+                                    }
+                                });
                         }
                     }
+                    self.builder.set_current_block(bb_id.clone());
                     self.builder.remove_op(&mut ctx, phi_id, bb_id);
                 }
-                CheckType::Multiple => {}
+                CheckType::Ignore => {}
             }
         }
     }
 
     pub fn run(&mut self) {
         for idx in self.program.funcs.collect_internal() {
-            self.remove(idx);
+            self.init(idx);
+            self.remove_phi();
         }
     }
 }

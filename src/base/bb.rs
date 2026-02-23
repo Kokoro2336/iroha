@@ -1,4 +1,4 @@
-use crate::base::ir::{OpData, Operand, DFG};
+use crate::base::ir::{OpData, Operand, DFG, PhiIncoming};
 use crate::base::Type;
 use crate::utils::arena::*;
 use std::ops::{Index, IndexMut};
@@ -242,8 +242,11 @@ impl Arena<Function> for IndexedArena<Function> {
                             }
 
                             OpData::Phi { incoming } => {
-                                for (_val, bb_idx) in incoming.iter_mut() {
-                                    remap_with_cfg(bb_idx, &old_arena_cfg);
+                                 for phi_incoming in incoming.iter_mut() {
+                                    if let PhiIncoming::Data { bb, .. } = phi_incoming {
+                                        remap_with_cfg(bb, &old_arena_cfg);
+                                    }
+                                    // If incoming == None, do nothing
                                 }
                             }
 

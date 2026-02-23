@@ -206,8 +206,10 @@ impl Builder {
                 }
             }
             OpData::Phi { incoming } => {
-                for (value, _) in incoming {
-                    dfg.add_use(value, op.clone());
+                for phi_incoming in incoming {
+                    if let PhiIncoming::Data { value, .. } = phi_incoming {
+                        dfg.add_use(value, op.clone());
+                    }
                 }
             }
 
@@ -269,6 +271,7 @@ impl Builder {
         }
     }
 
+    // Remove CURRENT Op from Another one's USERS.
     pub fn remove_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder remove_users: ctx.dfg is None");
         let data = dfg[op.get_op_id()].data.clone();
@@ -295,8 +298,17 @@ impl Builder {
                 }
             }
             OpData::Phi { incoming } => {
-                for (value, _) in incoming {
-                    dfg.remove_use(value, op.clone());
+                let mut removed = vec![];
+                for phi_incoming in incoming {
+                    if let PhiIncoming::Data { value, .. } = phi_incoming {
+                        if !removed.contains(&value) {
+                            removed.push(value.clone());
+                        } else {
+                            continue;
+                        }
+                        // Critical: We only delete one value once, otherwise a double delete will cause a panic.
+                        dfg.remove_use(value, op.clone());
+                    }
                 }
             }
 
@@ -493,7 +505,6 @@ impl Builder {
 
     // create an instruction after current instruction
     pub fn create(&mut self, ctx: &mut BuilderContext, op: Op) -> Operand {
-        let is_inner_control_flow = op.is_inner_control_flow();
         let op_id = match op.data {
             OpData::GlobalAlloca(_) => {
                 let globals = &mut ctx.globals;
@@ -622,11 +633,7 @@ impl Builder {
     }
 
     pub fn get_all_ops(&self, ctx: &mut BuilderContext, op_typ: OpType) -> Vec<Operand> {
-        let dfg = if ctx.dfg.is_none() {
-            panic!("Builder get_all_ops: ctx.dfg is None");
-        } else {
-            ctx.dfg.as_mut().unwrap()
-        };
+        let dfg = acquire_dfg!(ctx, "Builder get_all_ops: ctx.dfg is None");
         dfg.storage
             .iter()
             .enumerate()
@@ -775,7 +782,10 @@ impl Builder {
 
         // Check if the phi already has an incoming from the bb. If yes, we just update the value.
         if let OpData::Phi { incoming } = &mut dfg[phi_id].data {
-            incoming[idx] = (value.clone(), bb);
+            incoming[idx] = PhiIncoming::Data {
+                value: value.clone(),
+                bb,
+            };
             // add uses. do not use self.add_users since it will add use for the phi node itself, which is not what we want.
             dfg.add_use(value, phi.clone());
         } else {

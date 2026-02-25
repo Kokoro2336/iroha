@@ -1,5 +1,4 @@
 use crate::base::ir::*;
-use crate::base::LoopInfo;
 use crate::utils::arena::{Arena, ArenaItem};
 
 use std::ops::{Deref, DerefMut};
@@ -22,6 +21,12 @@ macro_rules! acquire_dfg {
             $ctx.dfg.as_mut().unwrap()
         }
     };
+}
+
+#[derive(Debug, Clone)]
+pub struct LoopInfo {
+    pub while_entry: Option<Operand>,
+    pub end_block: Option<Operand>,
 }
 
 pub struct Builder {
@@ -259,7 +264,7 @@ impl Builder {
                 dfg.add_use(rhs, op);
             }
 
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
+            OpData::Sitofp { value } | OpData::Fptosi { value } | OpData::Uitofp { value } | OpData::Zext { value } => {
                 dfg.add_use(value, op);
             }
 
@@ -373,7 +378,7 @@ impl Builder {
                 dfg.remove_use(lhs, op.clone());
                 dfg.remove_use(rhs, op);
             }
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
+            OpData::Sitofp { value } | OpData::Fptosi { value } | OpData::Uitofp { value } | OpData::Zext { value } => {
                 dfg.remove_use(value, op);
             }
 
@@ -453,6 +458,8 @@ impl Builder {
             | OpData::GEP { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
+            | OpData::Uitofp { .. }
+            | OpData::Zext { .. }
             | OpData::Ret { .. }
             | OpData::Shl { .. }
             | OpData::Shr { .. }
@@ -520,6 +527,8 @@ impl Builder {
             | OpData::GEP { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
+            | OpData::Uitofp { .. }
+            | OpData::Zext { .. }
             | OpData::Ret { .. }
             | OpData::Shl { .. }
             | OpData::Shr { .. }
@@ -589,6 +598,8 @@ impl Builder {
             | OpData::OLe { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
+            | OpData::Uitofp { .. }
+            | OpData::Zext { .. }
             | OpData::Store { .. }
             | OpData::Load { .. }
             | OpData::Phi { .. }

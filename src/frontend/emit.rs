@@ -72,7 +72,7 @@ impl Emit {
             match &ast[node_id] {
                 Node::Literal(lit) => lit.clone(),
                 Node::UnaryOp {
-                    op: ast::Op::Cast(from, to),
+                    op,
                     operand,
                     ..
                 } => {
@@ -84,13 +84,23 @@ impl Emit {
                         ),
                     };
 
-                    match (from, to, lit) {
-                        (Type::Int, Type::Float, Literal::Int(v)) => Literal::Float(*v as f32),
-                        (Type::Float, Type::Int, Literal::Float(v)) => Literal::Int(*v as i32),
-                        _ => panic!(
-                            "Unsupported global cast initializer: from {:?}, to {:?}, lit {:?}",
-                            from, to, lit
-                        ),
+                    // Remember, SysY doesn't have Bool literals.
+                    match op {
+                        ast::Op::Int2Float => match lit {
+                            Literal::Int(i) => Literal::Float(*i as f32),
+                            _ => panic!(
+                                "Int2Float operand must be Int literal: {:?}",
+                                ast[*operand]
+                            ),
+                        },
+                        ast::Op::Float2Int => match lit {
+                            Literal::Float(f) => Literal::Int(*f as i32),
+                            _ => panic!(
+                                "Float2Int operand must be Float literal: {:?}",
+                                ast[*operand]
+                            ),
+                        },
+                        _ => unreachable!("Only Int2Float and Float2Int should be used in global initializer casts"),
                     }
                 }
                 _ => panic!(
@@ -165,7 +175,7 @@ impl Emit {
                 self.current_function = Some(self.program.funcs.add(Function::new(
                     name.clone(),
                     false,
-                    typ,
+                    typ.clone(),
                 )));
 
                 if let Some(func_id) = self.current_function {
@@ -226,6 +236,46 @@ impl Emit {
                 }
 
                 self.emit(body);
+
+                // TODO: Check if the last block has a terminator. If not, insert an implicit return.
+                // This may require control flow analysis.
+                // let needs_terminator = if let Some(current_bb) = &self.builder.current_block {
+                //     let func = &self.program.funcs[self.current_function.unwrap()];
+                //     let bb = &func.cfg[current_bb.get_bb_id()];
+                //     if let Some(last_op) = bb.cur.last() {
+                //         let inst = &func.dfg[last_op.get_op_id()];
+                //         !matches!(
+                //             inst.data,
+                //             OpData::Br { .. } | OpData::Jump { .. } | OpData::Ret { .. }
+                //         )
+                //     } else {
+                //         true
+                //     }
+                // } else {
+                //     false
+                // };
+
+                // if needs_terminator {
+                //     let mut ctx = context_or_err!(self, "Implicit return");
+                //     crate::debug::info!(
+                //         "Inserting implicit return at the end of function. current_block: {:?}, fnDecl: {:?}",
+                //         self.builder.current_block, self.ast[node_id]
+                //     );
+                //     match typ {
+                //         Type::Function { return_type, .. } => {
+                //             if !matches!(*return_type, Type::Void) {
+                //                 panic!("Non-void function missing return statement");
+                //             }
+                //         }
+                //         _ => panic!("Function type expected"),
+                //     }
+                //     self.builder.set_before_inst(&mut ctx, None);
+                //     self.builder.create(
+                //         &mut ctx,
+                //         ir::Op::new(Type::Void, vec![], OpData::Ret { value: None }),
+                //     );
+                // }
+
                 self.syms.exit_scope();
                 None
             }
@@ -703,7 +753,7 @@ impl Emit {
                             OpData::GEP {
                                 base: local_ptr.clone(),
                                 indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
+                                    .chain(index_ops)
                                     .collect(),
                             },
                         ),
@@ -723,7 +773,7 @@ impl Emit {
                             OpData::GEP {
                                 base: global_id.clone(),
                                 indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
+                                    .chain(index_ops)
                                     .collect(),
                             },
                         ),
@@ -1147,13 +1197,30 @@ impl Emit {
                             );
                         }
                     }
-                    ast::Op::Cast(from, to) => match (&from, &to) {
-                        (Type::Int, Type::Float) => OpData::Sitofp { value: operand_op },
-                        (Type::Float, Type::Int) => OpData::Fptosi { value: operand_op },
-                        _ => {
-                            panic!("Unsupported cast from {:?} to {:?}", from, to);
+                    ast::Op::Bool2Int => {
+                        OpData::Zext { value: operand_op }
+                    }
+                    ast::Op::Int2Bool => {
+                        OpData::SNe {
+                            lhs: operand_op,
+                            rhs: Operand::Int(0),
                         }
-                    },
+                    }
+                    ast::Op::Float2Int => {
+                        OpData::Fptosi { value: operand_op }
+                    }
+                    ast::Op::Int2Float => {
+                        OpData::Sitofp { value: operand_op }
+                    }
+                    ast::Op::Bool2Float => {
+                        OpData::Uitofp { value: operand_op }
+                    }
+                    ast::Op::Float2Bool => {
+                        OpData::ONe {
+                            lhs: operand_op,
+                            rhs: Operand::Float(0.0),
+                        }
+                    }
                     _ => {
                         panic!(
                             "Unsupported unary operator in Emit: {:?}",

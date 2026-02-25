@@ -1,4 +1,4 @@
-use crate::base::ir::{OpData, OpType, Operand};
+use crate::base::ir::{OpData, Operand};
 /**
  * Dead Code Elimination (DCE).
  */
@@ -90,123 +90,71 @@ impl<'a> DCE<'a> {
                 let mut ctx = context_or_err!(self, "DCE: no context in run");
                 self.builder.set_current_block(bb_id.clone());
                 let removed_op = match op_id {
-                    Operand::Global(_) => {
-                        self.builder.remove_op(&mut ctx, op_id, None)
-                    }
+                    Operand::Global(_) => self.builder.remove_op(&mut ctx, op_id, None),
                     _ => self
                         .builder
                         .remove_op(&mut ctx, op_id.clone(), Some(bb_id.clone())),
                 };
 
                 // Check the operands of the removed instruction
-                let op_type = OpType::from(&removed_op.data);
-                match op_type {
-                    OpType::AddF
-                    | OpType::SubF
-                    | OpType::MulF
-                    | OpType::DivF
-                    | OpType::AddI
-                    | OpType::SubI
-                    | OpType::MulI
-                    | OpType::DivI
-                    | OpType::ModI
-                    | OpType::SNe
-                    | OpType::SEq
-                    | OpType::SGt
-                    | OpType::SLt
-                    | OpType::SGe
-                    | OpType::SLe
-                    | OpType::And
-                    | OpType::Or
-                    | OpType::Xor
-                    | OpType::Shl
-                    | OpType::Shr
-                    | OpType::Sar
-                    | OpType::ONe
-                    | OpType::OEq
-                    | OpType::OGt
-                    | OpType::OLt
-                    | OpType::OGe
-                    | OpType::OLe => {
-                        let (lhs, rhs) = {
-                            match removed_op.data {
-                                OpData::AddF { lhs, rhs }
-                                | OpData::SubF { lhs, rhs }
-                                | OpData::MulF { lhs, rhs }
-                                | OpData::DivF { lhs, rhs }
-                                | OpData::AddI { lhs, rhs }
-                                | OpData::SubI { lhs, rhs }
-                                | OpData::MulI { lhs, rhs }
-                                | OpData::DivI { lhs, rhs }
-                                | OpData::ModI { lhs, rhs }
-                                | OpData::SNe { lhs, rhs }
-                                | OpData::SEq { lhs, rhs }
-                                | OpData::SGt { lhs, rhs }
-                                | OpData::SLt { lhs, rhs }
-                                | OpData::SGe { lhs, rhs }
-                                | OpData::SLe { lhs, rhs }
-                                | OpData::And { lhs, rhs }
-                                | OpData::Or { lhs, rhs }
-                                | OpData::Xor { lhs, rhs }
-                                | OpData::Shl { lhs, rhs }
-                                | OpData::Shr { lhs, rhs }
-                                | OpData::Sar { lhs, rhs }
-                                | OpData::ONe { lhs, rhs }
-                                | OpData::OEq { lhs, rhs }
-                                | OpData::OGt { lhs, rhs }
-                                | OpData::OLt { lhs, rhs }
-                                | OpData::OGe { lhs, rhs }
-                                | OpData::OLe { lhs, rhs } => (lhs.clone(), rhs.clone()),
-                                _ => unreachable!(),
-                            }
-                        };
+                match removed_op.data.clone() {
+                    OpData::AddF { lhs, rhs }
+                    | OpData::SubF { lhs, rhs }
+                    | OpData::MulF { lhs, rhs }
+                    | OpData::DivF { lhs, rhs }
+                    | OpData::AddI { lhs, rhs }
+                    | OpData::SubI { lhs, rhs }
+                    | OpData::MulI { lhs, rhs }
+                    | OpData::DivI { lhs, rhs }
+                    | OpData::ModI { lhs, rhs }
+                    | OpData::SNe { lhs, rhs }
+                    | OpData::SEq { lhs, rhs }
+                    | OpData::SGt { lhs, rhs }
+                    | OpData::SLt { lhs, rhs }
+                    | OpData::SGe { lhs, rhs }
+                    | OpData::SLe { lhs, rhs }
+                    | OpData::And { lhs, rhs }
+                    | OpData::Or { lhs, rhs }
+                    | OpData::Xor { lhs, rhs }
+                    | OpData::Shl { lhs, rhs }
+                    | OpData::Shr { lhs, rhs }
+                    | OpData::Sar { lhs, rhs }
+                    | OpData::ONe { lhs, rhs }
+                    | OpData::OEq { lhs, rhs }
+                    | OpData::OGt { lhs, rhs }
+                    | OpData::OLt { lhs, rhs }
+                    | OpData::OGe { lhs, rhs }
+                    | OpData::OLe { lhs, rhs } => {
                         check(self, &lhs, &bb_id);
                         check(self, &rhs, &bb_id);
                     }
-                    OpType::Sitofp | OpType::Fptosi => {
-                        let value = {
-                            match removed_op.data {
-                                OpData::Sitofp { value } | OpData::Fptosi { value } => {
-                                    value.clone()
-                                }
-                                _ => unreachable!(),
-                            }
-                        };
+                    OpData::Sitofp { value }
+                    | OpData::Fptosi { value }
+                    | OpData::Zext { value }
+                    | OpData::Uitofp { value } => {
                         check(self, &value, &bb_id);
                     }
                     // In DCE, Load is pure.
-                    OpType::Load => {
-                        let addr = {
-                            match removed_op.data {
-                                OpData::Load { addr } => addr.clone(),
-                                _ => unreachable!(),
-                            }
-                        };
+                    OpData::Load { addr } => {
                         check(self, &addr, &bb_id);
                     }
-                    OpType::GEP => {
-                        let (base, indices) = {
-                            match removed_op.data {
-                                OpData::GEP { base, indices } => (base.clone(), indices.clone()),
-                                _ => unreachable!(),
-                            }
-                        };
+                    OpData::GEP { base, indices } => {
                         check(self, &base, &bb_id);
                         for index in indices.iter() {
                             check(self, index, &bb_id);
                         }
                     }
 
-                    OpType::Alloca | OpType::Phi => { /* do nothing */ }
+                    OpData::Alloca(_) | OpData::Phi { .. } => { /* do nothing */ }
 
-                    OpType::Call
-                    | OpType::Store
-                    | OpType::Br
-                    | OpType::Jump
-                    | OpType::Ret
-                    | OpType::Move
-                    | OpType::GlobalAlloca
-                    | OpType::Declare => {
+                    OpData::Call { .. }
+                    | OpData::Store { .. }
+                    | OpData::Br { .. }
+                    | OpData::Jump { .. }
+                    | OpData::Ret { .. }
+                    | OpData::Move { .. }
+                    | OpData::GlobalAlloca(_)
+                    | OpData::Declare { .. } => {
                         unreachable!("DCE: impure instruction should not be in the worklist")
                     }
                 }

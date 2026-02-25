@@ -163,6 +163,12 @@ pub enum OpData {
     Fptosi {
         value: Operand,
     }, // float to int
+    Uitofp {
+        value: Operand,
+    }, // bool to float
+    Zext {
+        value: Operand,
+    }, // bool to int
 
     // SysY doesn't support bitwise shift for float
     /// Memory operations
@@ -298,6 +304,8 @@ impl std::fmt::Display for Op {
 
             OpData::Sitofp { value } => write!(f, "sitofp {}", value),
             OpData::Fptosi { value } => write!(f, "fptosi {}", value),
+            OpData::Uitofp { value } => write!(f, "uitofp {}", value),
+            OpData::Zext { value } => write!(f, "zext {}", value),
 
             OpData::Store { addr, value } => write!(f, "store {}, {}", addr, value),
             OpData::Load { addr } => write!(f, "load {}", addr),
@@ -370,10 +378,6 @@ impl Op {
         self.data.is(op_typ)
     }
 
-    pub fn is_inner_control_flow(&self) -> bool {
-        self.data.is_inner_control_flow()
-    }
-
     pub fn is_impure(&self) -> bool {
         self.data.is_impure()
     }
@@ -381,12 +385,17 @@ impl Op {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operand {
+    // Ids
     Value(usize),
     BB(usize),
     Func(usize),
     Global(usize),
+
+    // Literals
     Int(i32),
     Float(f32),
+    Bool(bool),
+
     // for GEP: Raw integer index
     Index(usize),
     // Param
@@ -440,6 +449,9 @@ impl Operand {
             _ => panic!("Operand is not a Reg: {:?}", self),
         }
     }
+    pub fn is_literal(&self) -> bool {
+        matches!(self, Operand::Int(_) | Operand::Float(_) | Operand::Bool(_))
+    }
 }
 
 impl std::fmt::Display for Operand {
@@ -450,6 +462,7 @@ impl std::fmt::Display for Operand {
             Operand::Global(global_id) => write!(f, "@{}", global_id),
             Operand::Int(value) => write!(f, "{}", value),
             Operand::Float(value) => write!(f, "{}", value),
+            Operand::Bool(value) => write!(f, "{}", value),
             Operand::Param { idx, .. } => write!(f, "%arg{}", idx),
             Operand::Index(index) => write!(f, "{}", index),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
@@ -613,7 +626,10 @@ impl Arena<Op> for IndexedArena<Op> {
                         remap_value(rhs, &old_arena);
                     }
 
-                    OpData::Sitofp { value } | OpData::Fptosi { value } => {
+                    OpData::Sitofp { value }
+                    | OpData::Fptosi { value }
+                    | OpData::Uitofp { value }
+                    | OpData::Zext { value } => {
                         remap_value(value, &old_arena);
                     }
                     OpData::Store { addr, value } => {
@@ -778,7 +794,10 @@ impl IndexedArena<Op> {
                 };
             }
 
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
+            OpData::Sitofp { value }
+            | OpData::Fptosi { value }
+            | OpData::Uitofp { value }
+            | OpData::Zext { value } => {
                 if *value == old {
                     *value = new.clone();
                 };

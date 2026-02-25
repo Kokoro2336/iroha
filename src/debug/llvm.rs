@@ -49,6 +49,7 @@ impl DumpLlvm for Type {
         match self {
             Type::Int => write!(s, "i32")?,
             Type::Float => write!(s, "float")?,
+            Type::Bool => write!(s, "i1")?,
             Type::Void => write!(s, "void")?,
             Type::Pointer { base } => write!(s, "{}*", base.dump_to_llvm(ctx)?)?,
             Type::Array { dims, base } => {
@@ -73,6 +74,7 @@ impl DumpLlvm for Operand {
             Operand::Global(id) => write!(s, "{}", global_operand_name(*id, ctx))?,
             Operand::Int(val) => write!(s, "{}", val)?,
             Operand::Float(val) => write!(s, "{}", val)?,
+            Operand::Bool(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
             Operand::Param { idx, .. } => write!(s, "%arg{}", idx)?,
             Operand::Func(id) => write!(s, "@{}", ctx.program.funcs[*id].name)?,
@@ -431,6 +433,50 @@ impl DumpLlvm for Op {
                 write!(
                     s,
                     "fptosi {} {} to {}",
+                    from_op_typ.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::Zext { value } => {
+                let from_op_typ = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Bool;
+                        if let Some(f) = ctx.function {
+                            t = f.dfg[*id].typ.clone();
+                        }
+                        t
+                    }
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
+                    Operand::Bool(_) => Type::Bool,
+                    _ => Type::Bool,
+                };
+
+                write!(
+                    s,
+                    "zext {} {} to {}",
+                    from_op_typ.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::Uitofp { value } => {
+                let from_op_typ = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Bool;
+                        if let Some(f) = ctx.function {
+                            t = f.dfg[*id].typ.clone();
+                        }
+                        t
+                    }
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
+                    Operand::Bool(_) => Type::Bool,
+                    _ => Type::Bool,
+                };
+
+                write!(
+                    s,
+                    "uitofp {} {} to {}",
                     from_op_typ.dump_to_llvm(ctx)?,
                     value.dump_to_llvm(ctx)?,
                     self.typ.dump_to_llvm(ctx)?

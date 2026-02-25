@@ -981,7 +981,7 @@ impl<'a> RemoveTrivialPhi<'a> {
                                     if !self
                                         .worklist
                                         .iter()
-                                        .any(|(w_id, w_bb, w_check_result)| *w_id == *id)
+                                        .any(|(w_id, _, _)| *w_id == *id)
                                     {
                                         self.worklist.push((id.clone(), bb.clone(), check_result));
                                     }
@@ -1009,7 +1009,7 @@ impl<'a> RemoveTrivialPhi<'a> {
                                     if !self
                                         .worklist
                                         .iter()
-                                        .any(|(w_id, w_bb, w_check_result)| *w_id == *id)
+                                        .any(|(w_id, _, _)| *w_id == *id)
                                     {
                                         self.worklist.push((id.clone(), bb.clone(), check_result));
                                     }

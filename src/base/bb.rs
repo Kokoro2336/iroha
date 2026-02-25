@@ -285,6 +285,8 @@ impl Arena<Function> for IndexedArena<Function> {
                             | OpData::GEP { .. }
                             | OpData::Sitofp { .. }
                             | OpData::Fptosi { .. }
+                            | OpData::Zext { .. }
+                            | OpData::Uitofp { .. }
                             | OpData::Ret { .. }
                             | OpData::Shl { .. }
                             | OpData::Shr { .. }

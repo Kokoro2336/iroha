@@ -88,15 +88,7 @@ fn main() -> Result<()> {
         // set entry point to the root of the AST
         parser.ast.set_entry(root_id);
         // Clean up the AST.
-        info!(
-            "Start collecting garbage in AST. Total slot num: {}",
-            parser.ast.storage.len()
-        );
         parser.ast.gc();
-        info!(
-            "Finish collecting garbage in AST. Slot num after gc: {}",
-            parser.ast.storage.len()
-        );
         parser.take()
     };
     // info!("\nParsed result: {:#?}", result);

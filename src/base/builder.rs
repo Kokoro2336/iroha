@@ -724,6 +724,27 @@ impl Builder {
         ops
     }
 
+    pub fn get_all_non_phi_in_block(
+        &self,
+        ctx: &mut BuilderContext,
+        block: Operand,
+    ) -> Vec<Operand> {
+        let cfg = acquire_cfg!(ctx, "Builder get_all_non_phi_in_block: ctx.cfg is None");
+        let dfg = acquire_dfg!(ctx, "Builder get_all_non_phi_in_block: ctx.dfg is None");
+
+        let bb_id = block.get_bb_id();
+        let bb = &cfg[bb_id];
+
+        let mut ops = Vec::new();
+        for inst in &bb.cur {
+            let data = &dfg[inst.get_op_id()];
+            if !data.is(OpType::Phi) {
+                ops.push(inst.clone());
+            }
+        }
+        ops
+    }
+
     pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Option<Operand>) -> Op {
         // remove uses first, otherwise we may have use-after-free in the DFG.
         self.remove_uses(ctx, op.clone());

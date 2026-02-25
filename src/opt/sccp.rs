@@ -1,14 +1,14 @@
-use crate::base::ir::{OpData, Operand, PhiIncoming, Program, OpType};
-use crate::base::Builder;
+use crate::base::ir::{OpData, OpType, Operand, PhiIncoming, Program};
 /**
  * Sparse Conditional Constant Propagation (SCCP).
  * Based on Wegman and Zadeck's paper Constant Propagation with Conditional Branches.
  * Reference: https://dl.acm.org/doi/10.1145/103135.103136
  */
-use crate::base::Pass;
+use crate::base::{context_or_err, Builder, BuilderContext, Pass};
+use crate::utils::arena::ArenaItem;
 use crate::utils::bitset::BitSet;
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lattice {
@@ -22,7 +22,9 @@ pub struct SCCP<'a> {
     builder: Builder,
 
     // HashSet<(from, to)> for edges in the control flow graph that are executable. Only store true.
-    executable: HashSet<(Operand, Operand)>,
+    executable: FxHashSet<(usize, usize)>,
+    // Whether the block has been visited. We use BitSet for fast lookup.
+    visited: BitSet,
     lattices: Vec<Lattice>,
 
     // Worklists
@@ -30,7 +32,12 @@ pub struct SCCP<'a> {
     edge_list: Vec<(Operand, Operand)>,
     // Vec<(OpId, BBId)>
     inst_list: Vec<Operand>,
+    // Whether the instruction is already in the worklist. We use BitSet for fast lookup.
     in_inst_list: BitSet,
+
+    // Ancillary infrastructure
+    // We need to know the mapping from op_id to bb_id for phi nodes.
+    op_to_bb: Vec<Operand>,
 
     current_function: Option<usize>,
 }
@@ -40,11 +47,13 @@ impl<'a> SCCP<'a> {
         Self {
             program,
             builder: Builder::new(),
-            executable: HashSet::default(),
+            executable: FxHashSet::default(),
             lattices: Vec::new(),
             edge_list: Vec::new(),
             inst_list: Vec::new(),
             in_inst_list: BitSet::new(),
+            visited: BitSet::new(),
+            op_to_bb: Vec::new(),
             current_function: None,
         }
     }
@@ -74,54 +83,84 @@ impl<'a> SCCP<'a> {
         }
     }
 
+    // If the operand is a value, return its lattice.
+    // If it's a constant, return the constant lattice.
+    // The functio doesn't support other types of operands and will panic if called with them.
+    fn get_lattice(&self, operand: &Operand) -> Lattice {
+        match operand {
+            Operand::Value(id) => self.lattices[*id].clone(),
+            Operand::Int(_) | Operand::Float(_) | Operand::Bool(_) => {
+                Lattice::Constant(operand.clone())
+            }
+            _ => panic!("You can't get lattice for operand: {:?}", operand),
+        }
+    }
+
     fn fold(lhs: Lattice, rhs: Lattice, op_typ: OpType) -> Lattice {
         let (lhs, rhs) = match (lhs, rhs) {
             (Lattice::Constant(c1), Lattice::Constant(c2)) => (c1, c2),
             _ => panic!("SCCP fold: both operands must be constants"),
         };
         match (lhs, rhs) {
-            (Operand::Int(i1), Operand::Int(i2)) => {
-                match &op_typ {
-                    OpType::AddI => Lattice::Constant(Operand::Int(i1 + i2)),
-                    OpType::SubI => Lattice::Constant(Operand::Int(i1 - i2)),
-                    OpType::MulI => Lattice::Constant(Operand::Int(i1 * i2)),
-                    OpType::DivI => Lattice::Constant(Operand::Int(i1 / i2)),
-                    OpType::ModI => Lattice::Constant(Operand::Int(i1 % i2)),
-                    OpType::Xor => Lattice::Constant(Operand::Int(i1 ^ i2)),
-                    OpType::Shl => Lattice::Constant(Operand::Int(i1 << i2)),
-                    OpType::Shr => Lattice::Constant(Operand::Int(i1 >> i2)),
-                    OpType::Sar => Lattice::Constant(Operand::Int(((i1 as i64) >> i2) as i32)),
-                    OpType::SNe => Lattice::Constant(Operand::Bool(i1 != i2)),
-                    OpType::SEq => Lattice::Constant(Operand::Bool(i1 == i2)),
-                    OpType::SGt => Lattice::Constant(Operand::Bool(i1 > i2)),
-                    OpType::SLt => Lattice::Constant(Operand::Bool(i1 < i2)),
-                    OpType::SGe => Lattice::Constant(Operand::Bool(i1 >= i2)),
-                    OpType::SLe => Lattice::Constant(Operand::Bool(i1 <= i2)),
-                    _ => panic!("{:?}'s operands can't be folded as integers", op_typ),
-                }
-            }
-            (Operand::Float(f1), Operand::Float(f2)) => {
-                match &op_typ {
-                    OpType::AddF => Lattice::Constant(Operand::Float(f1 + f2)),
-                    OpType::SubF => Lattice::Constant(Operand::Float(f1 - f2)),
-                    OpType::MulF => Lattice::Constant(Operand::Float(f1 * f2)),
-                    OpType::DivF => Lattice::Constant(Operand::Float(f1 / f2)),
-                    OpType::ONe => Lattice::Constant(Operand::Bool(f1 != f2)),
-                    OpType::OEq => Lattice::Constant(Operand::Bool(f1 == f2)),
-                    OpType::OGt => Lattice::Constant(Operand::Bool(f1 > f2)),
-                    OpType::OLt => Lattice::Constant(Operand::Bool(f1 < f2)),
-                    _ => panic!("{:?}'s operands can't be folded as floats", op_typ),
-                }
-            }
-            (Operand::Bool(b1), Operand::Bool(b2)) => {
-                match &op_typ {
-                    OpType::And => Lattice::Constant(Operand::Bool(b1 && b2)),
-                    OpType::Or => Lattice::Constant(Operand::Bool(b1 || b2)),
-                    OpType::Xor => Lattice::Constant(Operand::Bool(b1 ^ b2)),
-                    _ => panic!("{:?}'s operands can't be folded as booleans", op_typ),
-                }
-            }
+            (Operand::Int(i1), Operand::Int(i2)) => match &op_typ {
+                OpType::AddI => Lattice::Constant(Operand::Int(i1 + i2)),
+                OpType::SubI => Lattice::Constant(Operand::Int(i1 - i2)),
+                OpType::MulI => Lattice::Constant(Operand::Int(i1 * i2)),
+                OpType::DivI => Lattice::Constant(Operand::Int(i1 / i2)),
+                OpType::ModI => Lattice::Constant(Operand::Int(i1 % i2)),
+                OpType::Xor => Lattice::Constant(Operand::Int(i1 ^ i2)),
+                OpType::Shl => Lattice::Constant(Operand::Int(i1 << i2)),
+                OpType::Shr => Lattice::Constant(Operand::Int(i1 >> i2)),
+                OpType::Sar => Lattice::Constant(Operand::Int(((i1 as i64) >> i2) as i32)),
+                OpType::SNe => Lattice::Constant(Operand::Bool(i1 != i2)),
+                OpType::SEq => Lattice::Constant(Operand::Bool(i1 == i2)),
+                OpType::SGt => Lattice::Constant(Operand::Bool(i1 > i2)),
+                OpType::SLt => Lattice::Constant(Operand::Bool(i1 < i2)),
+                OpType::SGe => Lattice::Constant(Operand::Bool(i1 >= i2)),
+                OpType::SLe => Lattice::Constant(Operand::Bool(i1 <= i2)),
+                _ => panic!("{:?}'s operands can't be folded as integers", op_typ),
+            },
+            (Operand::Float(f1), Operand::Float(f2)) => match &op_typ {
+                OpType::AddF => Lattice::Constant(Operand::Float(f1 + f2)),
+                OpType::SubF => Lattice::Constant(Operand::Float(f1 - f2)),
+                OpType::MulF => Lattice::Constant(Operand::Float(f1 * f2)),
+                OpType::DivF => Lattice::Constant(Operand::Float(f1 / f2)),
+                OpType::ONe => Lattice::Constant(Operand::Bool(f1 != f2)),
+                OpType::OEq => Lattice::Constant(Operand::Bool(f1 == f2)),
+                OpType::OGt => Lattice::Constant(Operand::Bool(f1 > f2)),
+                OpType::OLt => Lattice::Constant(Operand::Bool(f1 < f2)),
+                _ => panic!("{:?}'s operands can't be folded as floats", op_typ),
+            },
+            (Operand::Bool(b1), Operand::Bool(b2)) => match &op_typ {
+                OpType::And => Lattice::Constant(Operand::Bool(b1 && b2)),
+                OpType::Or => Lattice::Constant(Operand::Bool(b1 || b2)),
+                OpType::Xor => Lattice::Constant(Operand::Bool(b1 ^ b2)),
+                _ => panic!("{:?}'s operands can't be folded as booleans", op_typ),
+            },
             _ => panic!("SCCP fold: both operands must be of the same type"),
+        }
+    }
+
+    fn cast(operand: Lattice, op_typ: OpType) -> Lattice {
+        let operand = match operand {
+            Lattice::Constant(c) => c,
+            _ => panic!("SCCP cast: operand must be a constant"),
+        };
+        match operand {
+            Operand::Int(i) => match &op_typ {
+                OpType::Sitofp => Lattice::Constant(Operand::Float(i as f32)),
+                _ => unreachable!(),
+            },
+            Operand::Float(f) => match &op_typ {
+                OpType::Fptosi => Lattice::Constant(Operand::Int(f as i32)),
+                _ => unreachable!(),
+            },
+            Operand::Bool(b) => match &op_typ {
+                OpType::Zext => Lattice::Constant(Operand::Int(if b { 1 } else { 0 })),
+                OpType::Uitofp => Lattice::Constant(Operand::Float(if b { 1.0 } else { 0.0 })),
+                _ => unreachable!(),
+            },
+            _ => panic!("SCCP cast: operand must be an integer, float or boolean constant"),
         }
     }
 
@@ -135,8 +174,26 @@ impl<'a> SCCP<'a> {
 
         self.lattices
             .resize(func.dfg.storage.len(), Lattice::Optimistic);
+
+        // map OpId to BBId
+        self.op_to_bb.clear();
+        self.op_to_bb.resize(func.dfg.storage.len(), Operand::BB(0));
+        func.cfg
+            .storage
+            .iter()
+            .enumerate()
+            .for_each(|(bb_id, item)| {
+                if let ArenaItem::Data(bb) = item {
+                    for op_id in bb.cur.iter() {
+                        self.op_to_bb[op_id.get_op_id()] = Operand::BB(bb_id);
+                    }
+                }
+            });
+
         self.executable.clear();
+        self.visited.clear();
         self.edge_list.clear();
+
         self.edge_list.extend(
             func.cfg[entry]
                 .succs
@@ -144,11 +201,13 @@ impl<'a> SCCP<'a> {
                 .map(|succ| (Operand::BB(entry), succ.clone()))
                 .collect::<Vec<(Operand, Operand)>>(),
         );
+        self.visited.insert(entry);
+
         self.inst_list.clear();
         self.in_inst_list.clear();
     }
 
-    fn visit_expr(&mut self, op_id: Operand) {
+    fn visit_expr(&mut self, op_id: Operand, bb_id: Operand) {
         let func = match self.current_function {
             Some(idx) => idx,
             None => panic!("SCCP visit_expr: current_function is None"), // should not happen
@@ -156,7 +215,7 @@ impl<'a> SCCP<'a> {
         let op_data = self.program.funcs[func].dfg[op_id.clone()].data.clone();
         let old = self.lattices[op_id.get_op_id()].clone();
 
-        match op_data {
+        match op_data.clone() {
             OpData::AddF { lhs, rhs }
             | OpData::SubF { lhs, rhs }
             | OpData::MulF { lhs, rhs }
@@ -185,18 +244,28 @@ impl<'a> SCCP<'a> {
             | OpData::Shr { lhs, rhs }
             | OpData::Sar { lhs, rhs } => {
                 // Fold the const first
-                let lattice_list = {
-                    let mut list = Vec::new();
-                    // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
-                    if let Operand::Value(lhs_id) = lhs {
-                        list.push(self.lattices[lhs_id].clone());
-                    }
-                    if let Operand::Value(rhs_id) = rhs {
-                        list.push(self.lattices[rhs_id].clone());
-                    }
-                    list
-                };
-                self.lattices[op_id.get_op_id()] = Self::meet(lattice_list);
+                let left_lattice = self.get_lattice(&lhs);
+                let right_lattice = self.get_lattice(&rhs);
+                if matches!(left_lattice, Lattice::Constant(_))
+                    && matches!(right_lattice, Lattice::Constant(_))
+                {
+                    self.lattices[op_id.get_op_id()] =
+                        Self::fold(left_lattice, right_lattice, OpType::from(&op_data));
+                } else {
+                    // If not foldable, we just meet the lattices of the operands.
+                    let lattice_list = {
+                        let mut list = Vec::new();
+                        // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
+                        if let Operand::Value(lhs_id) = lhs {
+                            list.push(self.lattices[lhs_id].clone());
+                        }
+                        if let Operand::Value(rhs_id) = rhs {
+                            list.push(self.lattices[rhs_id].clone());
+                        }
+                        list
+                    };
+                    self.lattices[op_id.get_op_id()] = Self::meet(lattice_list);
+                }
 
                 if old == self.lattices[op_id.get_op_id()] {
                     return;
@@ -210,11 +279,19 @@ impl<'a> SCCP<'a> {
                     }
                 }
             }
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
-                // Return the lattice of the operand directly for simplicity
-                if let Operand::Value(value_id) = value {
-                    self.lattices[op_id.get_op_id()] = self.lattices[value_id].clone()
+
+            OpData::Sitofp { value }
+            | OpData::Fptosi { value }
+            | OpData::Zext { value }
+            | OpData::Uitofp { value } => {
+                let operand_lattice = self.get_lattice(&value);
+                if matches!(operand_lattice, Lattice::Constant(_)) {
+                    self.lattices[op_id.get_op_id()] =
+                        Self::cast(operand_lattice, OpType::from(&op_data));
+                } else {
+                    self.lattices[op_id.get_op_id()] = operand_lattice;
                 }
+
                 if old == self.lattices[op_id.get_op_id()] {
                     return;
                 }
@@ -228,7 +305,9 @@ impl<'a> SCCP<'a> {
             }
 
             OpData::GEP { .. } | OpData::Load { .. } | OpData::Call { .. } => {
+                // TODO: We are not able to fold these instructions for now.
                 self.lattices[op_id.get_op_id()] = Lattice::Overdefined;
+
                 if old == self.lattices[op_id.get_op_id()] {
                     return;
                 }
@@ -241,11 +320,35 @@ impl<'a> SCCP<'a> {
                 }
             }
 
-            OpData::Phi { .. } => unreachable!("Phi nodes should be handled in visit_phi()"),
-
-            OpData::Br { cond, .. } => {
-                
+            OpData::Br {
+                cond,
+                then_bb,
+                else_bb,
+            } => {
+                let cond_lattice = self.get_lattice(&cond);
+                match cond_lattice {
+                    Lattice::Optimistic => {
+                        unreachable!("SCCP: condition of br can't be optimistic")
+                    }
+                    Lattice::Constant(c) => {
+                        if let Operand::Bool(b) = c {
+                            if b {
+                                self.edge_list.push((bb_id.clone(), then_bb.clone()));
+                            } else {
+                                self.edge_list.push((bb_id.clone(), else_bb.clone()));
+                            }
+                        } else {
+                            panic!("SCCP: condition of br must be a boolean constant");
+                        }
+                    }
+                    Lattice::Overdefined => {
+                        self.edge_list.push((bb_id.clone(), then_bb.clone()));
+                        self.edge_list.push((bb_id.clone(), else_bb.clone()));
+                    }
+                }
             }
+
+            OpData::Phi { .. } => unreachable!("Phi nodes should be handled in visit_phi()"),
             OpData::Jump { .. } | OpData::Ret { .. } => { /* do nothing */ }
 
             // SCCP doesn't care about these ops.
@@ -257,17 +360,122 @@ impl<'a> SCCP<'a> {
         }
     }
 
+    fn visit_phi(&mut self, op_id: Operand, bb_id: Operand) {
+        let func = match self.current_function {
+            Some(idx) => idx,
+            None => panic!("SCCP visit_phi: current_function is None"), // should not happen
+        };
+        let op_data = self.program.funcs[func].dfg[op_id.clone()].data.clone();
+        let old = self.lattices[op_id.get_op_id()].clone();
+
+        if let OpData::Phi { incoming } = op_data {
+            let lattice_list = incoming
+                .iter()
+                .filter_map(|incoming| {
+                    if let PhiIncoming::Data {
+                        value,
+                        bb: Operand::BB(pred),
+                    } = incoming
+                    {
+                        if self.executable.contains(&(*pred, bb_id.get_bb_id())) {
+                            // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
+                            if let Operand::Value(value_id) = value {
+                                Some(self.lattices[*value_id].clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<Lattice>>();
+            self.lattices[op_id.get_op_id()] = Self::meet(lattice_list);
+
+            if old == self.lattices[op_id.get_op_id()] {
+                return;
+            }
+            // If the lattice has changed, we need to propagate the change to users.
+            for user in self.program.funcs[func].dfg[op_id.clone()].users.iter() {
+                if !self.in_inst_list.contains(user.get_op_id()) {
+                    self.in_inst_list.insert(user.get_op_id());
+                    self.inst_list.push(user.clone());
+                }
+            }
+        } else {
+            panic!("SCCP visit_phi: op is not a phi node");
+        }
+    }
+
     fn propagate(&mut self) {
         while !(self.edge_list.is_empty() && self.inst_list.is_empty()) {
             // Handle flow graph edge
             if let Some((from, to)) = self.edge_list.pop() {
-                if self.executable.contains(&(from.clone(), to.clone())) {
+                if self
+                    .executable
+                    .contains(&(from.get_bb_id(), to.get_bb_id()))
+                {
                     continue;
                 }
-                self.executable.insert((from.clone(), to.clone()));
+                self.executable.insert((from.get_bb_id(), to.get_bb_id()));
+
+                // Visit the successor block. We need to check all phi nodes in the successor block and update their lattices.
+                {
+                    let mut ctx = context_or_err!(self, "SCCP: no context in propagate");
+                    let phis = self
+                        .builder
+                        .get_all_ops_in_block(&mut ctx, to.clone(), OpType::Phi);
+                    for phi in phis {
+                        self.visit_phi(phi, to.clone());
+                    }
+                }
+
+                // If to is visited for the first time, we need to visit all non-phi instructions in the block.
+                if !self.visited.contains(to.get_bb_id()) {
+                    self.visited.insert(to.get_bb_id());
+                    let mut ctx = context_or_err!(self, "SCCP: no context in propagate");
+                    let non_phis = self.builder.get_all_non_phi_in_block(&mut ctx, to.clone());
+                    for non_phi in non_phis {
+                        self.visit_expr(non_phi, to.clone());
+                    }
+                }
+
+                // If to only has only one outgoing edge, push succ to edge_list.
+                let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
+                if cfg[to.get_bb_id()].succs.len() == 1 {
+                    let succ = cfg[to.get_bb_id()].succs[0].clone();
+                    self.edge_list.push((to.clone(), succ));
+                }
+            }
+
+            // Handle instruction
+            if let Some(op_id) = self.inst_list.pop() {
+                // Critical: remove the inst first.
+                self.in_inst_list.remove(op_id.get_op_id());
+
+                let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+                let op_data = dfg[op_id.clone()].data.clone();
+                if op_data.is(OpType::Phi) {
+                    self.visit_phi(op_id.clone(), self.op_to_bb[op_id.get_op_id()].clone());
+                } else {
+                    // If any incoming edge is executable, we need to visit the instruction.
+                    if self
+                        .visited
+                        .contains(self.op_to_bb[op_id.get_op_id()].get_bb_id())
+                    {
+                        self.visit_expr(op_id.clone(), self.op_to_bb[op_id.get_op_id()].clone());
+                    }
+                }
             }
         }
     }
-}
 
-struct Rewrite;
+    pub fn run(&mut self) {
+        for func_id in self.program.funcs.collect_internal() {
+            self.init(func_id);
+            self.propagate();
+        }
+    }
+}

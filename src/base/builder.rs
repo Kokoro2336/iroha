@@ -378,7 +378,10 @@ impl Builder {
                 dfg.remove_use(lhs, op.clone());
                 dfg.remove_use(rhs, op);
             }
-            OpData::Sitofp { value } | OpData::Fptosi { value } | OpData::Uitofp { value } | OpData::Zext { value } => {
+            OpData::Sitofp { value }
+            | OpData::Fptosi { value }
+            | OpData::Uitofp { value }
+            | OpData::Zext { value } => {
                 dfg.remove_use(value, op);
             }
 
@@ -804,6 +807,65 @@ impl Builder {
         removed_op
     }
 
+    pub fn replace_op(
+        &mut self,
+        ctx: &mut BuilderContext,
+        op_id: Operand,
+        bb_id: Operand,
+        new_op: Op,
+    ) -> Op {
+        let pos = {
+            let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
+            let bb = &mut cfg[bb_id.clone()];
+
+            // remove from bb
+            if let Some(pos) = bb
+                .cur
+                .iter()
+                .position(|id| id.get_op_id() == op_id.get_op_id())
+            {
+                pos
+            } else {
+                panic!(
+                    "Builder replace_op: instruction {:?} not found in current_block {:?}",
+                    op_id, bb_id
+                );
+            }
+        };
+
+        // replace in dfg
+        let removed_op = self.remove_op(ctx, op_id.clone(), Some(bb_id.clone()));
+
+        let dfg = acquire_dfg!(ctx, "Builder replace_op: ctx.dfg is None");
+        let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
+        let bb = &mut cfg[bb_id];
+
+        // allocate new op in dfg
+        let new_op_id = dfg.alloc(new_op);
+        // insert new op at the same position
+        bb.cur.insert(pos, Operand::Value(new_op_id));
+
+        removed_op
+    }
+
+    pub fn remove_block(&mut self, ctx: &mut BuilderContext, block: Operand) -> BasicBlock {
+        let (cur, bb_id) = {
+            let bb_id = block.get_bb_id();
+            let cfg = acquire_cfg!(ctx, "Builder remove_block: ctx.cfg is None");
+            (cfg[bb_id].cur.clone(), bb_id)
+        };
+
+        // remove all instructions in the block
+        for inst in cur {
+            // The flow edge is controlled by the instruction, so we don't need to remove control flow info separately here.
+            self.remove_op(ctx, inst, Some(block.clone()));
+        }
+
+        // remove the block from cfg
+        let cfg = acquire_cfg!(ctx, "Builder remove_block: ctx.cfg is None");
+        cfg.remove(bb_id)
+    }
+
     // Move the instruction to the front of specific position(operantion) in another basic block.
     pub fn move_op_to_bb_at(
         &mut self,
@@ -869,6 +931,43 @@ impl Builder {
             dfg.add_use(value, phi.clone());
         } else {
             panic!("Builder insert_phi_incoming: not a phi node");
+        }
+    }
+
+    // Remove means we update the incoming value to None.
+    pub fn remove_phi_incoming(&mut self, ctx: &mut BuilderContext, phi: Operand, idx: usize) {
+        unimplemented!()
+    }
+
+    // Slay means we remove the incoming edge.
+    pub fn slay_phi_incoming(&mut self, ctx: &mut BuilderContext, phi: Operand, bb: Operand) {
+        let dfg = acquire_dfg!(ctx, "Builder slay_phi_incoming: ctx.dfg is None");
+        let phi_id = phi.get_op_id();
+
+        if let OpData::Phi { incoming } = dfg[phi_id].data.clone() {
+            if let Some(pos) = incoming.iter().position(|inc| {
+                if let PhiIncoming::Data { bb: inc_bb, .. } = inc {
+                    inc_bb == &bb
+                } else {
+                    false
+                }
+            }) {
+                // remove uses
+                if let PhiIncoming::Data { value, .. } = &incoming[pos] {
+                    dfg.remove_use(value.clone(), phi.clone());
+                }
+                // Critical: retrieve the data again, DO NOT use the cloned one!
+                if let OpData::Phi { incoming } = &mut dfg[phi_id].data {
+                    incoming.remove(pos);
+                }
+            } else {
+                panic!(
+                    "Builder slay_phi_incoming: no incoming edge from bb {:?} to phi {:?}",
+                    bb, phi
+                );
+            }
+        } else {
+            panic!("Builder slay_phi_incoming: not a phi node");
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::base::ir::{OpData, Operand};
+use crate::base::ir::{OpData, Operand, PhiIncoming};
 /**
  * Dead Code Elimination (DCE).
  */
@@ -145,7 +145,13 @@ impl<'a> DCE<'a> {
                         }
                     }
 
-                    OpData::Alloca(_) | OpData::Phi { .. } => { /* do nothing */ }
+                    OpData::Phi { incoming } => {
+                        for phi_incoming in incoming.iter() {
+                            if let PhiIncoming::Data { value, bb } = phi_incoming {
+                                check(self, value, bb);
+                            }
+                        }
+                    }
 
                     OpData::Call { .. }
                     | OpData::Store { .. }
@@ -153,6 +159,7 @@ impl<'a> DCE<'a> {
                     | OpData::Jump { .. }
                     | OpData::Ret { .. }
                     | OpData::Move { .. }
+                    | OpData::Alloca(_)
                     | OpData::GlobalAlloca(_)
                     | OpData::Declare { .. } => {
                         unreachable!("DCE: impure instruction should not be in the worklist")

@@ -1,10 +1,12 @@
-use crate::base::ir::{OpData, OpType, Operand, PhiIncoming, Program};
 /**
  * Sparse Conditional Constant Propagation (SCCP).
  * Based on Wegman and Zadeck's paper Constant Propagation with Conditional Branches.
  * Reference: https://dl.acm.org/doi/10.1145/103135.103136
  */
-use crate::base::{context_or_err, Builder, BuilderContext, Pass};
+use crate::base::ir::{Op, OpData, OpType, Operand, PhiIncoming, Program};
+use crate::base::{context_or_err, Builder, BuilderContext, Pass, Type};
+use crate::debug::info;
+use crate::opt::RemoveTrivialPhi;
 use crate::utils::arena::ArenaItem;
 use crate::utils::bitset::BitSet;
 
@@ -23,21 +25,26 @@ pub struct SCCP<'a> {
 
     // HashSet<(from, to)> for edges in the control flow graph that are executable. Only store true.
     executable: FxHashSet<(usize, usize)>,
+    // Lattices
+    lattices: Vec<Lattice>,
     // Whether the block has been visited. We use BitSet for fast lookup.
     visited: BitSet,
-    lattices: Vec<Lattice>,
+    // Whether the instruction is already in the worklist. We use BitSet for fast lookup.
+    in_inst_list: BitSet,
 
     // Worklists
     // Vec<(from, to)> for CFG edges that need to be processed.
     edge_list: Vec<(Operand, Operand)>,
     // Vec<(OpId, BBId)>
     inst_list: Vec<Operand>,
-    // Whether the instruction is already in the worklist. We use BitSet for fast lookup.
-    in_inst_list: BitSet,
 
     // Ancillary infrastructure
     // We need to know the mapping from op_id to bb_id for phi nodes.
     op_to_bb: Vec<Operand>,
+    phi_ops: Vec<Operand>,
+    in_phi_ops: BitSet,
+    br_ops: Vec<Operand>,
+    in_br_ops: BitSet,
 
     current_function: Option<usize>,
 }
@@ -54,6 +61,10 @@ impl<'a> SCCP<'a> {
             in_inst_list: BitSet::new(),
             visited: BitSet::new(),
             op_to_bb: Vec::new(),
+            phi_ops: Vec::new(),
+            in_phi_ops: BitSet::new(),
+            br_ops: Vec::new(),
+            in_br_ops: BitSet::new(),
             current_function: None,
         }
     }
@@ -205,6 +216,11 @@ impl<'a> SCCP<'a> {
 
         self.inst_list.clear();
         self.in_inst_list.clear();
+
+        self.phi_ops.clear();
+        self.in_phi_ops.clear();
+        self.br_ops.clear();
+        self.in_br_ops.clear();
     }
 
     fn visit_expr(&mut self, op_id: Operand, bb_id: Operand) {
@@ -340,6 +356,11 @@ impl<'a> SCCP<'a> {
                         } else {
                             panic!("SCCP: condition of br must be a boolean constant");
                         }
+                        // only push br ops with constant condition to br_ops for later rewrite. We will replace them with jump ops.
+                        if !self.in_br_ops.contains(op_id.get_op_id()) {
+                            self.in_br_ops.insert(op_id.get_op_id());
+                            self.br_ops.push(op_id.clone());
+                        }
                     }
                     Lattice::Overdefined => {
                         self.edge_list.push((bb_id.clone(), then_bb.clone()));
@@ -349,14 +370,16 @@ impl<'a> SCCP<'a> {
             }
 
             OpData::Phi { .. } => unreachable!("Phi nodes should be handled in visit_phi()"),
-            OpData::Jump { .. } | OpData::Ret { .. } => { /* do nothing */ }
 
+            // Jump is unconditional, and it's been processed outside of visit_expr().
+            OpData::Jump { .. }
+            | OpData::Ret { .. }
             // SCCP doesn't care about these ops.
-            OpData::Alloca(_)
+            | OpData::Alloca(_)
             | OpData::GlobalAlloca(_)
             | OpData::Store { .. }
             | OpData::Declare { .. }
-            | OpData::Move { .. } => return,
+            | OpData::Move { .. } => {}
         }
     }
 
@@ -428,6 +451,10 @@ impl<'a> SCCP<'a> {
                         .builder
                         .get_all_ops_in_block(&mut ctx, to.clone(), OpType::Phi);
                     for phi in phis {
+                        if !self.in_phi_ops.contains(phi.get_op_id()) {
+                            self.in_phi_ops.insert(phi.get_op_id());
+                            self.phi_ops.push(phi.clone());
+                        }
                         self.visit_phi(phi, to.clone());
                     }
                 }
@@ -458,6 +485,10 @@ impl<'a> SCCP<'a> {
                 let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
                 let op_data = dfg[op_id.clone()].data.clone();
                 if op_data.is(OpType::Phi) {
+                    if !self.in_phi_ops.contains(op_id.get_op_id()) {
+                        self.in_phi_ops.insert(op_id.get_op_id());
+                        self.phi_ops.push(op_id.clone());
+                    }
                     self.visit_phi(op_id.clone(), self.op_to_bb[op_id.get_op_id()].clone());
                 } else {
                     // If any incoming edge is executable, we need to visit the instruction.
@@ -472,10 +503,139 @@ impl<'a> SCCP<'a> {
         }
     }
 
+    // Rewrite the program based on the results of propagation. And then return the existing phi nodes after rewriting.
+    fn rewrite(&mut self) -> Vec<(Operand, Operand)> {
+        // Slay the edge of dead block in phi operations.
+        for phi_op in self.phi_ops.iter() {
+            let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+            let op = dfg[phi_op.clone()].clone();
+            if let OpData::Phi { incoming } = op.data {
+                for incoming in incoming.iter() {
+                    if let PhiIncoming::Data { bb, .. } = incoming {
+                        if let Operand::BB(bb_id) = bb {
+                            if !self.visited.contains(*bb_id) {
+                                let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                                self.builder.slay_phi_incoming(
+                                    &mut ctx,
+                                    phi_op.clone(),
+                                    bb.clone(),
+                                );
+                            }
+                        } else {
+                            panic!("SCCP rewrite: phi incoming bb is not a BB operand");
+                        }
+                    }
+                }
+            } else {
+                panic!("SCCP rewrite: op is not a phi node");
+            }
+        }
+
+        // Replace br with jump if the condition is a constant.
+        for br_op in self.br_ops.iter() {
+            let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+            let op = dfg[br_op.clone()].clone();
+            if let OpData::Br {
+                cond,
+                then_bb,
+                else_bb,
+            } = op.data
+            {
+                let cond_lattice = self.get_lattice(&cond);
+                match cond_lattice {
+                    Lattice::Constant(c) => {
+                        if let Operand::Bool(b) = c {
+                            let target_bb = if b { then_bb } else { else_bb };
+                            let bb_id = self.op_to_bb[br_op.get_op_id()].clone();
+                            let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                            self.builder.replace_op(
+                                &mut ctx,
+                                br_op.clone(),
+                                bb_id,
+                                Op {
+                                    typ: Type::Void,
+                                    attrs: vec![],
+                                    data: OpData::Jump { target_bb },
+                                    users: vec![],
+                                },
+                            );
+                        } else {
+                            panic!("SCCP: condition of br must be a boolean constant");
+                        }
+                    }
+                    _ => unreachable!("SCCP: condition of br can't be non-constant in rewrite"),
+                }
+            } else {
+                panic!("SCCP rewrite: op is not a br node");
+            }
+        }
+
+        // Replace optimizable instructions with constants.
+        let removed = self
+            .lattices
+            .iter()
+            .enumerate()
+            .filter_map(|(op_id, lattice)| {
+                if let Lattice::Constant(c) = lattice {
+                    let bb_id = self.op_to_bb[op_id].clone();
+                    let op_id = Operand::Value(op_id);
+                    let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                    self.builder
+                        .replace_all_uses(&mut ctx, op_id.clone(), c.clone());
+                    Some((op_id.clone(), bb_id.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<(Operand, Operand)>>();
+
+        // Remove the ops
+        removed.into_iter().for_each(|(op_id, bb_id)| {
+            let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+            self.builder.remove_op(&mut ctx, op_id, Some(bb_id));
+        });
+
+        // Remove the blocks
+        self.program.funcs[self.current_function.unwrap()]
+            .cfg
+            .collect()
+            .iter()
+            .for_each(|bb_id| {
+                if !self.visited.contains(*bb_id) {
+                    let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                    self.builder.remove_block(&mut ctx, Operand::BB(*bb_id));
+                }
+            });
+
+        // Collect the surviving phi nodes after rewriting.
+        self.phi_ops
+            .iter()
+            .filter_map(|phi_op| {
+                let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+                dfg.get(phi_op.get_op_id())
+                    .map(|_| (phi_op.clone(), self.op_to_bb[phi_op.get_op_id()].clone()))
+            })
+            .collect::<Vec<(Operand, Operand)>>()
+    }
+
     pub fn run(&mut self) {
+        let mut phi_ops: Vec<Vec<(Operand, Operand)>> =
+            vec![vec![]; self.program.funcs.storage.len()];
         for func_id in self.program.funcs.collect_internal() {
             self.init(func_id);
             self.propagate();
+            phi_ops[func_id] = self.rewrite();
         }
+
+        // Remove trivial phi.
+        info!("SCCP: removing trivial phi nodes...");
+        RemoveTrivialPhi::new(self.program, phi_ops).run();
+        info!("SCCP: done");
+    }
+}
+
+impl Pass<()> for SCCP<'_> {
+    fn run(&mut self) {
+        self.run()
     }
 }

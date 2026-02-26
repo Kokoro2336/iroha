@@ -470,9 +470,7 @@ impl<'a> InsertPhi<'a> {
         let defsites_len = self.defsites.len();
         let func_id = acquire_cur_func_id!(self);
         for idx in 0..defsites_len {
-            while !self.defsites[idx].is_empty() {
-                let bb_id = self.defsites[idx].pop().unwrap();
-
+            while let Some(bb_id) = self.defsites[idx].pop() {
                 let frontiers = self.frontiers[func_id][bb_id].clone();
                 for frontier in frontiers {
                     // If the phi already exists, we don't need to insert it again, but we still need to update the origins.
@@ -861,7 +859,8 @@ impl<'a> Renaming<'a> {
             // Clean up removed ops for this function
             let mut ctx = context_or_err!(self, "Renaming: No current function context found");
             for (op, bb) in &self.removed {
-                self.builder.remove_op(&mut ctx, op.clone(), Some(bb.clone()));
+                self.builder
+                    .remove_op(&mut ctx, op.clone(), Some(bb.clone()));
             }
             self.removed.clear();
         }
@@ -874,7 +873,7 @@ enum CheckType {
     Ignore,          // Multiple or non-phi
 }
 
-struct RemoveTrivialPhi<'a> {
+pub struct RemoveTrivialPhi<'a> {
     program: &'a mut Program,
     builder: Builder,
     phi_ids: Vec<Vec<(Operand, Operand)>>,
@@ -897,7 +896,7 @@ impl<'a> RemoveTrivialPhi<'a> {
         }
     }
 
-    pub fn check(ctx: &mut BuilderContext, phi: Operand) -> CheckType {
+    fn check(ctx: &mut BuilderContext, phi: Operand) -> CheckType {
         let dfg = ctx.dfg.as_ref().unwrap();
         let phi_op = &dfg[phi.clone()];
         match &phi_op.data {
@@ -973,19 +972,16 @@ impl<'a> RemoveTrivialPhi<'a> {
                         }
                         let check_result = Self::check(&mut ctx, user.clone());
                         if matches!(check_result, CheckType::Empty | CheckType::Single(_)) {
-                            self.phi_ids[idx]
+                            if let Some((id, bb)) = self.phi_ids[idx]
                                 .iter()
                                 .find(|(id, _)| *id == user)
-                                .map(|(id, bb)| {
-                                    // We should check whether the user phi is already in the worklist to avoid duplicate entries.
-                                    if !self
-                                        .worklist
-                                        .iter()
-                                        .any(|(w_id, _, _)| *w_id == *id)
-                                    {
-                                        self.worklist.push((id.clone(), bb.clone(), check_result));
-                                    }
-                                });
+                                .map(|(id, bb)| (id.clone(), bb.clone()))
+                            {
+                                // We should check whether the user phi is already in the worklist to avoid duplicate entries.
+                                if !self.worklist.iter().any(|(w_id, _, _)| *w_id == id) {
+                                    self.worklist.push((id.clone(), bb.clone(), check_result));
+                                }
+                            }
                         }
                     }
                     self.builder.set_current_block(bb_id.clone());
@@ -1001,19 +997,16 @@ impl<'a> RemoveTrivialPhi<'a> {
                         }
                         let check_result = Self::check(&mut ctx, user.clone());
                         if matches!(check_result, CheckType::Empty | CheckType::Single(_)) {
-                            self.phi_ids[idx]
+                            if let Some((id, bb)) = self.phi_ids[idx]
                                 .iter()
                                 .find(|(id, _)| *id == user)
-                                .map(|(id, bb)| {
-                                    // We should check whether the user phi is already in the worklist to avoid duplicate entries.
-                                    if !self
-                                        .worklist
-                                        .iter()
-                                        .any(|(w_id, _, _)| *w_id == *id)
-                                    {
-                                        self.worklist.push((id.clone(), bb.clone(), check_result));
-                                    }
-                                });
+                                .map(|(id, bb)| (id.clone(), bb.clone()))
+                            {
+                                // We should check whether the user phi is already in the worklist to avoid duplicate entries.
+                                if !self.worklist.iter().any(|(w_id, _, _)| *w_id == id) {
+                                    self.worklist.push((id.clone(), bb.clone(), check_result));
+                                }
+                            }
                         }
                     }
                     self.builder.set_current_block(bb_id.clone());
@@ -1032,48 +1025,46 @@ impl<'a> RemoveTrivialPhi<'a> {
     }
 }
 
-pub struct Mem2Reg {
-    program: Program,
+pub struct Mem2Reg<'a> {
+    program: &'a mut Program,
 }
 
-impl Mem2Reg {
-    pub fn new(program: Program) -> Self {
+impl<'a> Mem2Reg<'a> {
+    pub fn new(program: &'a mut Program) -> Self {
         Self { program }
     }
 }
 
-impl Pass<Program> for Mem2Reg {
-    fn run(&mut self) -> Program {
+impl<'a> Pass<()> for Mem2Reg<'a> {
+    fn run(&mut self) {
         // 1. Build dominator tree
         info!("Start building dominator tree.");
-        let mut dom_builder = BuildDomTree::new(&mut self.program);
+        let mut dom_builder = BuildDomTree::new(self.program);
         let dom_trees = dom_builder.build();
         info!("Dominator tree built: {:?}", dom_trees);
 
         // 2. Build dominator frontier
         info!("Start building dominator frontier.");
-        let mut df_builder = BuildDomFrontier::new(&mut self.program, dom_trees.clone());
+        let mut df_builder = BuildDomFrontier::new(self.program, dom_trees.clone());
         let frontiers = df_builder.build();
         info!("Dominator frontier built: {:?}", frontiers);
 
         // 3. Insert Phi nodes
         info!("Start inserting phi nodes.");
-        let mut phi_inserter = InsertPhi::new(&mut self.program, frontiers);
+        let mut phi_inserter = InsertPhi::new(self.program, frontiers);
         let phi_ids = phi_inserter.run();
         info!("Phi nodes inserted.");
 
         // 4. Rename variables
         info!("Start renaming variables.");
-        let mut renamer = Renaming::new(&mut self.program, dom_trees);
+        let mut renamer = Renaming::new(self.program, dom_trees);
         renamer.run();
         info!("Variables renamed.");
 
         // 5. Remove trivial phi nodes
         info!("Start removing trivial phi nodes.");
-        let mut remover = RemoveTrivialPhi::new(&mut self.program, phi_ids);
+        let mut remover = RemoveTrivialPhi::new(self.program, phi_ids);
         remover.run();
         info!("Trivial phi nodes removed.");
-
-        std::mem::take(&mut self.program)
     }
 }

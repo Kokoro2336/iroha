@@ -4,12 +4,11 @@
 use crate::base::ir::*;
 use crate::base::Pass;
 use crate::base::Type;
-use crate::debug::info;
 use crate::frontend::ast;
 use crate::utils::arena::{ArenaItem, IndexedArena};
 use std::fmt::Write;
 
-pub trait DumpLlvm {
+pub trait DumpLLVM {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error>;
 }
 
@@ -43,7 +42,7 @@ fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
     format!("@{}", id)
 }
 
-impl DumpLlvm for Type {
+impl DumpLLVM for Type {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
@@ -66,7 +65,7 @@ impl DumpLlvm for Type {
     }
 }
 
-impl DumpLlvm for Operand {
+impl DumpLLVM for Operand {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
@@ -86,7 +85,7 @@ impl DumpLlvm for Operand {
     }
 }
 
-impl DumpLlvm for Op {
+impl DumpLLVM for Op {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match &self.data {
@@ -596,7 +595,7 @@ impl DumpLlvm for Op {
     }
 }
 
-impl DumpLlvm for BasicBlock {
+impl DumpLLVM for BasicBlock {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let dfg = match ctx.function {
@@ -624,7 +623,7 @@ impl DumpLlvm for BasicBlock {
     }
 }
 
-impl DumpLlvm for Function {
+impl DumpLLVM for Function {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
 
@@ -679,7 +678,7 @@ impl DumpLlvm for Function {
     }
 }
 
-impl DumpLlvm for Program {
+impl DumpLLVM for Program {
     fn dump_to_llvm(&self, _ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let program_ctx = DumpContext {
@@ -856,34 +855,37 @@ where
     }
 }
 
-pub struct DumpLlvmPass {
-    program: Program,
+pub struct DumpLLVMPass<'a> {
+    program: &'a mut Program,
     filename: String,
 }
 
-impl DumpLlvmPass {
-    pub fn new(program: Program, filename: String) -> Self {
+impl<'a> DumpLLVMPass<'a> {
+    pub fn new(program: &'a mut Program, filename: String) -> Self {
         Self { program, filename }
     }
 }
 
-impl Pass<Program> for DumpLlvmPass {
-    fn run(&mut self) -> Program {
+impl Pass<()> for DumpLLVMPass<'_> {
+    fn run(&mut self) {
         let ctx = DumpContext {
-            program: &self.program,
+            program: &*self.program,
             function: None,
         };
         match self.program.dump_to_llvm(&ctx) {
             Ok(s) => {
                 let dump_dir = std::path::Path::new("dump_llvm");
                 if !dump_dir.exists() {
-                    std::fs::create_dir_all(dump_dir).map_err(|e| e.to_string());
+                    if let Err(e) = std::fs::create_dir_all(dump_dir) {
+                        panic!("Error creating dump directory: {}", e);
+                    }
                 }
                 let file_path = dump_dir.join(format!("{}.ll", self.filename));
-                std::fs::write(file_path, s).map_err(|e| e.to_string());
+                if let Err(e) = std::fs::write(file_path, s) {
+                    panic!("Error writing LLVM dump: {}", e);
+                }
             }
-            Err(e) => info!("Error dumping LLVM IR: {}", e),
+            Err(e) => panic!("Error dumping LLVM IR: {}", e),
         }
-        std::mem::take(&mut self.program)
     }
 }

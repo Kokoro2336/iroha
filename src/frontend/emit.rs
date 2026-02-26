@@ -171,6 +171,32 @@ impl Emit {
             op
         }
 
+        fn emit_cast(this: &mut Emit, operand: Operand, from: Type, to: Type) -> Operand {
+            if from == to {
+                return operand;
+            }
+
+            let op_data = match (&from, &to) {
+                (Type::Bool, Type::Int) => OpData::Zext { value: operand },
+                (Type::Int, Type::Bool) => OpData::SNe {
+                    lhs: operand,
+                    rhs: Operand::Int(0),
+                },
+                (Type::Float, Type::Bool) => OpData::ONe {
+                    lhs: operand,
+                    rhs: Operand::Float(0.0),
+                },
+                (Type::Bool, Type::Float) => OpData::Uitofp { value: operand },
+                (Type::Int, Type::Float) => OpData::Sitofp { value: operand },
+                (Type::Float, Type::Int) => OpData::Fptosi { value: operand },
+                _ => panic!("Unsupported implicit cast in Emit: {:?} -> {:?}", from, to),
+            };
+
+            let mut ctx = context_or_err!(this, "Cast outside function");
+            this.builder
+                .create(&mut ctx, ir::Op::new(to, vec![], op_data))
+        }
+
         match &self.ast[node_id] {
             Node::DeclAggr { decls } => {
                 let ids: Vec<NodeId> = decls.clone();
@@ -1191,13 +1217,18 @@ impl Emit {
                         _ => {}
                     }
 
-                    let lhs_op = if idx == 0 {
+                    let mut lhs_op = if idx == 0 {
                         emit_rval(self, lhs)
                     } else {
                         // It's impossibe that res is not a Value operand,
                         // since the only way to get a non-Value operand is from a short-circuit op, which must be the first op in the list.
                         res
                     };
+                    let expected_lhs_typ = node_value_type(&self.ast, lhs);
+                    let actual_lhs_typ = self.get_type(&lhs_op);
+                    if actual_lhs_typ != expected_lhs_typ {
+                        lhs_op = emit_cast(self, lhs_op, actual_lhs_typ, expected_lhs_typ);
+                    }
                     let rhs_op = emit_rval(self, rhs);
                     let lhs_typ = self.get_type(&lhs_op);
                     let rhs_typ = self.get_type(&rhs_op);
@@ -1245,9 +1276,9 @@ impl Emit {
                     }
                     ast::Op::Not => {
                         if typ == Type::Bool {
-                            OpData::SEq {
+                            OpData::Xor {
                                 lhs: operand_op,
-                                rhs: Operand::Bool(false),
+                                rhs: Operand::Bool(true),
                             }
                         } else {
                             panic!(

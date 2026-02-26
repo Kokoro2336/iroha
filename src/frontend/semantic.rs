@@ -340,34 +340,43 @@ impl Semantic {
                             }
                         };
                         let operand_type = self.analyze(operand_id)?;
+                        let mut res_id = operand_id;
+                        let mut res_type = operand_type.clone();
 
-                        if op_kind == Op::Plus {
-                            if !matches!(operand_type, Type::Int | Type::Float) {
+                        if matches!(op_kind, Op::Plus | Op::Minus) {
+                            if matches!(res_type, Type::Bool) {
+                                self.cast_expr_to(&mut res_id, &res_type, &Type::Int)?;
+                                res_type = Type::Int;
+                            }
+
+                            if !matches!(res_type, Type::Int | Type::Float) {
                                 return Err(format!(
-                                    "Unary plus only supports Int/Float operand, got {:?}",
-                                    operand_type
+                                    "Unary {:?} only supports Int/Float operand, got {:?}",
+                                    op_kind, res_type
                                 ));
                             }
-                            let operand = self.ast.remove(operand_id);
-                            self.ast.replace(node_id, operand);
-                            for id in op_list.into_iter().filter(|id| *id != node_id) {
-                                self.ast.remove(id);
-                            }
-                            return Ok(operand_type);
                         }
 
-                        let mut res_id = operand_id;
-                        if op_list.len() % 2 == 0 {
-                            let operand = self.ast.remove(operand_id);
+                        if op_kind == Op::Plus {
+                            let operand = self.ast.remove(res_id);
                             self.ast.replace(node_id, operand);
                             for id in op_list.into_iter().filter(|id| *id != node_id) {
                                 self.ast.remove(id);
                             }
-                            return Ok(operand_type);
+                            return Ok(res_type);
+                        }
+
+                        if op_list.len() % 2 == 0 {
+                            let operand = self.ast.remove(res_id);
+                            self.ast.replace(node_id, operand);
+                            for id in op_list.into_iter().filter(|id| *id != node_id) {
+                                self.ast.remove(id);
+                            }
+                            return Ok(res_type);
                         }
 
                         if let Node::UnaryOp { operand, .. } = &mut self.ast[node_id] {
-                            *operand = operand_id;
+                            *operand = res_id;
                         }
                         for id in op_list.iter().copied().filter(|id| *id != node_id) {
                             self.ast.remove(id);
@@ -375,17 +384,11 @@ impl Semantic {
 
                         match op_kind {
                             Op::Minus => {
-                                if !matches!(operand_type, Type::Int | Type::Float) {
-                                    return Err(format!(
-                                        "Unary minus only supports Int/Float operand, got {:?}",
-                                        operand_type
-                                    ));
-                                }
                                 if let Node::UnaryOp { typ, operand, .. } = &mut self.ast[node_id] {
-                                    *typ = operand_type.clone();
+                                    *typ = res_type.clone();
                                     *operand = res_id;
                                 }
-                                Ok(operand_type)
+                                Ok(res_type)
                             }
                             Op::Not => {
                                 if matches!(operand_type, Type::Float) {
@@ -760,10 +763,7 @@ impl Semantic {
                 if matches!(cond_type, Type::Int | Type::Float) {
                     self.cast_expr_to(&mut condition, &cond_type, &Type::Bool)?;
                 } else if !matches!(cond_type, Type::Bool) {
-                    return Err(format!(
-                        "If condition must be Bool, got {:?}",
-                        cond_type
-                    ));
+                    return Err(format!("If condition must be Bool, got {:?}", cond_type));
                 }
                 self.analyze(then_block)?;
                 if let Some(else_id) = else_block {
@@ -783,10 +783,7 @@ impl Semantic {
                 if matches!(cond_type, Type::Int | Type::Float) {
                     self.cast_expr_to(&mut condition, &cond_type, &Type::Bool)?;
                 } else if !matches!(cond_type, Type::Bool) {
-                    return Err(format!(
-                        "While condition must be Bool, got {:?}",
-                        cond_type
-                    ));
+                    return Err(format!("While condition must be Bool, got {:?}", cond_type));
                 }
                 self.analyze(body)?;
                 if let Node::While { condition: c, .. } = &mut self.ast[node_id] {

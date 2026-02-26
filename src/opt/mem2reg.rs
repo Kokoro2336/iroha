@@ -863,6 +863,28 @@ impl<'a> Renaming<'a> {
                     .remove_op(&mut ctx, op.clone(), Some(bb.clone()));
             }
             self.removed.clear();
+
+            // Remove all the promoted allocas in entry block. You should do this after load/store removal, since some allocas might be used by dead load/store.
+            let promoted_allocas = {
+                let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+                self.builder
+                    .get_all_ops_in_block(&mut ctx, Operand::BB(head), OpType::Alloca)
+                    .into_iter()
+                    .filter(|alloca| {
+                        let func = &self.program.funcs[idx];
+                        let alloca_op = &func.dfg[alloca.clone()];
+                        alloca_op
+                            .attrs
+                            .iter()
+                            .any(|attr| matches!(attr, Attr::Promotion))
+                    })
+                    .collect::<Vec<Operand>>()
+            };
+            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+            for alloca in promoted_allocas {
+                self.builder
+                    .remove_op(&mut ctx, alloca.clone(), Some(Operand::BB(head)));
+            }
         }
     }
 }

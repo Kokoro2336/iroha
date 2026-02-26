@@ -103,7 +103,7 @@ impl<'a> SCCP<'a> {
             Operand::Int(_) | Operand::Float(_) | Operand::Bool(_) => {
                 Lattice::Constant(operand.clone())
             }
-            _ => panic!("You can't get lattice for operand: {:?}", operand),
+            _ => Lattice::Optimistic
         }
     }
 
@@ -231,6 +231,7 @@ impl<'a> SCCP<'a> {
         let op_data = self.program.funcs[func].dfg[op_id.clone()].data.clone();
         let old = self.lattices[op_id.get_op_id()].clone();
 
+        crate::debug::info!("SCCP: visiting op_data: {:?}", op_data);
         match op_data.clone() {
             OpData::AddF { lhs, rhs }
             | OpData::SubF { lhs, rhs }

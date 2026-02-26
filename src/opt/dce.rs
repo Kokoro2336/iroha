@@ -162,7 +162,7 @@ impl<'a> DCE<'a> {
                     | OpData::Alloca(_)
                     | OpData::GlobalAlloca(_)
                     | OpData::Declare { .. } => {
-                        unreachable!("DCE: impure instruction should not be in the worklist")
+                        unreachable!("DCE: impure instruction should not be in the worklist: {:?}", removed_op);
                     }
                 }
             }

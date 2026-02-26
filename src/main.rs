@@ -119,6 +119,15 @@ fn main() -> Result<()> {
     Mem2Reg::new(&mut ir).run();
     info!("Finish Running Mem2Reg.");
 
+    info!("Start Dumping LLVM IR.");
+    let filename = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output")
+        .to_string();
+    DumpLLVMPass::new(&mut ir, filename).run();
+    info!("Finish Dumping LLVM IR.");
+
     info!("Start Running SCCP.");
     SCCP::new(&mut ir).run();
     info!("Finish Running SCCP.");
@@ -128,15 +137,6 @@ fn main() -> Result<()> {
     info!("Finish Running DCE. Start running compaction pass.");
     Compaction::new(&mut ir).run();
     info!("Finish Running Compaction.");
-
-    info!("Start Dumping LLVM IR.");
-    let filename = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output")
-        .to_string();
-    DumpLLVMPass::new(&mut ir, filename).run();
-    info!("Finish Dumping LLVM IR.");
 
     Ok(())
 }

@@ -227,6 +227,7 @@ impl OpData {
                 | OpData::Jump { .. }
                 | OpData::Ret { .. }
                 | OpData::Move { .. }
+                | OpData::Alloca(_)
                 | OpData::GlobalAlloca(_)
                 | OpData::Declare { .. }
         )

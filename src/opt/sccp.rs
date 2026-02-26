@@ -7,16 +7,16 @@ use crate::base::ir::{Op, OpData, OpType, Operand, PhiIncoming, Program};
 use crate::base::{context_or_err, Builder, BuilderContext, Pass, Type};
 use crate::debug::info;
 use crate::opt::RemoveTrivialPhi;
-use crate::utils::arena::ArenaItem;
+use crate::utils::arena::{Arena, ArenaItem};
 use crate::utils::bitset::BitSet;
 
 use rustc_hash::FxHashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lattice {
-    Optimistic,
+    Top,
     Constant(Operand),
-    Overdefined,
+    Bottom,
 }
 
 pub struct SCCP<'a> {
@@ -43,6 +43,7 @@ pub struct SCCP<'a> {
     op_to_bb: Vec<Operand>,
     phi_ops: Vec<Operand>,
     in_phi_ops: BitSet,
+    // br_ops excluding ret.
     br_ops: Vec<Operand>,
     in_br_ops: BitSet,
 
@@ -71,7 +72,7 @@ impl<'a> SCCP<'a> {
 
     fn meet(lattices: Vec<Lattice>) -> Lattice {
         if lattices.is_empty() {
-            return Lattice::Optimistic;
+            return Lattice::Top;
         }
         let mut result = lattices[0].clone();
         for lattice in lattices.into_iter().skip(1) {
@@ -82,15 +83,15 @@ impl<'a> SCCP<'a> {
 
     fn meet_two(old: Lattice, new: Lattice) -> Lattice {
         match (old, new) {
-            (Lattice::Optimistic, origin) | (origin, Lattice::Optimistic) => origin,
+            (Lattice::Top, origin) | (origin, Lattice::Top) => origin,
             (Lattice::Constant(c1), Lattice::Constant(c2)) => {
                 if c1 == c2 {
                     Lattice::Constant(c1)
                 } else {
-                    Lattice::Overdefined
+                    Lattice::Bottom
                 }
             }
-            (Lattice::Overdefined, _) | (_, Lattice::Overdefined) => Lattice::Overdefined,
+            (Lattice::Bottom, _) | (_, Lattice::Bottom) => Lattice::Bottom,
         }
     }
 
@@ -100,10 +101,18 @@ impl<'a> SCCP<'a> {
     fn get_lattice(&self, operand: &Operand) -> Lattice {
         match operand {
             Operand::Value(id) => self.lattices[*id].clone(),
-            Operand::Int(_) | Operand::Float(_) | Operand::Bool(_) => {
+            Operand::Int(_) | Operand::Float(_) | Operand::Bool(_) | Operand::Index(_) => {
                 Lattice::Constant(operand.clone())
             }
-            _ => Lattice::Optimistic
+
+            Operand::Undefined => Lattice::Top,
+
+            Operand::Global(_) | Operand::Param { .. } => Lattice::Bottom,
+
+            Operand::BB(_) | Operand::Func(_) | Operand::Reg(_) => panic!(
+                "SCCP get_lattice: operand {:?} is not a value or constant",
+                operand
+            ),
         }
     }
 
@@ -140,6 +149,8 @@ impl<'a> SCCP<'a> {
                 OpType::OEq => Lattice::Constant(Operand::Bool(f1 == f2)),
                 OpType::OGt => Lattice::Constant(Operand::Bool(f1 > f2)),
                 OpType::OLt => Lattice::Constant(Operand::Bool(f1 < f2)),
+                OpType::OLe => Lattice::Constant(Operand::Bool(f1 <= f2)),
+                OpType::OGe => Lattice::Constant(Operand::Bool(f1 >= f2)),
                 _ => panic!("{:?}'s operands can't be folded as floats", op_typ),
             },
             (Operand::Bool(b1), Operand::Bool(b2)) => match &op_typ {
@@ -183,8 +194,7 @@ impl<'a> SCCP<'a> {
             None => return, // empty function
         };
 
-        self.lattices
-            .resize(func.dfg.storage.len(), Lattice::Optimistic);
+        self.lattices.resize(func.dfg.storage.len(), Lattice::Top);
 
         // map OpId to BBId
         self.op_to_bb.clear();
@@ -231,7 +241,6 @@ impl<'a> SCCP<'a> {
         let op_data = self.program.funcs[func].dfg[op_id.clone()].data.clone();
         let old = self.lattices[op_id.get_op_id()].clone();
 
-        crate::debug::info!("SCCP: visiting op_data: {:?}", op_data);
         match op_data.clone() {
             OpData::AddF { lhs, rhs }
             | OpData::SubF { lhs, rhs }
@@ -323,7 +332,7 @@ impl<'a> SCCP<'a> {
 
             OpData::GEP { .. } | OpData::Load { .. } | OpData::Call { .. } => {
                 // TODO: We are not able to fold these instructions for now.
-                self.lattices[op_id.get_op_id()] = Lattice::Overdefined;
+                self.lattices[op_id.get_op_id()] = Lattice::Bottom;
 
                 if old == self.lattices[op_id.get_op_id()] {
                     return;
@@ -344,9 +353,6 @@ impl<'a> SCCP<'a> {
             } => {
                 let cond_lattice = self.get_lattice(&cond);
                 match cond_lattice {
-                    Lattice::Optimistic => {
-                        unreachable!("SCCP: condition of br can't be optimistic")
-                    }
                     Lattice::Constant(c) => {
                         if let Operand::Bool(b) = c {
                             if b {
@@ -355,18 +361,19 @@ impl<'a> SCCP<'a> {
                                 self.edge_list.push((bb_id.clone(), else_bb.clone()));
                             }
                         } else {
-                            panic!("SCCP: condition of br must be a boolean constant");
-                        }
-                        // only push br ops with constant condition to br_ops for later rewrite. We will replace them with jump ops.
-                        if !self.in_br_ops.contains(op_id.get_op_id()) {
-                            self.in_br_ops.insert(op_id.get_op_id());
-                            self.br_ops.push(op_id.clone());
+                            panic!("SCCP: condition of br must be a boolean constant: {:?}", c);
                         }
                     }
-                    Lattice::Overdefined => {
+                    // Top requires conservative assumption, and Bottom requires no assumption. So we need to push both branches to the edge list.
+                    Lattice::Bottom | Lattice::Top => {
                         self.edge_list.push((bb_id.clone(), then_bb.clone()));
                         self.edge_list.push((bb_id.clone(), else_bb.clone()));
                     }
+                }
+                // Push the terminator to the worklist for later rewriting.
+                if !self.in_br_ops.contains(op_id.get_op_id()) {
+                    self.in_br_ops.insert(op_id.get_op_id());
+                    self.br_ops.push(op_id.clone());
                 }
             }
 
@@ -385,6 +392,11 @@ impl<'a> SCCP<'a> {
     }
 
     fn visit_phi(&mut self, op_id: Operand, bb_id: Operand) {
+        // push the phi first.
+        if !self.in_phi_ops.contains(op_id.get_op_id()) {
+            self.in_phi_ops.insert(op_id.get_op_id());
+            self.phi_ops.push(op_id.clone());
+        }
         let func = match self.current_function {
             Some(idx) => idx,
             None => panic!("SCCP visit_phi: current_function is None"), // should not happen
@@ -452,10 +464,6 @@ impl<'a> SCCP<'a> {
                         .builder
                         .get_all_ops_in_block(&mut ctx, to.clone(), OpType::Phi);
                     for phi in phis {
-                        if !self.in_phi_ops.contains(phi.get_op_id()) {
-                            self.in_phi_ops.insert(phi.get_op_id());
-                            self.phi_ops.push(phi.clone());
-                        }
                         self.visit_phi(phi, to.clone());
                     }
                 }
@@ -486,10 +494,6 @@ impl<'a> SCCP<'a> {
                 let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
                 let op_data = dfg[op_id.clone()].data.clone();
                 if op_data.is(OpType::Phi) {
-                    if !self.in_phi_ops.contains(op_id.get_op_id()) {
-                        self.in_phi_ops.insert(op_id.get_op_id());
-                        self.phi_ops.push(op_id.clone());
-                    }
                     self.visit_phi(op_id.clone(), self.op_to_bb[op_id.get_op_id()].clone());
                 } else {
                     // If any incoming edge is executable, we need to visit the instruction.
@@ -564,7 +568,7 @@ impl<'a> SCCP<'a> {
                             panic!("SCCP: condition of br must be a boolean constant");
                         }
                     }
-                    _ => unreachable!("SCCP: condition of br can't be non-constant in rewrite"),
+                    _ => {/*do nothing*/}
                 }
             } else {
                 panic!("SCCP rewrite: op is not a br node");
@@ -596,25 +600,226 @@ impl<'a> SCCP<'a> {
             self.builder.remove_op(&mut ctx, op_id, Some(bb_id));
         });
 
-        // Remove the blocks
-        self.program.funcs[self.current_function.unwrap()]
+        // Phase 1: Isolate the dead blocks, disconnect the edges from live blocks to dead blocks.
+        let dead_blocks = self.program.funcs[self.current_function.unwrap()]
             .cfg
             .collect()
-            .iter()
-            .for_each(|bb_id| {
-                if !self.visited.contains(*bb_id) {
-                    let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
-                    self.builder.remove_block(&mut ctx, Operand::BB(*bb_id));
+            .into_iter()
+            .filter(|bb_id| !self.visited.contains(*bb_id))
+            .collect::<FxHashSet<usize>>();
+
+        dead_blocks.iter().for_each(|bb_id| {
+            let (last, terminator) = {
+                let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
+                let bb = &cfg[*bb_id];
+                let last = match bb.cur.last() {
+                    Some(last) => last.clone(),
+                    None => return,
+                };
+                let data = {
+                    let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+                    dfg[last.clone()].data.clone()
+                };
+                (last, data)
+            };
+            if matches!(terminator, OpData::Br { .. } | OpData::Jump { .. }) {
+                // remove the op
+                let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                self.builder
+                    .remove_op(&mut ctx, last.clone(), Some(Operand::BB(*bb_id)));
+            }
+        });
+
+        // Phase 2: Check users in dead blocks.
+        for bb_id in &dead_blocks {
+            let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
+            let cur = cfg[*bb_id].cur.clone();
+
+            // Split users check and removal due to data dependency.
+            for inst in cur.iter().rev() {
+                let func_id = self.current_function.unwrap();
+                let (funcs, globals) = (&mut self.program.funcs, &mut self.program.globals);
+                let dfg = &mut funcs[func_id].dfg;
+
+                // inst can be used by the instructions inside the block, but it cannot be used by instructions outside the block.
+                let users = dfg[inst.get_op_id()].users.clone();
+                for user in users {
+                    let user_bb = self.op_to_bb[user.get_op_id()].clone();
+                    // The user can be in the same block, or in another dead block. But it cannot be in a live block.
+                    if dead_blocks.contains(&user_bb.get_bb_id()) {
+                        // continue. users will be removed later.
+                        continue;
+                    }
+                    panic!(
+                        "Builder remove_block: instruction {:#?} has user {:#?} outside the block",
+                        dfg[inst.get_op_id()],
+                        dfg[user.get_op_id()]
+                    );
                 }
-            });
+
+                // Check whether the instruction uses a value outside dead block. If so, remove the use first.
+                let data = dfg[inst.clone()].data.clone();
+                let op = inst.clone();
+                let is_live_value = |operand: &Operand| match operand {
+                    Operand::Value(id) => {
+                        let bb = self.op_to_bb[*id].get_bb_id();
+                        !dead_blocks.contains(&bb)
+                    }
+                    _ => false,
+                };
+
+                match data {
+                    OpData::Load { addr } => {
+                        if matches!(addr, Operand::Global(_)) {
+                            globals.remove_use(addr, op);
+                        } else if is_live_value(&addr) {
+                            dfg.remove_use(addr, op);
+                        }
+                    }
+                    OpData::Store { addr, value } => {
+                        if matches!(addr, Operand::Global(_)) {
+                            globals.remove_use(addr, op.clone());
+                        } else if is_live_value(&addr) {
+                            dfg.remove_use(addr, op.clone());
+                        }
+                        if is_live_value(&value) {
+                            dfg.remove_use(value, op);
+                        }
+                    }
+                    OpData::Br { cond, .. } => {
+                        if is_live_value(&cond) {
+                            dfg.remove_use(cond, op);
+                        }
+                    }
+                    OpData::Call { args, .. } => {
+                        for arg in args {
+                            if is_live_value(&arg) {
+                                dfg.remove_use(arg, op.clone());
+                            }
+                        }
+                    }
+                    OpData::Ret { value } => {
+                        if let Some(val) = value {
+                            if is_live_value(&val) {
+                                dfg.remove_use(val, op);
+                            }
+                        }
+                    }
+                    OpData::Phi { incoming } => {
+                        for phi_incoming in incoming {
+                            if let PhiIncoming::Data { value, .. } = phi_incoming {
+                                if is_live_value(&value) {
+                                    dfg.remove_use(value, op.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    OpData::AddI { lhs, rhs }
+                    | OpData::SubI { lhs, rhs }
+                    | OpData::MulI { lhs, rhs }
+                    | OpData::DivI { lhs, rhs }
+                    | OpData::ModI { lhs, rhs }
+                    | OpData::SNe { lhs, rhs }
+                    | OpData::SEq { lhs, rhs }
+                    | OpData::SGt { lhs, rhs }
+                    | OpData::SLt { lhs, rhs }
+                    | OpData::SGe { lhs, rhs }
+                    | OpData::SLe { lhs, rhs }
+                    | OpData::And { lhs, rhs }
+                    | OpData::Or { lhs, rhs }
+                    | OpData::Xor { lhs, rhs }
+                    | OpData::Shl { lhs, rhs }
+                    | OpData::Shr { lhs, rhs }
+                    | OpData::Sar { lhs, rhs }
+                    | OpData::AddF { lhs, rhs }
+                    | OpData::SubF { lhs, rhs }
+                    | OpData::MulF { lhs, rhs }
+                    | OpData::DivF { lhs, rhs }
+                    | OpData::ONe { lhs, rhs }
+                    | OpData::OEq { lhs, rhs }
+                    | OpData::OGt { lhs, rhs }
+                    | OpData::OLt { lhs, rhs }
+                    | OpData::OGe { lhs, rhs }
+                    | OpData::OLe { lhs, rhs } => {
+                        if is_live_value(&lhs) {
+                            dfg.remove_use(lhs, op.clone());
+                        }
+                        if is_live_value(&rhs) {
+                            dfg.remove_use(rhs, op);
+                        }
+                    }
+
+                    OpData::Sitofp { value }
+                    | OpData::Fptosi { value }
+                    | OpData::Uitofp { value }
+                    | OpData::Zext { value } => {
+                        if is_live_value(&value) {
+                            dfg.remove_use(value, op);
+                        }
+                    }
+
+                    OpData::GEP { base, indices } => {
+                        if matches!(base, Operand::Global(_)) {
+                            globals.remove_use(base, op.clone());
+                        } else if is_live_value(&base) {
+                            dfg.remove_use(base, op.clone());
+                        }
+                        for index in indices {
+                            if is_live_value(&index) {
+                                dfg.remove_use(index, op.clone());
+                            }
+                        }
+                    }
+
+                    OpData::Move { value, .. } => {
+                        if is_live_value(&value) {
+                            dfg.remove_use(value, op);
+                        }
+                    }
+
+                    OpData::GlobalAlloca(_)
+                    | OpData::Alloca(_)
+                    | OpData::Jump { .. }
+                    | OpData::Declare { .. } => {}
+                }
+            }
+        }
+
+        // Phase 3: Remove the instructions in dead blocks directly by dfg.
+        for bb_id in &dead_blocks {
+            let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
+            let cur = cfg[*bb_id].cur.clone();
+            let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+            for inst in cur.iter().rev() {
+                // Remove the uses
+                dfg.remove(inst.get_op_id());
+            }
+        }
+
+        // Phase 4: Remove the blocks directly by cfg.
+        for bb_id in dead_blocks {
+            // remove the block from cfg
+            let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
+            cfg.remove(bb_id);
+            crate::debug::info!("SCCP: removed dead block {}", bb_id);
+        }
 
         // Collect the surviving phi nodes after rewriting.
         self.phi_ops
             .iter()
             .filter_map(|phi_op| {
                 let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
-                dfg.get(phi_op.get_op_id())
-                    .map(|_| (phi_op.clone(), self.op_to_bb[phi_op.get_op_id()].clone()))
+                // Bypass the Index operator
+                if let Some(ArenaItem::Data(data)) = dfg.storage.get(phi_op.get_op_id()) {
+                    if data.data.is(OpType::Phi) {
+                        Some((phi_op.clone(), self.op_to_bb[phi_op.get_op_id()].clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             })
             .collect::<Vec<(Operand, Operand)>>()
     }

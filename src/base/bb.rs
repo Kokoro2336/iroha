@@ -94,8 +94,9 @@ impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
         });
 
         info!(
-            "CFG GC: {} blocks collected.",
-            old_arena.len() - self.storage.len()
+            "CFG GC: {} blocks collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
         );
 
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<BasicBlock>>| {
@@ -182,8 +183,9 @@ impl Arena<Function> for IndexedArena<Function> {
         });
 
         info!(
-            "CG GC: {} functions collected.",
-            old_arena.len() - self.storage.len()
+            "CG GC: {} functions collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
         );
 
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Function>>| {
@@ -225,6 +227,9 @@ impl Arena<Function> for IndexedArena<Function> {
         // No need to rewrite anything inside Function for now
         self.storage.iter_mut().for_each(|func| {
             if let ArenaItem::Data(func) = func {
+                if func.is_external {
+                    return;
+                }
                 let old_arena_dfg = func.dfg.gc();
                 let old_arena_cfg = func.cfg.gc();
 

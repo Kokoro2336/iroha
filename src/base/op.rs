@@ -25,7 +25,7 @@ pub enum OpData {
     },
     Move {
         value: Operand,
-        reg: Reg,
+        reg: Operand,
     },
     Declare {
         name: String,
@@ -536,8 +536,9 @@ impl Arena<Op> for IndexedArena<Op> {
         });
 
         info!(
-            "DFG GC: {} ops collected.",
-            old_arena.len() - self.storage.len()
+            "DFG GC: {} ops collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
         );
 
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| {
@@ -695,6 +696,7 @@ impl IndexedArena<Op> {
             // For global variables, we don't maintain uses in the DFG, so just return.
             Operand::Int(_)
             | Operand::Float(_)
+            | Operand::Bool(_)
             | Operand::Undefined
             | Operand::Param { .. }
             | Operand::Index(_) => return,
@@ -717,6 +719,7 @@ impl IndexedArena<Op> {
             // For global variables, we don't maintain uses in the DFG, so just return.
             Operand::Int(_)
             | Operand::Float(_)
+            | Operand::Bool(_)
             | Operand::Undefined
             | Operand::Param { .. }
             | Operand::Index(_) => return,
@@ -751,6 +754,7 @@ impl IndexedArena<Op> {
             // For global variables, we don't maintain uses in the DFG, so just return.
             Operand::Int(_)
             | Operand::Float(_)
+            | Operand::Bool(_)
             | Operand::Undefined
             | Operand::Param { .. }
             | Operand::Index(_) => return,

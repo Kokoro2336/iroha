@@ -259,8 +259,9 @@ impl Arena<Node> for AST {
         });
 
         info!(
-            "AST GC: {} nodes collected.",
-            old_arena.len() - self.storage.len()
+            "AST GC: {} nodes collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
         );
 
         let remap_idx = |idx: &mut NodeId| {

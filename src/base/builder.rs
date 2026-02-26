@@ -1,3 +1,6 @@
+/**
+ * IRBuilder API.
+ */
 use crate::base::ir::*;
 use crate::utils::arena::{Arena, ArenaItem};
 
@@ -416,30 +419,25 @@ impl Builder {
     }
 
     // constructing control flow
-    pub fn add_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand) {
+    pub fn add_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
         let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
         let data = dfg[op.get_op_id()].data.clone();
 
-        let current_bb = if self.current_block.is_none() {
-            panic!("Builder add_control_flow: current_block is None");
-        } else {
-            self.current_block.as_ref().unwrap().clone()
-        };
-
         match data {
             OpData::Br {
                 then_bb, else_bb, ..
             } => {
-                cfg.add_pred(then_bb.clone(), current_bb.clone());
-                cfg.add_succ(current_bb.clone(), then_bb);
-                cfg.add_pred(else_bb.clone(), current_bb.clone());
-                cfg.add_succ(current_bb, else_bb);
+                cfg.add_pred(then_bb.clone(), bb.clone());
+                cfg.add_succ(bb.clone(), then_bb);
+
+                cfg.add_pred(else_bb.clone(), bb.clone());
+                cfg.add_succ(bb, else_bb);
             }
             OpData::Jump { target_bb } => {
-                cfg.add_pred(target_bb.clone(), current_bb.clone());
-                cfg.add_succ(current_bb, target_bb);
+                cfg.add_pred(target_bb.clone(), bb.clone());
+                cfg.add_succ(bb, target_bb);
             }
 
             OpData::AddF { .. }
@@ -486,29 +484,23 @@ impl Builder {
         }
     }
 
-    pub fn remove_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand) {
+    pub fn remove_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
         let cfg = acquire_cfg!(ctx, "Builder remove_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder remove_control_flow: ctx.dfg is None");
         let data = dfg[op.get_op_id()].data.clone();
-
-        let current_bb = if self.current_block.is_none() {
-            panic!("Builder remove_control_flow: current_block is None");
-        } else {
-            self.current_block.as_ref().unwrap().clone()
-        };
 
         match data {
             OpData::Br {
                 then_bb, else_bb, ..
             } => {
-                cfg.remove_pred(then_bb.clone(), current_bb.clone());
-                cfg.remove_succ(current_bb.clone(), then_bb);
-                cfg.remove_pred(else_bb.clone(), current_bb.clone());
-                cfg.remove_succ(current_bb, else_bb);
+                cfg.remove_pred(then_bb.clone(), bb.clone());
+                cfg.remove_succ(bb.clone(), then_bb);
+                cfg.remove_pred(else_bb.clone(), bb.clone());
+                cfg.remove_succ(bb, else_bb);
             }
             OpData::Jump { target_bb } => {
-                cfg.remove_pred(target_bb.clone(), current_bb.clone());
-                cfg.remove_succ(current_bb, target_bb);
+                cfg.remove_pred(target_bb.clone(), bb.clone());
+                cfg.remove_succ(bb, target_bb);
             }
 
             OpData::AddF { .. }
@@ -651,7 +643,11 @@ impl Builder {
                 // add uses
                 self.add_uses(ctx, op_id.clone());
                 // add control flow info if needed
-                self.add_control_flow(ctx, op_id.clone());
+                let current_block = match &self.current_block {
+                    Some(block) => block.clone(),
+                    None => panic!("Builder create: current_block is None"),
+                };
+                self.add_control_flow(ctx, op_id.clone(), current_block);
                 // We don't update current_inst, so that the next created instruction is still before the same instruction
                 op_id
             }
@@ -752,7 +748,7 @@ impl Builder {
         // remove uses first, otherwise we may have use-after-free in the DFG.
         self.remove_uses(ctx, op.clone());
         // Remove control flow info if needed
-        self.remove_control_flow(ctx, op.clone());
+        self.remove_control_flow(ctx, op.clone(), bb.clone().unwrap());
 
         let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
         let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
@@ -791,7 +787,7 @@ impl Builder {
         // Check the users of the remove op. For now, if users exist, we just panic.
         if !removed_op.users.is_empty() {
             panic!(
-                "Builder remove_op: instruction {:?} still has users after removal. users: {:?}",
+                "Builder remove_op: instruction {:#?} still has users after removal. users: {:#?}",
                 removed_op,
                 removed_op
                     .users
@@ -801,7 +797,6 @@ impl Builder {
                         format!("{:?}: {:?}", user, op)
                     })
                     .collect::<Vec<String>>()
-                    .join(", ")
             );
         }
         removed_op
@@ -813,7 +808,7 @@ impl Builder {
         op_id: Operand,
         bb_id: Operand,
         new_op: Op,
-    ) -> Op {
+    ) -> Operand {
         let pos = {
             let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
             let bb = &mut cfg[bb_id.clone()];
@@ -833,37 +828,17 @@ impl Builder {
             }
         };
 
-        // replace in dfg
-        let removed_op = self.remove_op(ctx, op_id.clone(), Some(bb_id.clone()));
-
-        let dfg = acquire_dfg!(ctx, "Builder replace_op: ctx.dfg is None");
-        let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
-        let bb = &mut cfg[bb_id];
-
-        // allocate new op in dfg
-        let new_op_id = dfg.alloc(new_op);
-        // insert new op at the same position
-        bb.cur.insert(pos, Operand::Value(new_op_id));
-
-        removed_op
-    }
-
-    pub fn remove_block(&mut self, ctx: &mut BuilderContext, block: Operand) -> BasicBlock {
-        let (cur, bb_id) = {
-            let bb_id = block.get_bb_id();
-            let cfg = acquire_cfg!(ctx, "Builder remove_block: ctx.cfg is None");
-            (cfg[bb_id].cur.clone(), bb_id)
+        let next_inst = {
+            let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
+            let bb = &cfg[bb_id.get_bb_id()];
+            bb.cur.get(pos + 1).cloned()
         };
 
-        // remove all instructions in the block
-        for inst in cur {
-            // The flow edge is controlled by the instruction, so we don't need to remove control flow info separately here.
-            self.remove_op(ctx, inst, Some(block.clone()));
-        }
-
-        // remove the block from cfg
-        let cfg = acquire_cfg!(ctx, "Builder remove_block: ctx.cfg is None");
-        cfg.remove(bb_id)
+        let mut guard = BuilderGuard::new(self);
+        guard.set_current_block(bb_id.clone());
+        guard.remove_op(ctx, op_id, Some(bb_id.clone()));
+        guard.set_before_inst(ctx, next_inst);
+        guard.create(ctx, new_op)
     }
 
     // Move the instruction to the front of specific position(operantion) in another basic block.

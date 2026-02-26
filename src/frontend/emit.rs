@@ -49,6 +49,28 @@ impl Emit {
         }
     }
 
+    pub fn get_type(&self, operand: &Operand) -> Type {
+        let current_func = match self.current_function {
+            Some(idx) => &self.program.funcs[idx],
+            None => panic!("get_type: not in a function"),
+        };
+        let dfg = &current_func.dfg;
+        let globals = &self.program.globals;
+        match operand {
+            Operand::Value(id) => dfg[*id].typ.clone(),
+            Operand::Global(id) => globals[*id].typ.clone(),
+            Operand::Param { typ, .. } => typ.clone(),
+            Operand::Int(_) => Type::Int,
+            Operand::Float(_) => Type::Float,
+            Operand::Bool(_) => Type::Bool,
+            Operand::Undefined
+            | Operand::Index(_)
+            | Operand::Func(_)
+            | Operand::Reg(_)
+            | Operand::BB(_) => unreachable!("Not allowed to get type of operand: {:?}", operand),
+        }
+    }
+
     pub fn emit(&mut self, node_id: NodeId) -> Option<Operand> {
         fn flat_to_indices(index: usize, dims: &[u32]) -> Vec<usize> {
             if dims.is_empty() {
@@ -71,11 +93,7 @@ impl Emit {
         fn literal_from_const_node(ast: &AST, node_id: NodeId) -> Literal {
             match &ast[node_id] {
                 Node::Literal(lit) => lit.clone(),
-                Node::UnaryOp {
-                    op,
-                    operand,
-                    ..
-                } => {
+                Node::UnaryOp { op, operand, .. } => {
                     let lit = match &ast[*operand] {
                         Node::Literal(lit) => lit,
                         _ => panic!(
@@ -846,6 +864,8 @@ impl Emit {
                     ctx: &mut BuilderContext,
                     lhs: Operand,
                     rhs: Operand,
+                    lhs_typ: Type,
+                    rhs_typ: Type,
                     op: ast::Op,
                     typ: Type,
                 ) -> Operand {
@@ -886,53 +906,88 @@ impl Emit {
                             }
                         }
                         ast::Op::Eq => {
-                            if typ == Type::Int {
-                                OpData::SEq { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SEq { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OEq { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Eq operator");
+                                }
                             } else {
-                                OpData::OEq { lhs, rhs }
+                                panic!("Eq operator only returns Bool type");
                             }
                         }
                         ast::Op::Ne => {
-                            if typ == Type::Int {
-                                OpData::SNe { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SNe { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::ONe { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Ne operator");
+                                }
                             } else {
-                                OpData::ONe { lhs, rhs }
+                                panic!("Ne operator only returns Bool type");
                             }
                         }
                         ast::Op::Gt => {
-                            if typ == Type::Int {
-                                OpData::SGt { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SGt { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OGt { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Gt operator");
+                                }
                             } else {
-                                OpData::OGt { lhs, rhs }
+                                panic!("Gt operator only returns Bool type");
                             }
                         }
                         ast::Op::Lt => {
-                            if typ == Type::Int {
-                                OpData::SLt { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SLt { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OLt { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Lt operator");
+                                }
                             } else {
-                                OpData::OLt { lhs, rhs }
+                                panic!("Lt operator only returns Bool type");
                             }
                         }
                         ast::Op::Ge => {
-                            if typ == Type::Int {
-                                OpData::SGe { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SGe { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OGe { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Ge operator");
+                                }
                             } else {
-                                OpData::OGe { lhs, rhs }
+                                panic!("Ge operator only returns Bool type");
                             }
                         }
                         ast::Op::Le => {
-                            if typ == Type::Int {
-                                OpData::SLe { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SLe { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OLe { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Le operator");
+                                }
                             } else {
-                                OpData::OLe { lhs, rhs }
+                                panic!("Le operator only returns Bool type");
                             }
                         }
                         ast::Op::And | ast::Op::Or => unreachable!("And/Or handled above"),
                         _ => panic!("Unsupported binary operator {:?} in Emit", op),
                     };
 
-                    let bin_op = builder.create(ctx, ir::Op::new(typ, vec![], op_data));
-                    bin_op
+                    builder.create(ctx, ir::Op::new(typ, vec![], op_data))
                 }
 
                 let mut res = Operand::Value(0);
@@ -952,10 +1007,10 @@ impl Emit {
                                     &mut ctx,
                                     ir::Op::new(
                                         Type::Pointer {
-                                            base: Box::new(Type::Int),
+                                            base: Box::new(Type::Bool),
                                         },
                                         vec![Attr::Promotion],
-                                        OpData::Alloca(Type::Int),
+                                        OpData::Alloca(Type::Bool),
                                     ),
                                 );
                                 self.builder.create(
@@ -965,7 +1020,7 @@ impl Emit {
                                         vec![],
                                         OpData::Store {
                                             addr: result_alloca.clone(),
-                                            value: Operand::Int(0),
+                                            value: Operand::Bool(false),
                                         },
                                     ),
                                 );
@@ -1033,7 +1088,7 @@ impl Emit {
                             let load_result = self.builder.create(
                                 &mut ctx,
                                 ir::Op::new(
-                                    Type::Int,
+                                    Type::Bool,
                                     vec![],
                                     OpData::Load {
                                         addr: result_alloca,
@@ -1050,10 +1105,10 @@ impl Emit {
                                     &mut ctx,
                                     ir::Op::new(
                                         Type::Pointer {
-                                            base: Box::new(Type::Int),
+                                            base: Box::new(Type::Bool),
                                         },
                                         vec![Attr::Promotion],
-                                        OpData::Alloca(Type::Int),
+                                        OpData::Alloca(Type::Bool),
                                     ),
                                 );
                                 self.builder.create(
@@ -1063,7 +1118,7 @@ impl Emit {
                                         vec![],
                                         OpData::Store {
                                             addr: result_alloca.clone(),
-                                            value: Operand::Int(1),
+                                            value: Operand::Bool(true),
                                         },
                                     ),
                                 );
@@ -1123,7 +1178,7 @@ impl Emit {
                             let load_result = self.builder.create(
                                 &mut ctx,
                                 ir::Op::new(
-                                    Type::Int,
+                                    Type::Bool,
                                     vec![],
                                     OpData::Load {
                                         addr: result_alloca,
@@ -1144,11 +1199,15 @@ impl Emit {
                         res
                     };
                     let rhs_op = emit_rval(self, rhs);
+                    let lhs_typ = self.get_type(&lhs_op);
+                    let rhs_typ = self.get_type(&rhs_op);
                     let new_op_id = emit_code(
                         &mut self.builder,
                         &mut context_or_err!(self, "BinaryOp outside function"),
                         lhs_op,
                         rhs_op,
+                        lhs_typ,
+                        rhs_typ,
                         op_kind,
                         match &self.ast[*op_id] {
                             Node::BinaryOp { typ, .. } => typ.clone(),
@@ -1185,42 +1244,30 @@ impl Emit {
                         }
                     }
                     ast::Op::Not => {
-                        if typ == Type::Int {
+                        if typ == Type::Bool {
                             OpData::SEq {
                                 lhs: operand_op,
-                                rhs: Operand::Int(0),
+                                rhs: Operand::Bool(false),
                             }
                         } else {
                             panic!(
-                                "Not operator only supports Int type: {:?}",
+                                "Not operator only supports Bool type: {:?}",
                                 self.ast[node_id]
                             );
                         }
                     }
-                    ast::Op::Bool2Int => {
-                        OpData::Zext { value: operand_op }
-                    }
-                    ast::Op::Int2Bool => {
-                        OpData::SNe {
-                            lhs: operand_op,
-                            rhs: Operand::Int(0),
-                        }
-                    }
-                    ast::Op::Float2Int => {
-                        OpData::Fptosi { value: operand_op }
-                    }
-                    ast::Op::Int2Float => {
-                        OpData::Sitofp { value: operand_op }
-                    }
-                    ast::Op::Bool2Float => {
-                        OpData::Uitofp { value: operand_op }
-                    }
-                    ast::Op::Float2Bool => {
-                        OpData::ONe {
-                            lhs: operand_op,
-                            rhs: Operand::Float(0.0),
-                        }
-                    }
+                    ast::Op::Bool2Int => OpData::Zext { value: operand_op },
+                    ast::Op::Int2Bool => OpData::SNe {
+                        lhs: operand_op,
+                        rhs: Operand::Int(0),
+                    },
+                    ast::Op::Float2Int => OpData::Fptosi { value: operand_op },
+                    ast::Op::Int2Float => OpData::Sitofp { value: operand_op },
+                    ast::Op::Bool2Float => OpData::Uitofp { value: operand_op },
+                    ast::Op::Float2Bool => OpData::ONe {
+                        lhs: operand_op,
+                        rhs: Operand::Float(0.0),
+                    },
                     _ => {
                         panic!(
                             "Unsupported unary operator in Emit: {:?}",

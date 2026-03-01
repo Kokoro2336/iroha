@@ -29,3 +29,6 @@ tracing-appender = "0.2.1"
 
 # for printing graphs
 graphviz-rust = "0.9.6"
+
+# for hashing
+rustc-hash = "1.1.0"

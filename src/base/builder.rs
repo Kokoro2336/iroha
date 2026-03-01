@@ -1,5 +1,7 @@
+/**
+ * IRBuilder API.
+ */
 use crate::base::ir::*;
-use crate::base::LoopInfo;
 use crate::utils::arena::{Arena, ArenaItem};
 
 use std::ops::{Deref, DerefMut};
@@ -22,6 +24,12 @@ macro_rules! acquire_dfg {
             $ctx.dfg.as_mut().unwrap()
         }
     };
+}
+
+#[derive(Debug, Clone)]
+pub struct LoopInfo {
+    pub while_entry: Option<Operand>,
+    pub end_block: Option<Operand>,
 }
 
 pub struct Builder {
@@ -186,10 +194,24 @@ impl Builder {
 
         match data {
             OpData::Load { addr } => {
-                dfg.add_use(addr, op);
+                if matches!(addr, Operand::Global(_)) {
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.add_use(addr, op);
+                } else {
+                    panic!("Builder add_uses: Load address operand is not Value or Global");
+                }
             }
             OpData::Store { addr, value } => {
-                dfg.add_use(addr, op.clone());
+                if matches!(addr, Operand::Global(_)) {
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.add_use(addr, op.clone());
+                } else {
+                    panic!("Builder add_uses: Store address operand is not Value or Global");
+                }
                 dfg.add_use(value, op);
             }
             OpData::Br { cond, .. } => {
@@ -244,16 +266,21 @@ impl Builder {
                 dfg.add_use(rhs, op);
             }
 
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
+            OpData::Sitofp { value } | OpData::Fptosi { value } | OpData::Uitofp { value } | OpData::Zext { value } => {
                 dfg.add_use(value, op);
             }
 
             OpData::GEP { base, indices } => {
-                dfg.add_use(base, op.clone());
+                if matches!(base, Operand::Global(_)) {
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
+                } else if matches!(base, Operand::Value(_)) {
+                    dfg.add_use(base, op.clone());
+                } else {
+                    panic!("Builder add_uses: GEP base operand is not Value or Global");
+                }
                 for index in indices {
-                    if matches!(index, Operand::Value(_)) {
-                        dfg.add_use(index, op.clone());
-                    }
+                    dfg.add_use(index, op.clone());
                 }
             }
 
@@ -263,7 +290,6 @@ impl Builder {
 
             // GlobalAlloca: Do not maintain uses for global alloca
             OpData::GlobalAlloca(_)
-            | OpData::GetArg(_)
             // ?
             | OpData::Alloca(_)
             | OpData::Jump {..}
@@ -278,10 +304,24 @@ impl Builder {
 
         match data {
             OpData::Load { addr } => {
-                dfg.remove_use(addr, op);
+                if matches!(addr, Operand::Global(_)) {
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.remove_use(addr, op);
+                } else {
+                    panic!("Builder remove_uses: Load address operand is not Value or Global");
+                }
             }
             OpData::Store { addr, value } => {
-                dfg.remove_use(addr, op.clone());
+                if matches!(addr, Operand::Global(_)) {
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
+                } else if matches!(addr, Operand::Value(_)) {
+                    dfg.remove_use(addr, op.clone());
+                } else {
+                    panic!("Builder remove_uses: Store address operand is not Value or Global");
+                }
                 dfg.remove_use(value, op);
             }
             OpData::Br { cond, .. } => {
@@ -342,54 +382,64 @@ impl Builder {
                 dfg.remove_use(lhs, op.clone());
                 dfg.remove_use(rhs, op);
             }
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
+            OpData::Sitofp { value }
+            | OpData::Fptosi { value }
+            | OpData::Uitofp { value }
+            | OpData::Zext { value } => {
                 dfg.remove_use(value, op);
             }
 
             OpData::GEP { base, indices } => {
-                dfg.remove_use(base, op.clone());
+                if matches!(base, Operand::Global(_)) {
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
+                } else if matches!(base, Operand::Value(_)) {
+                    dfg.remove_use(base, op.clone());
+                } else {
+                    panic!("Builder remove_uses: GEP base operand is not Value or Global");
+                }
                 for index in indices {
-                    if matches!(index, Operand::Value(_)) {
-                        dfg.remove_use(index, op.clone());
-                    }
+                    dfg.remove_use(index, op.clone());
                 }
             }
             OpData::Move { value, .. } => {
                 dfg.remove_use(value, op);
             }
             OpData::GlobalAlloca(_)
-            | OpData::GetArg(_)
             | OpData::Alloca(_)
             | OpData::Jump { .. }
             | OpData::Declare { .. } => { /* do nothing */ }
         }
     }
 
+    pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) {
+        let dfg = acquire_dfg!(ctx, "Builder replace_all_uses: ctx.dfg is None");
+        let uses = &dfg[old.get_op_id()].users.clone();
+        for use_op in uses {
+            dfg.replace_use(use_op.clone(), old.clone(), new.clone());
+        }
+    }
+
     // constructing control flow
-    pub fn add_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand) {
+    pub fn add_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
         let cfg = acquire_cfg!(ctx, "Builder add_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder add_control_flow: ctx.dfg is None");
 
         let data = dfg[op.get_op_id()].data.clone();
 
-        let current_bb = if self.current_block.is_none() {
-            panic!("Builder add_control_flow: current_block is None");
-        } else {
-            self.current_block.as_ref().unwrap().clone()
-        };
-
         match data {
             OpData::Br {
                 then_bb, else_bb, ..
             } => {
-                cfg.add_pred(then_bb.clone(), current_bb.clone());
-                cfg.add_succ(current_bb.clone(), then_bb);
-                cfg.add_pred(else_bb.clone(), current_bb.clone());
-                cfg.add_succ(current_bb, else_bb);
+                cfg.add_pred(then_bb.clone(), bb.clone());
+                cfg.add_succ(bb.clone(), then_bb);
+
+                cfg.add_pred(else_bb.clone(), bb.clone());
+                cfg.add_succ(bb, else_bb);
             }
             OpData::Jump { target_bb } => {
-                cfg.add_pred(target_bb.clone(), current_bb.clone());
-                cfg.add_succ(current_bb, target_bb);
+                cfg.add_pred(target_bb.clone(), bb.clone());
+                cfg.add_succ(bb, target_bb);
             }
 
             OpData::AddF { .. }
@@ -406,12 +456,13 @@ impl Builder {
             | OpData::Alloca(_)
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
-            | OpData::GetArg { .. }
             | OpData::Call { .. }
             | OpData::Move { .. }
             | OpData::GEP { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
+            | OpData::Uitofp { .. }
+            | OpData::Zext { .. }
             | OpData::Ret { .. }
             | OpData::Shl { .. }
             | OpData::Shr { .. }
@@ -435,29 +486,23 @@ impl Builder {
         }
     }
 
-    pub fn remove_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand) {
+    pub fn remove_control_flow(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) {
         let cfg = acquire_cfg!(ctx, "Builder remove_control_flow: ctx.cfg is None");
         let dfg = acquire_dfg!(ctx, "Builder remove_control_flow: ctx.dfg is None");
         let data = dfg[op.get_op_id()].data.clone();
-
-        let current_bb = if self.current_block.is_none() {
-            panic!("Builder remove_control_flow: current_block is None");
-        } else {
-            self.current_block.as_ref().unwrap().clone()
-        };
 
         match data {
             OpData::Br {
                 then_bb, else_bb, ..
             } => {
-                cfg.remove_pred(then_bb.clone(), current_bb.clone());
-                cfg.remove_succ(current_bb.clone(), then_bb);
-                cfg.remove_pred(else_bb.clone(), current_bb.clone());
-                cfg.remove_succ(current_bb, else_bb);
+                cfg.remove_pred(then_bb.clone(), bb.clone());
+                cfg.remove_succ(bb.clone(), then_bb);
+                cfg.remove_pred(else_bb.clone(), bb.clone());
+                cfg.remove_succ(bb, else_bb);
             }
             OpData::Jump { target_bb } => {
-                cfg.remove_pred(target_bb.clone(), current_bb.clone());
-                cfg.remove_succ(current_bb, target_bb);
+                cfg.remove_pred(target_bb.clone(), bb.clone());
+                cfg.remove_succ(bb, target_bb);
             }
 
             OpData::AddF { .. }
@@ -474,12 +519,13 @@ impl Builder {
             | OpData::Alloca(_)
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
-            | OpData::GetArg { .. }
             | OpData::Call { .. }
             | OpData::Move { .. }
             | OpData::GEP { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
+            | OpData::Uitofp { .. }
+            | OpData::Zext { .. }
             | OpData::Ret { .. }
             | OpData::Shl { .. }
             | OpData::Shr { .. }
@@ -517,8 +563,8 @@ impl Builder {
                 let op_id = globals.alloc(op);
                 Operand::Global(op_id)
             }
-            OpData::GetArg(_)
-            | OpData::GEP { .. }
+
+            OpData::GEP { .. }
             | OpData::Move { .. }
             | OpData::AddI { .. }
             | OpData::SubI { .. }
@@ -549,6 +595,8 @@ impl Builder {
             | OpData::OLe { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
+            | OpData::Uitofp { .. }
+            | OpData::Zext { .. }
             | OpData::Store { .. }
             | OpData::Load { .. }
             | OpData::Phi { .. }
@@ -597,7 +645,11 @@ impl Builder {
                 // add uses
                 self.add_uses(ctx, op_id.clone());
                 // add control flow info if needed
-                self.add_control_flow(ctx, op_id.clone());
+                let current_block = match &self.current_block {
+                    Some(block) => block.clone(),
+                    None => panic!("Builder create: current_block is None"),
+                };
+                self.add_control_flow(ctx, op_id.clone(), current_block);
                 // We don't update current_inst, so that the next created instruction is still before the same instruction
                 op_id
             }
@@ -673,43 +725,71 @@ impl Builder {
         ops
     }
 
-    pub fn replace_all_uses(&mut self, ctx: &mut BuilderContext, old: Operand, new: Operand) {
-        let dfg = acquire_dfg!(ctx, "Builder replace_all_uses: ctx.dfg is None");
-        let uses = &dfg[old.get_op_id()].users.clone();
-        for use_op in uses {
-            dfg.replace_use(use_op.clone(), old.clone(), new.clone());
+    pub fn get_all_non_phi_in_block(
+        &self,
+        ctx: &mut BuilderContext,
+        block: Operand,
+    ) -> Vec<Operand> {
+        let cfg = acquire_cfg!(ctx, "Builder get_all_non_phi_in_block: ctx.cfg is None");
+        let dfg = acquire_dfg!(ctx, "Builder get_all_non_phi_in_block: ctx.dfg is None");
+
+        let bb_id = block.get_bb_id();
+        let bb = &cfg[bb_id];
+
+        let mut ops = Vec::new();
+        for inst in &bb.cur {
+            let data = &dfg[inst.get_op_id()];
+            if !data.is(OpType::Phi) {
+                ops.push(inst.clone());
+            }
         }
+        ops
     }
 
-    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Operand) -> Op {
+    pub fn remove_op(&mut self, ctx: &mut BuilderContext, op: Operand, bb: Option<Operand>) -> Op {
         // remove uses first, otherwise we may have use-after-free in the DFG.
         self.remove_uses(ctx, op.clone());
         // Remove control flow info if needed
-        self.remove_control_flow(ctx, op.clone());
+        self.remove_control_flow(ctx, op.clone(), bb.clone().unwrap());
 
         let dfg = acquire_dfg!(ctx, "Builder remove_op: ctx.dfg is None");
         let cfg = acquire_cfg!(ctx, "Builder remove_op: ctx.cfg is None");
 
-        let op_id = op.get_op_id();
-        let bb_id = bb.get_bb_id();
-        let bb = &mut cfg[bb_id];
+        let removed_op = match dfg[op.get_op_id()].data.clone() {
+            OpData::GlobalAlloca(_) => {
+                // For global alloca, we just remove it from the global variables, and do not maintain uses for it in the DFG, so we can just return here.
+                let globals = &mut ctx.globals;
+                globals.remove(op.get_op_id())
+            }
+            _ => {
+                let op_id = op.get_op_id();
+                let bb_id = match bb {
+                    Some(bb) => bb.get_bb_id(),
+                    None => panic!(
+                        "Builder remove_op: bb is None when removing instruction {:?}",
+                        op
+                    ),
+                };
+                let bb = &mut cfg[bb_id];
 
-        // remove from bb
-        if let Some(pos) = bb.cur.iter().position(|id| id.get_op_id() == op_id) {
-            bb.cur.remove(pos);
-        } else {
-            panic!(
-                "Builder remove_op: instruction {:?} not found in current_block {:?}",
-                op, bb_id
-            );
-        }
+                // remove from bb
+                if let Some(pos) = bb.cur.iter().position(|id| id.get_op_id() == op_id) {
+                    bb.cur.remove(pos);
+                } else {
+                    panic!(
+                        "Builder remove_op: instruction {:?} not found in block {:?}",
+                        op, bb_id
+                    );
+                }
 
-        // remove from dfg
-        let removed_op = dfg.remove(op_id);
+                // remove from dfg
+                dfg.remove(op_id)
+            }
+        };
         // Check the users of the remove op. For now, if users exist, we just panic.
         if !removed_op.users.is_empty() {
             panic!(
-                "Builder remove_op: instruction {:?} still has users after removal. users: {:?}",
+                "Builder remove_op: instruction {:#?} still has users after removal. users: {:#?}",
                 removed_op,
                 removed_op
                     .users
@@ -719,10 +799,48 @@ impl Builder {
                         format!("{:?}: {:?}", user, op)
                     })
                     .collect::<Vec<String>>()
-                    .join(", ")
             );
         }
         removed_op
+    }
+
+    pub fn replace_op(
+        &mut self,
+        ctx: &mut BuilderContext,
+        op_id: Operand,
+        bb_id: Operand,
+        new_op: Op,
+    ) -> Operand {
+        let pos = {
+            let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
+            let bb = &mut cfg[bb_id.clone()];
+
+            // remove from bb
+            if let Some(pos) = bb
+                .cur
+                .iter()
+                .position(|id| id.get_op_id() == op_id.get_op_id())
+            {
+                pos
+            } else {
+                panic!(
+                    "Builder replace_op: instruction {:?} not found in block {:?}",
+                    op_id, bb_id
+                );
+            }
+        };
+
+        let next_inst = {
+            let cfg = acquire_cfg!(ctx, "Builder replace_op: ctx.cfg is None");
+            let bb = &cfg[bb_id.get_bb_id()];
+            bb.cur.get(pos + 1).cloned()
+        };
+
+        let mut guard = BuilderGuard::new(self);
+        guard.set_current_block(bb_id.clone());
+        guard.remove_op(ctx, op_id, Some(bb_id.clone()));
+        guard.set_before_inst(ctx, next_inst);
+        guard.create(ctx, new_op)
     }
 
     // Move the instruction to the front of specific position(operantion) in another basic block.
@@ -790,6 +908,43 @@ impl Builder {
             dfg.add_use(value, phi.clone());
         } else {
             panic!("Builder insert_phi_incoming: not a phi node");
+        }
+    }
+
+    // Remove means we update the incoming value to None.
+    pub fn remove_phi_incoming(&mut self, ctx: &mut BuilderContext, phi: Operand, idx: usize) {
+        unimplemented!()
+    }
+
+    // Slay means we remove the incoming edge.
+    pub fn slay_phi_incoming(&mut self, ctx: &mut BuilderContext, phi: Operand, bb: Operand) {
+        let dfg = acquire_dfg!(ctx, "Builder slay_phi_incoming: ctx.dfg is None");
+        let phi_id = phi.get_op_id();
+
+        if let OpData::Phi { incoming } = dfg[phi_id].data.clone() {
+            if let Some(pos) = incoming.iter().position(|inc| {
+                if let PhiIncoming::Data { bb: inc_bb, .. } = inc {
+                    inc_bb == &bb
+                } else {
+                    false
+                }
+            }) {
+                // remove uses
+                if let PhiIncoming::Data { value, .. } = &incoming[pos] {
+                    dfg.remove_use(value.clone(), phi.clone());
+                }
+                // Critical: retrieve the data again, DO NOT use the cloned one!
+                if let OpData::Phi { incoming } = &mut dfg[phi_id].data {
+                    incoming.remove(pos);
+                }
+            } else {
+                panic!(
+                    "Builder slay_phi_incoming: no incoming edge from bb {:?} to phi {:?}",
+                    bb, phi
+                );
+            }
+        } else {
+            panic!("Builder slay_phi_incoming: not a phi node");
         }
     }
 }

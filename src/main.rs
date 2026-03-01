@@ -17,7 +17,7 @@ use crate::opt::*;
 use crate::utils::arena::Arena;
 
 use debug::info;
-use debug::DumpLlvmPass;
+use debug::DumpLLVMPass;
 
 // 引用 lalrpop 生成的解析器
 // 因为我们刚刚创建了 sysy.lalrpop, 所以模块名是 sysy
@@ -88,15 +88,7 @@ fn main() -> Result<()> {
         // set entry point to the root of the AST
         parser.ast.set_entry(root_id);
         // Clean up the AST.
-        info!(
-            "Start collecting garbage in AST. Total slot num: {}",
-            parser.ast.storage.len()
-        );
         parser.ast.gc();
-        info!(
-            "Finish collecting garbage in AST. Slot num after gc: {}",
-            parser.ast.storage.len()
-        );
         parser.take()
     };
     // info!("\nParsed result: {:#?}", result);
@@ -120,29 +112,31 @@ fn main() -> Result<()> {
     // }
 
     info!("Start Emitting.");
-    let ir = Emit::new(result).run();
+    let mut ir = Emit::new(result).run();
     info!("Finish Emitting.");
 
     info!("Start Running Mem2Reg.");
-    let mut ir = Mem2Reg::new(ir).run();
-    info!("Finish Running Mem2Reg. IR after Mem2Reg.");
+    Mem2Reg::new(&mut ir).run();
+    info!("Finish Running Mem2Reg.");
+
+    info!("Start Dumping LLVM IR.");
+    let filename = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output")
+        .to_string();
+    DumpLLVMPass::new(&mut ir, filename).run();
+    info!("Finish Dumping LLVM IR.");
+
+    info!("Start Running SCCP.");
+    SCCP::new(&mut ir).run();
+    info!("Finish Running SCCP.");
 
     info!("Start Running DCE.");
     DCE::new(&mut ir).run();
     info!("Finish Running DCE. Start running compaction pass.");
     Compaction::new(&mut ir).run();
     info!("Finish Running Compaction.");
-
-    info!("Start Dumping LLVM IR.");
-    let ir = {
-        let filename = input_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output")
-            .to_string();
-        DumpLlvmPass::new(ir, filename).run()
-    };
-    info!("Finish Dumping LLVM IR.");
 
     Ok(())
 }

@@ -6,6 +6,7 @@ pub enum Type {
     Int,
     Void,
     Float,
+    Bool,
     Array {
         base: Box<Type>,
         dims: Vec<u32>,
@@ -27,6 +28,7 @@ impl std::fmt::Display for Type {
             Type::Int => write!(f, "int"),
             Type::Float => write!(f, "float"),
             Type::Void => write!(f, "void"),
+            Type::Bool => write!(f, "bool"),
             Type::Array { base, dims } => {
                 write!(f, "{}", base)?;
                 for dim in dims {
@@ -60,6 +62,7 @@ impl std::fmt::Display for Type {
 impl Type {
     pub fn size_in_bytes(&self) -> u32 {
         match self {
+            Type::Bool => 1,
             Type::Int => 4,
             Type::Float => 4,
             Type::Void => 0,
@@ -70,6 +73,6 @@ impl Type {
         }
     }
     pub fn is_scalar(&self) -> bool {
-        matches!(self, Type::Int | Type::Float | Type::Char)
+        matches!(self, Type::Int | Type::Float | Type::Char | Type::Bool)
     }
 }

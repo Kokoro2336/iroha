@@ -28,6 +28,51 @@ impl Semantic {
         }
     }
 
+    fn cast_op(from: &Type, to: &Type) -> Option<Op> {
+        match (from, to) {
+            (Type::Int, Type::Float) => Some(Op::Int2Float),
+            (Type::Float, Type::Int) => Some(Op::Float2Int),
+            (Type::Bool, Type::Int) => Some(Op::Bool2Int),
+            (Type::Int, Type::Bool) => Some(Op::Int2Bool),
+            (Type::Float, Type::Bool) => Some(Op::Float2Bool),
+            (Type::Bool, Type::Float) => Some(Op::Bool2Float),
+            _ => None,
+        }
+    }
+
+    fn cast_expr_to(
+        &mut self,
+        expr_id: &mut NodeId,
+        from_type: &Type,
+        to_type: &Type,
+    ) -> Result<(), String> {
+        if from_type == to_type {
+            return Ok(());
+        }
+
+        let op = Self::cast_op(from_type, to_type).ok_or_else(|| {
+            format!(
+                "Cannot implicitly cast from {:?} to {:?}",
+                from_type, to_type
+            )
+        })?;
+
+        *expr_id = self.ast.alloc(Node::UnaryOp {
+            typ: to_type.clone(),
+            op,
+            operand: *expr_id,
+        });
+        Ok(())
+    }
+
+    fn is_relation_op(op: &Op) -> bool {
+        matches!(op, Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::Eq | Op::Ne)
+    }
+
+    fn is_arithmetic_op(op: &Op) -> bool {
+        matches!(op, Op::Mul | Op::Div | Op::Mod | Op::Add | Op::Sub)
+    }
+
     pub fn analyze(&mut self, node_id: NodeId) -> Result<Type, String> {
         let node_type = self.ast.get_node_type(node_id);
         match node_type {
@@ -53,62 +98,142 @@ impl Semantic {
                 }
 
                 fn infer(
-                    ast: &mut AST,
+                    sema: &mut Semantic,
                     lhs_id: &mut NodeId,
                     rhs_id: &mut NodeId,
-                    lhs_type: Type,
-                    rhs_type: Type,
-                    op_kind: Op,
+                    mut lhs_type: Type,
+                    mut rhs_type: Type,
+                    op_kind: &Op,
                 ) -> Result<Type, String> {
-                    if op_kind == Op::Mod
-                        && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int))
-                    {
-                        return Err("Modulo operator % only supports Int type".to_string());
-                    }
-
+                    // And/Or only receives Bool, yields Bool.
                     if matches!(op_kind, Op::And | Op::Or) {
-                        if matches!(lhs_type, Type::Float) {
-                            let zero_id = ast.alloc(Node::Literal(Literal::Float(0.0)));
-                            *lhs_id = ast.alloc(Node::BinaryOp {
-                                typ: Type::Int,
-                                lhs: *lhs_id,
-                                op: Op::Ne,
-                                rhs: zero_id,
-                            });
+                        if matches!(lhs_type, Type::Int | Type::Float) {
+                            sema.cast_expr_to(lhs_id, &lhs_type, &Type::Bool)?;
+                            lhs_type = Type::Bool;
                         }
-                        if matches!(rhs_type, Type::Float) {
-                            let zero_id = ast.alloc(Node::Literal(Literal::Float(0.0)));
-                            *rhs_id = ast.alloc(Node::BinaryOp {
-                                typ: Type::Int,
-                                lhs: *rhs_id,
-                                op: Op::Ne,
-                                rhs: zero_id,
-                            });
+                        if matches!(rhs_type, Type::Int | Type::Float) {
+                            sema.cast_expr_to(rhs_id, &rhs_type, &Type::Bool)?;
+                            rhs_type = Type::Bool;
                         }
+
+                        if !matches!(lhs_type, Type::Bool) || !matches!(rhs_type, Type::Bool) {
+                            return Err(format!(
+                                "Logical operator {:?} expects Bool operands after coercion, got {:?} and {:?}",
+                                op_kind, lhs_type, rhs_type
+                            ));
+                        }
+                        return Ok(Type::Bool);
                     }
 
-                    if matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float) {
-                        *lhs_id = ast.alloc(Node::UnaryOp {
-                            typ: Type::Float,
-                            op: Op::Cast(Type::Int, Type::Float),
-                            operand: *lhs_id,
-                        });
-                    } else if matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int) {
-                        *rhs_id = ast.alloc(Node::UnaryOp {
-                            typ: Type::Float,
-                            op: Op::Cast(Type::Int, Type::Float),
-                            operand: *rhs_id,
-                        });
+                    // RelExp only receives Int/Float, yields Bool
+                    if Semantic::is_relation_op(op_kind) {
+                        match (&lhs_type, &rhs_type) {
+                            (Type::Bool, Type::Bool) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Int)?;
+                                lhs_type = Type::Int;
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Int)?;
+                                rhs_type = Type::Int;
+                            }
+                            (Type::Float, Type::Int) => {
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Float)?;
+                                rhs_type = Type::Float;
+                            }
+                            (Type::Int, Type::Float) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Float)?;
+                                lhs_type = Type::Float;
+                            }
+                            (Type::Bool, Type::Int) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Int)?;
+                                lhs_type = Type::Int;
+                            }
+                            (Type::Int, Type::Bool) => {
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Int)?;
+                                rhs_type = Type::Int;
+                            }
+                            (Type::Bool, Type::Float) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Float)?;
+                                lhs_type = Type::Float;
+                            }
+                            (Type::Float, Type::Bool) => {
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Float)?;
+                                rhs_type = Type::Float;
+                            }
+                            _ => {}
+                        }
+
+                        if !matches!(lhs_type, Type::Int | Type::Float)
+                            || !matches!(rhs_type, Type::Int | Type::Float)
+                        {
+                            return Err(format!(
+                                "Relational operator {:?} expects scalar operands, got {:?} and {:?}",
+                                op_kind, lhs_type, rhs_type
+                            ));
+                        }
+                        return Ok(Type::Bool);
                     }
 
-                    let ret_typ = if op_kind.only_ret_int() {
-                        Type::Int
-                    } else if matches!(lhs_type, Type::Float) || matches!(rhs_type, Type::Float) {
-                        Type::Float
-                    } else {
-                        Type::Int
-                    };
-                    Ok(ret_typ)
+                    if Semantic::is_arithmetic_op(op_kind) {
+                        match (&lhs_type, &rhs_type) {
+                            (Type::Bool, Type::Bool) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Int)?;
+                                lhs_type = Type::Int;
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Int)?;
+                                rhs_type = Type::Int;
+                            }
+                            (Type::Float, Type::Int) => {
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Float)?;
+                                rhs_type = Type::Float;
+                            }
+                            (Type::Int, Type::Float) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Float)?;
+                                lhs_type = Type::Float;
+                            }
+                            (Type::Bool, Type::Int) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Int)?;
+                                lhs_type = Type::Int;
+                            }
+                            (Type::Int, Type::Bool) => {
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Int)?;
+                                rhs_type = Type::Int;
+                            }
+                            (Type::Bool, Type::Float) => {
+                                sema.cast_expr_to(lhs_id, &lhs_type, &Type::Float)?;
+                                lhs_type = Type::Float;
+                            }
+                            (Type::Float, Type::Bool) => {
+                                sema.cast_expr_to(rhs_id, &rhs_type, &Type::Float)?;
+                                rhs_type = Type::Float;
+                            }
+                            _ => {}
+                        }
+
+                        if !matches!(lhs_type, Type::Int | Type::Float)
+                            || !matches!(rhs_type, Type::Int | Type::Float)
+                        {
+                            return Err(format!(
+                                "Arithmetic operator {:?} expects Int/Float operands, got {:?} and {:?}",
+                                op_kind, lhs_type, rhs_type
+                            ));
+                        }
+
+                        if matches!(op_kind, Op::Mod)
+                            && (!matches!(lhs_type, Type::Int) || !matches!(rhs_type, Type::Int))
+                        {
+                            return Err("Modulo operator % only supports Int operands".to_string());
+                        }
+
+                        return if matches!(lhs_type, Type::Float) || matches!(rhs_type, Type::Float)
+                        {
+                            Ok(Type::Float)
+                        } else {
+                            Ok(Type::Int)
+                        };
+                    }
+
+                    Err(format!(
+                        "Unsupported binary operator in semantic: {:?}",
+                        op_kind
+                    ))
                 }
 
                 let mut res = Type::Void;
@@ -126,14 +251,8 @@ impl Semantic {
                         res.clone()
                     };
                     let rhs_type = self.analyze(rhs_id)?;
-                    let ret_typ = infer(
-                        &mut self.ast,
-                        &mut lhs_id,
-                        &mut rhs_id,
-                        lhs_type,
-                        rhs_type,
-                        op_kind,
-                    )?;
+                    let ret_typ =
+                        infer(self, &mut lhs_id, &mut rhs_id, lhs_type, rhs_type, &op_kind)?;
                     if let Node::BinaryOp { typ, lhs, rhs, .. } = &mut self.ast[op_id] {
                         *typ = ret_typ.clone();
                         *lhs = lhs_id;
@@ -151,104 +270,145 @@ impl Semantic {
                     _ => unreachable!(),
                 };
 
-                if matches!(op_kind, Op::Cast(_, _)) {
-                    panic!("Cast op is impossible to occur before semantic analysis!");
-                }
-
-                let mut op_list: Vec<NodeId> = vec![];
-                let origin = op_kind.clone();
-                let mut cur = node_id;
-                while let Node::UnaryOp { op, operand, .. } = &self.ast[cur] {
-                    if *op == origin {
-                        op_list.push(cur);
-                        cur = *operand;
-                    } else {
-                        break;
-                    }
-                }
-
                 match op_kind {
-                    Op::Plus => {
-                        // If the operand is Plus, we eliminate the unary plus operator.
-                        let last_id = op_list.last().copied().unwrap();
-                        let operand_id = match &self.ast[last_id] {
-                            Node::UnaryOp { operand, .. } => *operand,
-                            _ => {
-                                return Err(format!(
-                                    "Expected UnaryOp node, got {:?}",
-                                    &self.ast[last_id]
-                                ))
+                    Op::Int2Float
+                    | Op::Float2Int
+                    | Op::Bool2Int
+                    | Op::Int2Bool
+                    | Op::Float2Bool
+                    | Op::Bool2Float => {
+                        let (operand_id, target_type, cast_op) = match &self.ast[node_id] {
+                            Node::UnaryOp { operand, op, .. } => {
+                                let (target_type, cast_op) = match op {
+                                    Op::Int2Float => (Type::Float, Op::Int2Float),
+                                    Op::Float2Int => (Type::Int, Op::Float2Int),
+                                    Op::Bool2Int => (Type::Int, Op::Bool2Int),
+                                    Op::Int2Bool => (Type::Bool, Op::Int2Bool),
+                                    Op::Float2Bool => (Type::Bool, Op::Float2Bool),
+                                    Op::Bool2Float => (Type::Float, Op::Bool2Float),
+                                    _ => unreachable!(),
+                                };
+                                (*operand, target_type, cast_op)
                             }
+                            _ => unreachable!(),
                         };
-                        let operand_type = self.analyze(operand_id)?;
-                        // Replace the root unary node with its operand node, in place.
-                        let operand = self.ast.remove(operand_id);
-                        self.ast.replace(node_id, operand);
-                        // Remove redundant unary chain nodes and duplicated operand node.
-                        for id in op_list.into_iter().filter(|id| *id != node_id) {
-                            self.ast.remove(id);
-                        }
-                        Ok(operand_type)
-                    }
-                    Op::Minus | Op::Not => {
-                        // Eliminate the unary/minus operator.
-                        let last_id = op_list.last().copied().unwrap();
-                        let operand_id = match &self.ast[last_id] {
-                            Node::UnaryOp { operand, .. } => *operand,
-                            _ => {
-                                return Err(format!(
-                                    "Expected UnaryOp node, got {:?}",
-                                    &self.ast[last_id]
-                                ))
-                            }
-                        };
-                        let operand_type = self.analyze(operand_id)?;
 
-                        let res_id = if op_list.len() % 2 == 0 {
-                            // Even count: unary chain cancels out.
-                            let operand = self.ast.remove(operand_id);
+                        let operand_type = self.analyze(operand_id)?;
+                        if operand_type != target_type {
+                            let expected_op = Self::cast_op(&operand_type, &target_type)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Invalid cast from {:?} to {:?}",
+                                        operand_type, target_type
+                                    )
+                                })?;
+                            if expected_op != cast_op {
+                                return Err(format!(
+                                    "Mismatched cast op {:?} for {:?} -> {:?}",
+                                    cast_op, operand_type, target_type
+                                ));
+                            }
+                        }
+
+                        if let Node::UnaryOp { typ, operand, .. } = &mut self.ast[node_id] {
+                            *typ = target_type.clone();
+                            *operand = operand_id;
+                        }
+                        Ok(target_type)
+                    }
+                    Op::Plus | Op::Minus | Op::Not => {
+                        let mut op_list: Vec<NodeId> = vec![];
+                        let origin = op_kind.clone();
+                        let mut cur = node_id;
+                        while let Node::UnaryOp { op, operand, .. } = &self.ast[cur] {
+                            if *op == origin {
+                                op_list.push(cur);
+                                cur = *operand;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        let last_id = op_list.last().copied().unwrap();
+                        let operand_id = match &self.ast[last_id] {
+                            Node::UnaryOp { operand, .. } => *operand,
+                            _ => {
+                                return Err(format!(
+                                    "Expected UnaryOp node, got {:?}",
+                                    &self.ast[last_id]
+                                ))
+                            }
+                        };
+                        let operand_type = self.analyze(operand_id)?;
+                        let mut res_id = operand_id;
+                        let mut res_type = operand_type.clone();
+
+                        if matches!(op_kind, Op::Plus | Op::Minus) {
+                            if matches!(res_type, Type::Bool) {
+                                self.cast_expr_to(&mut res_id, &res_type, &Type::Int)?;
+                                res_type = Type::Int;
+                            }
+
+                            if !matches!(res_type, Type::Int | Type::Float) {
+                                return Err(format!(
+                                    "Unary {:?} only supports Int/Float operand, got {:?}",
+                                    op_kind, res_type
+                                ));
+                            }
+                        }
+
+                        if op_kind == Op::Plus {
+                            let operand = self.ast.remove(res_id);
                             self.ast.replace(node_id, operand);
-                            // Remove redundant unary chain nodes and duplicated operand node.
                             for id in op_list.into_iter().filter(|id| *id != node_id) {
                                 self.ast.remove(id);
                             }
-                            return Ok(operand_type);
-                        } else {
-                            // Odd count: keep one operator at the root and point directly to base operand.
-                            if let Node::UnaryOp { operand, .. } = &mut self.ast[node_id] {
-                                *operand = operand_id;
-                            }
-                            // Remove redundant unary chain nodes, keep root and base operand.
-                            for id in op_list.iter().copied().filter(|id| *id != node_id) {
+                            return Ok(res_type);
+                        }
+
+                        if op_list.len() % 2 == 0 {
+                            let operand = self.ast.remove(res_id);
+                            self.ast.replace(node_id, operand);
+                            for id in op_list.into_iter().filter(|id| *id != node_id) {
                                 self.ast.remove(id);
                             }
-                            operand_id
-                        };
-
-                        if op_kind == Op::Not && matches!(operand_type, Type::Float) {
-                            let zero_id = self.ast.alloc(Node::Literal(Literal::Float(0.0)));
-                            let new_res_id = self.ast.alloc(Node::BinaryOp {
-                                typ: Type::Int,
-                                op: Op::Ne,
-                                lhs: res_id,
-                                rhs: zero_id,
-                            });
-                            if let Node::UnaryOp { typ, operand, .. } = &mut self.ast[node_id] {
-                                *typ = Type::Int;
-                                *operand = new_res_id;
-                            }
-                            return Ok(Type::Int);
+                            return Ok(res_type);
                         }
-                        match &mut self.ast[node_id] {
-                            Node::UnaryOp { typ, operand, .. } => {
-                                *typ = operand_type.clone();
-                                *operand = res_id;
-                                Ok(operand_type)
+
+                        if let Node::UnaryOp { operand, .. } = &mut self.ast[node_id] {
+                            *operand = res_id;
+                        }
+                        for id in op_list.iter().copied().filter(|id| *id != node_id) {
+                            self.ast.remove(id);
+                        }
+
+                        match op_kind {
+                            Op::Minus => {
+                                if let Node::UnaryOp { typ, operand, .. } = &mut self.ast[node_id] {
+                                    *typ = res_type.clone();
+                                    *operand = res_id;
+                                }
+                                Ok(res_type)
                             }
-                            _ => Err(format!(
-                                "Expected UnaryOp node, got {:?}",
-                                &self.ast[node_id]
-                            )),
+                            Op::Not => {
+                                if matches!(operand_type, Type::Float) {
+                                    self.cast_expr_to(&mut res_id, &operand_type, &Type::Bool)?;
+                                } else if matches!(operand_type, Type::Int) {
+                                    self.cast_expr_to(&mut res_id, &operand_type, &Type::Bool)?;
+                                } else if !matches!(operand_type, Type::Bool) {
+                                    return Err(format!(
+                                        "Unary not only supports Int/Bool/Float operand, got {:?}",
+                                        operand_type
+                                    ));
+                                }
+
+                                if let Node::UnaryOp { typ, operand, .. } = &mut self.ast[node_id] {
+                                    *typ = Type::Bool;
+                                    *operand = res_id;
+                                }
+                                Ok(Type::Bool)
+                            }
+                            _ => unreachable!(),
                         }
                     }
                     _ => Err(format!("Unsupported unary operator: {:?}", op_kind)),
@@ -312,18 +472,14 @@ impl Semantic {
                     for (i, arg_id) in args_ids.iter_mut().enumerate() {
                         let arg_type = self.analyze(*arg_id)?;
                         let param_type = &fn_params[i];
-                        if matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int)
-                            || matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float)
-                        {
-                            *arg_id = self.ast.alloc(Node::UnaryOp {
-                                typ: param_type.clone(),
-                                op: Op::Cast(arg_type, param_type.clone()),
-                                operand: *arg_id,
-                            });
-                        } else if arg_type != *param_type {
+                        if arg_type != *param_type {
+                            self.cast_expr_to(arg_id, &arg_type, param_type)?;
+                        }
+                        let casted_type = self.analyze(*arg_id)?;
+                        if casted_type != *param_type {
                             return Err(format!(
                                 "Argument type mismatch in function {}: expected {:?}, got {:?}",
-                                func_name, param_type, arg_type
+                                func_name, param_type, casted_type
                             ));
                         }
                     }
@@ -361,18 +517,14 @@ impl Semantic {
                     for (i, arg_id) in args_ids.iter_mut().skip(1).enumerate() {
                         let arg_type = self.analyze(*arg_id)?;
                         let param_type = &placeholder_types[i];
-                        if (matches!(arg_type, Type::Float) && matches!(*param_type, Type::Int))
-                            || (matches!(arg_type, Type::Int) && matches!(*param_type, Type::Float))
-                        {
-                            *arg_id = self.ast.alloc(Node::UnaryOp {
-                                typ: param_type.clone(),
-                                op: Op::Cast(arg_type, param_type.clone()),
-                                operand: *arg_id,
-                            });
-                        } else if arg_type != *param_type {
+                        if arg_type != *param_type {
+                            self.cast_expr_to(arg_id, &arg_type, param_type)?;
+                        }
+                        let casted_type = self.analyze(*arg_id)?;
+                        if casted_type != *param_type {
                             return Err(format!(
                                 "Argument type mismatch in putf: expected {:?}, got {:?}",
-                                param_type, arg_type
+                                param_type, casted_type
                             ));
                         }
                     }
@@ -484,20 +636,18 @@ impl Semantic {
                 self.syms.insert(name, decl_type.clone());
                 if let Some(init_id) = init_value {
                     let val_typ = self.analyze(init_id)?;
-                    if matches!(val_typ, Type::Float) && matches!(decl_type, Type::Int)
-                        || matches!(val_typ, Type::Int) && matches!(decl_type, Type::Float)
-                    {
-                        init_value = Some(self.ast.alloc(Node::UnaryOp {
-                            typ: decl_type.clone(),
-                            op: Op::Cast(val_typ, decl_type.clone()),
-                            operand: init_id,
-                        }));
-                    } else if val_typ != decl_type {
+                    let mut new_init_id = init_id;
+                    if val_typ != decl_type {
+                        self.cast_expr_to(&mut new_init_id, &val_typ, &decl_type)?;
+                    }
+                    let casted_type = self.analyze(new_init_id)?;
+                    if casted_type != decl_type {
                         return Err(format!(
                             "Variable type mismatch: expected {:?}, got {:?}",
-                            decl_type, val_typ
+                            decl_type, casted_type
                         ));
                     }
+                    init_value = Some(new_init_id);
                 }
                 if let Node::VarDecl { init_value: iv, .. } = &mut self.ast[node_id] {
                     *iv = init_value;
@@ -524,11 +674,13 @@ impl Semantic {
                         let val_type = self.analyze(init_id)?;
                         if val_type != base {
                             match &mut self.ast[init_id] {
-                                Node::Literal(literal) => match val_type {
-                                    Type::Int => {
+                                Node::Literal(literal) => match (&val_type, &base) {
+                                    (Type::Int, Type::Float) => {
                                         *literal = Literal::Float(literal.get_int() as f32)
                                     }
-                                    Type::Float => *literal = Literal::Float(literal.get_float()),
+                                    (Type::Float, Type::Int) => {
+                                        *literal = Literal::Int(literal.get_float() as i32)
+                                    }
                                     _ => {
                                         return Err(format!(
                                             "ConstArray can only be initialized with Int or Float literals: {:?}",
@@ -565,18 +717,14 @@ impl Semantic {
 
                     for init_id in init_ids.iter_mut() {
                         let val_typ = self.analyze(*init_id)?;
-                        if matches!(val_typ, Type::Float) && matches!(base_typ, Type::Int)
-                            || matches!(val_typ, Type::Int) && matches!(base_typ, Type::Float)
-                        {
-                            *init_id = self.ast.alloc(Node::UnaryOp {
-                                typ: base_typ.clone(),
-                                op: Op::Cast(val_typ, base_typ.clone()),
-                                operand: *init_id,
-                            });
-                        } else if val_typ != base_typ {
+                        if val_typ != base_typ {
+                            self.cast_expr_to(init_id, &val_typ, &base_typ)?;
+                        }
+                        let casted_type = self.analyze(*init_id)?;
+                        if casted_type != base_typ {
                             return Err(format!(
                                 "Array variable type mismatch: expected {:?}, got {:?}",
-                                base_typ, val_typ
+                                base_typ, casted_type
                             ));
                         }
                     }
@@ -612,14 +760,10 @@ impl Semantic {
                     _ => unreachable!(),
                 };
                 let cond_type = self.analyze(condition)?;
-                if matches!(cond_type, Type::Float) {
-                    let zero_id = self.ast.alloc(Node::Literal(Literal::Float(0.0)));
-                    condition = self.ast.alloc(Node::BinaryOp {
-                        typ: Type::Int,
-                        lhs: condition,
-                        op: Op::Ne,
-                        rhs: zero_id,
-                    });
+                if matches!(cond_type, Type::Int | Type::Float) {
+                    self.cast_expr_to(&mut condition, &cond_type, &Type::Bool)?;
+                } else if !matches!(cond_type, Type::Bool) {
+                    return Err(format!("If condition must be Bool, got {:?}", cond_type));
                 }
                 self.analyze(then_block)?;
                 if let Some(else_id) = else_block {
@@ -636,14 +780,10 @@ impl Semantic {
                     _ => unreachable!(),
                 };
                 let cond_type = self.analyze(condition)?;
-                if matches!(cond_type, Type::Float) {
-                    let zero_id = self.ast.alloc(Node::Literal(Literal::Float(0.0)));
-                    condition = self.ast.alloc(Node::BinaryOp {
-                        typ: Type::Int,
-                        lhs: condition,
-                        op: Op::Ne,
-                        rhs: zero_id,
-                    });
+                if matches!(cond_type, Type::Int | Type::Float) {
+                    self.cast_expr_to(&mut condition, &cond_type, &Type::Bool)?;
+                } else if !matches!(cond_type, Type::Bool) {
+                    return Err(format!("While condition must be Bool, got {:?}", cond_type));
                 }
                 self.analyze(body)?;
                 if let Node::While { condition: c, .. } = &mut self.ast[node_id] {
@@ -657,32 +797,24 @@ impl Semantic {
                     _ => unreachable!(),
                 };
 
+                let func_typ = self
+                    .funcs
+                    .get(self.current_func.as_ref().unwrap())
+                    .unwrap()
+                    .clone();
+                let func_ret_typ = match func_typ {
+                    Type::Function { return_type, .. } => *return_type,
+                    _ => {
+                        return Err(format!(
+                            "Current function {} does not have a valid function type!",
+                            self.current_func.as_ref().unwrap()
+                        ));
+                    }
+                };
+
                 if let Some(id) = expr {
                     let ret_typ = self.analyze(id)?;
-                    let func_typ = self
-                        .funcs
-                        .get(self.current_func.as_ref().unwrap())
-                        .unwrap()
-                        .clone();
-                    let func_ret_typ = match func_typ {
-                        Type::Function { return_type, .. } => *return_type,
-                        _ => {
-                            return Err(format!(
-                                "Current function {} does not have a valid function type!",
-                                self.current_func.as_ref().unwrap()
-                            ));
-                        }
-                    };
-
-                    if (matches!(func_ret_typ, Type::Float) && matches!(ret_typ, Type::Int))
-                        || (matches!(func_ret_typ, Type::Int) && matches!(ret_typ, Type::Float))
-                    {
-                        expr = Some(self.ast.alloc(Node::UnaryOp {
-                            typ: func_ret_typ.clone(),
-                            op: Op::Cast(ret_typ, func_ret_typ.clone()),
-                            operand: id,
-                        }));
-                    } else if ret_typ != func_ret_typ {
+                    if matches!(func_ret_typ, Type::Void) {
                         return Err(format!(
                             "Return type mismatch in function {}: expected {:?}, got {:?}",
                             self.current_func.as_ref().unwrap(),
@@ -690,6 +822,27 @@ impl Semantic {
                             ret_typ
                         ));
                     }
+
+                    if ret_typ != func_ret_typ {
+                        let mut casted_id = id;
+                        self.cast_expr_to(&mut casted_id, &ret_typ, &func_ret_typ)?;
+                        let casted_type = self.analyze(casted_id)?;
+                        if casted_type != func_ret_typ {
+                            return Err(format!(
+                                "Return type mismatch in function {}: expected {:?}, got {:?}",
+                                self.current_func.as_ref().unwrap(),
+                                func_ret_typ,
+                                casted_type
+                            ));
+                        }
+                        expr = Some(casted_id);
+                    }
+                } else if !matches!(func_ret_typ, Type::Void) {
+                    return Err(format!(
+                        "Return type mismatch in function {}: expected {:?}, got Void",
+                        self.current_func.as_ref().unwrap(),
+                        func_ret_typ
+                    ));
                 }
 
                 if let Node::Return(ret) = &mut self.ast[node_id] {
@@ -704,18 +857,14 @@ impl Semantic {
                 };
                 let lhs_type = self.analyze(lhs_id)?;
                 let rhs_type = self.analyze(rhs_id)?;
-                if (matches!(lhs_type, Type::Float) && matches!(rhs_type, Type::Int))
-                    || (matches!(lhs_type, Type::Int) && matches!(rhs_type, Type::Float))
-                {
-                    rhs_id = self.ast.alloc(Node::UnaryOp {
-                        typ: lhs_type.clone(),
-                        op: Op::Cast(rhs_type, lhs_type),
-                        operand: rhs_id,
-                    });
-                } else if lhs_type != rhs_type {
+                if lhs_type != rhs_type {
+                    self.cast_expr_to(&mut rhs_id, &rhs_type, &lhs_type)?;
+                }
+                let casted_rhs_type = self.analyze(rhs_id)?;
+                if casted_rhs_type != lhs_type {
                     return Err(format!(
                         "Assignment type mismatch: expected {:?}, got {:?}",
-                        lhs_type, rhs_type
+                        lhs_type, casted_rhs_type
                     ));
                 }
 

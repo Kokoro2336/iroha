@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub use tracing::{debug, info, trace, warn};
 pub mod graph;
 pub mod llvm;
-pub use llvm::DumpLlvmPass;
+pub use llvm::DumpLLVMPass;
 
 // since tracing crate does not support lazy logging, we need to setup the logger at the start of the program.
 pub fn setup(path: &str) -> WorkerGuard {

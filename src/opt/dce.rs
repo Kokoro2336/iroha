@@ -1,15 +1,18 @@
-use crate::base::ir::{OpData, OpType, Operand};
+use crate::base::ir::{OpData, Operand, PhiIncoming};
 /**
  * Dead Code Elimination (DCE).
  */
 use crate::base::{context_or_err, Pass};
 use crate::base::{Builder, BuilderContext};
+use crate::utils::arena::ArenaItem;
 
 pub struct DCE<'a> {
     pub program: &'a mut crate::base::ir::Program,
     builder: Builder,
     // Worklist of inst
     worklist: Vec<(Operand, Operand)>,
+    // Mapping from op_id to bb_id
+    op_to_bb: Vec<Operand>,
     // State fields
     current_function: Option<usize>,
 }
@@ -20,6 +23,7 @@ impl<'a> DCE<'a> {
             program,
             builder: Builder::new(),
             worklist: vec![],
+            op_to_bb: vec![],
             current_function: None,
         }
     }
@@ -30,16 +34,34 @@ impl<'a> DCE<'a> {
             None => panic!("DCE: not in a function"),
         };
         let dfg = &current_func.dfg;
-        let op_id = match operand {
-            Operand::Value(id) => *id,
+        let globals = &self.program.globals;
+        match operand {
+            Operand::Value(id) => dfg[*id].users.is_empty(),
+            Operand::Global(id) => globals[*id].users.is_empty(),
             _ => panic!("DCE: operand is not a value"),
-        };
-        dfg[op_id].users.is_empty()
+        }
     }
 
     pub fn init(&mut self, func_id: usize) {
         self.current_function = Some(func_id);
         let func = &self.program.funcs[self.current_function.unwrap()];
+        self.worklist.clear();
+
+        // map OpId to BBId
+        self.op_to_bb.clear();
+        self.op_to_bb.resize(func.dfg.storage.len(), Operand::BB(0));
+        func.cfg
+            .storage
+            .iter()
+            .enumerate()
+            .for_each(|(bb_id, item)| {
+                if let ArenaItem::Data(bb) = item {
+                    for op_id in bb.cur.iter() {
+                        self.op_to_bb[op_id.get_op_id()] = Operand::BB(bb_id);
+                    }
+                }
+            });
+
         // Initialize the worklist
         for block_id in func.cfg.collect() {
             let block = &func.cfg[block_id];
@@ -56,8 +78,8 @@ impl<'a> DCE<'a> {
         }
     }
 
-    pub fn run(&mut self) {
-        fn check(this: &mut DCE, operand: &Operand, bb_id: &Operand) {
+    fn run(&mut self) {
+        fn check(this: &mut DCE, operand: &Operand) {
             let func = match this.current_function {
                 Some(idx) => &this.program.funcs[idx],
                 None => panic!("DCE: not in a function"),
@@ -66,131 +88,114 @@ impl<'a> DCE<'a> {
                 Operand::Value(id) => {
                     let op_id = *id;
                     if this.is_dead(operand) && !func.dfg[op_id].is_impure() {
-                        this.worklist.push((operand.clone(), bb_id.clone()));
+                        this.worklist
+                            .push((operand.clone(), this.op_to_bb[op_id].clone()));
                     }
                 }
-                Operand::Global(_) | Operand::Int(_) | Operand::Float(_) | Operand::Undefined | Operand::Index(_) => { /* do nothing */ }
+                Operand::Global(id) => {
+                    let global_id = *id;
+                    if this.is_dead(operand) && !this.program.globals[global_id].is_impure() {
+                        this.worklist.push((operand.clone(), Operand::BB(0)));
+                    }
+                }
+                Operand::Int(_)
+                | Operand::Float(_)
+                | Operand::Undefined
+                | Operand::Index(_)
+                | Operand::Param { .. } => { /* do nothing */ }
                 _ => panic!("DCE: operand is not a value or basic block: {:?}", operand),
             }
         }
         for func_id in self.program.funcs.collect_internal() {
             self.init(func_id);
             while let Some((op_id, bb_id)) = self.worklist.pop() {
+                if let Operand::Value(id) = op_id {
+                    let func = &self.program.funcs[self.current_function.unwrap()];
+                    let bb = bb_id.get_bb_id();
+                    if !func.cfg[bb].cur.iter().any(|inst| inst.get_op_id() == id) {
+                        continue;
+                    }
+                }
+
                 let mut ctx = context_or_err!(self, "DCE: no context in run");
                 self.builder.set_current_block(bb_id.clone());
-                let removed_op = self.builder
-                    .remove_op(&mut ctx, op_id.clone(), bb_id.clone());
+                let removed_op = match op_id {
+                    Operand::Global(_) => self.builder.remove_op(&mut ctx, op_id, None),
+                    _ => self
+                        .builder
+                        .remove_op(&mut ctx, op_id.clone(), Some(bb_id.clone())),
+                };
 
                 // Check the operands of the removed instruction
-                let op_type = OpType::from(&removed_op.data);
-                match op_type {
-                    OpType::AddF
-                    | OpType::SubF
-                    | OpType::MulF
-                    | OpType::DivF
-                    | OpType::AddI
-                    | OpType::SubI
-                    | OpType::MulI
-                    | OpType::DivI
-                    | OpType::ModI
-                    | OpType::SNe
-                    | OpType::SEq
-                    | OpType::SGt
-                    | OpType::SLt
-                    | OpType::SGe
-                    | OpType::SLe
-                    | OpType::And
-                    | OpType::Or
-                    | OpType::Xor
-                    | OpType::Shl
-                    | OpType::Shr
-                    | OpType::Sar
-                    | OpType::ONe
-                    | OpType::OEq
-                    | OpType::OGt
-                    | OpType::OLt
-                    | OpType::OGe
-                    | OpType::OLe => {
-                        let (lhs, rhs) = {
-                            match removed_op.data {
-                                OpData::AddF { lhs, rhs }
-                                | OpData::SubF { lhs, rhs }
-                                | OpData::MulF { lhs, rhs }
-                                | OpData::DivF { lhs, rhs }
-                                | OpData::AddI { lhs, rhs }
-                                | OpData::SubI { lhs, rhs }
-                                | OpData::MulI { lhs, rhs }
-                                | OpData::DivI { lhs, rhs }
-                                | OpData::ModI { lhs, rhs }
-                                | OpData::SNe { lhs, rhs }
-                                | OpData::SEq { lhs, rhs }
-                                | OpData::SGt { lhs, rhs }
-                                | OpData::SLt { lhs, rhs }
-                                | OpData::SGe { lhs, rhs }
-                                | OpData::SLe { lhs, rhs }
-                                | OpData::And { lhs, rhs }
-                                | OpData::Or { lhs, rhs }
-                                | OpData::Xor { lhs, rhs }
-                                | OpData::Shl { lhs, rhs }
-                                | OpData::Shr { lhs, rhs }
-                                | OpData::Sar { lhs, rhs }
-                                | OpData::ONe { lhs, rhs }
-                                | OpData::OEq { lhs, rhs }
-                                | OpData::OGt { lhs, rhs }
-                                | OpData::OLt { lhs, rhs }
-                                | OpData::OGe { lhs, rhs }
-                                | OpData::OLe { lhs, rhs } => (lhs.clone(), rhs.clone()),
-                                _ => unreachable!(),
-                            }
-                        };
-                        check(self, &lhs, &bb_id);
-                        check(self, &rhs, &bb_id);
+                match removed_op.data.clone() {
+                    OpData::AddF { lhs, rhs }
+                    | OpData::SubF { lhs, rhs }
+                    | OpData::MulF { lhs, rhs }
+                    | OpData::DivF { lhs, rhs }
+                    | OpData::AddI { lhs, rhs }
+                    | OpData::SubI { lhs, rhs }
+                    | OpData::MulI { lhs, rhs }
+                    | OpData::DivI { lhs, rhs }
+                    | OpData::ModI { lhs, rhs }
+                    | OpData::SNe { lhs, rhs }
+                    | OpData::SEq { lhs, rhs }
+                    | OpData::SGt { lhs, rhs }
+                    | OpData::SLt { lhs, rhs }
+                    | OpData::SGe { lhs, rhs }
+                    | OpData::SLe { lhs, rhs }
+                    | OpData::And { lhs, rhs }
+                    | OpData::Or { lhs, rhs }
+                    | OpData::Xor { lhs, rhs }
+                    | OpData::Shl { lhs, rhs }
+                    | OpData::Shr { lhs, rhs }
+                    | OpData::Sar { lhs, rhs }
+                    | OpData::ONe { lhs, rhs }
+                    | OpData::OEq { lhs, rhs }
+                    | OpData::OGt { lhs, rhs }
+                    | OpData::OLt { lhs, rhs }
+                    | OpData::OGe { lhs, rhs }
+                    | OpData::OLe { lhs, rhs } => {
+                        check(self, &lhs);
+                        check(self, &rhs);
                     }
-                    OpType::Sitofp | OpType::Fptosi => {
-                        let value = {
-                            match removed_op.data {
-                                OpData::Sitofp { value } | OpData::Fptosi { value } => {
-                                    value.clone()
-                                }
-                                _ => unreachable!(),
-                            }
-                        };
-                        check(self, &value, &bb_id);
+                    OpData::Sitofp { value }
+                    | OpData::Fptosi { value }
+                    | OpData::Zext { value }
+                    | OpData::Uitofp { value } => {
+                        check(self, &value);
                     }
                     // In DCE, Load is pure.
-                    OpType::Load => {
-                        let addr = {
-                            match removed_op.data {
-                                OpData::Load { addr } => addr.clone(),
-                                _ => unreachable!(),
-                            }
-                        };
-                        check(self, &addr, &bb_id);
+                    OpData::Load { addr } => {
+                        check(self, &addr);
                     }
-                    OpType::GEP => {
-                        let (base, indices) = {
-                            match removed_op.data {
-                                OpData::GEP { base, indices } => (base.clone(), indices.clone()),
-                                _ => unreachable!(),
-                            }
-                        };
-                        check(self, &base, &bb_id);
+                    OpData::GEP { base, indices } => {
+                        check(self, &base);
                         for index in indices.iter() {
-                            check(self, index, &bb_id);
+                            check(self, index);
                         }
                     }
 
-                    OpType::GetArg | OpType::Alloca | OpType::Phi => { /* do nothing */ }
+                    OpData::Phi { incoming } => {
+                        for phi_incoming in incoming.iter() {
+                            if let PhiIncoming::Data { value, bb: _ } = phi_incoming {
+                                check(self, value);
+                            }
+                        }
+                    }
 
-                    OpType::Call
-                    | OpType::Store
-                    | OpType::Br
-                    | OpType::Jump
-                    | OpType::Ret
-                    | OpType::Move
-                    | OpType::GlobalAlloca
-                    | OpType::Declare => {
-                        unreachable!("DCE: impure instruction should not be in the worklist")
+                    OpData::Call { .. }
+                    | OpData::Store { .. }
+                    | OpData::Br { .. }
+                    | OpData::Jump { .. }
+                    | OpData::Ret { .. }
+                    | OpData::Move { .. }
+                    | OpData::Alloca(_)
+                    | OpData::GlobalAlloca(_)
+                    | OpData::Declare { .. } => {
+                        unreachable!(
+                            "DCE: impure instruction should not be in the worklist: {:?}",
+                            removed_op
+                        );
                     }
                 }
             }

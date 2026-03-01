@@ -1,5 +1,6 @@
-use crate::base::ir::{OpData, Operand, DFG, PhiIncoming};
+use crate::base::ir::{OpData, Operand, PhiIncoming, DFG};
 use crate::base::Type;
+use crate::debug::info;
 use crate::utils::arena::*;
 use std::ops::{Index, IndexMut};
 
@@ -92,6 +93,12 @@ impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
             }
         });
 
+        info!(
+            "CFG GC: {} blocks collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
+        );
+
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<BasicBlock>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
@@ -175,6 +182,12 @@ impl Arena<Function> for IndexedArena<Function> {
             }
         });
 
+        info!(
+            "CG GC: {} functions collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
+        );
+
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Function>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
@@ -214,9 +227,11 @@ impl Arena<Function> for IndexedArena<Function> {
         // No need to rewrite anything inside Function for now
         self.storage.iter_mut().for_each(|func| {
             if let ArenaItem::Data(func) = func {
+                if func.is_external {
+                    return;
+                }
                 let old_arena_dfg = func.dfg.gc();
                 let old_arena_cfg = func.cfg.gc();
-                // TODO: We don't need to clean globals for now.
 
                 // rewrite op refs in BasicBlocks
                 func.cfg.storage.iter_mut().for_each(|item| {
@@ -242,11 +257,18 @@ impl Arena<Function> for IndexedArena<Function> {
                             }
 
                             OpData::Phi { incoming } => {
-                                 for phi_incoming in incoming.iter_mut() {
+                                for phi_incoming in incoming.iter_mut() {
                                     if let PhiIncoming::Data { bb, .. } = phi_incoming {
                                         remap_with_cfg(bb, &old_arena_cfg);
                                     }
                                     // If incoming == None, do nothing
+                                }
+                            }
+
+                            // Special: Call needs to rewrite the function operand.
+                            OpData::Call { func, .. } => {
+                                if let Operand::Func(func_id) = func {
+                                    remap_idx(func_id, &old_arena);
                                 }
                             }
 
@@ -263,13 +285,13 @@ impl Arena<Function> for IndexedArena<Function> {
                             | OpData::Store { .. }
                             | OpData::Alloca(_)
                             | OpData::GlobalAlloca { .. }
-                            | OpData::GetArg { .. }
                             | OpData::Declare { .. }
-                            | OpData::Call { .. }
                             | OpData::Move { .. }
                             | OpData::GEP { .. }
                             | OpData::Sitofp { .. }
                             | OpData::Fptosi { .. }
+                            | OpData::Zext { .. }
+                            | OpData::Uitofp { .. }
                             | OpData::Ret { .. }
                             | OpData::Shl { .. }
                             | OpData::Shr { .. }

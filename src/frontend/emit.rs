@@ -49,6 +49,71 @@ impl Emit {
         }
     }
 
+    pub fn get_type(&self, operand: &Operand) -> Type {
+        let current_func = match self.current_function {
+            Some(idx) => &self.program.funcs[idx],
+            None => panic!("get_type: not in a function"),
+        };
+        let dfg = &current_func.dfg;
+        let globals = &self.program.globals;
+        match operand {
+            Operand::Value(id) => dfg[*id].typ.clone(),
+            Operand::Global(id) => globals[*id].typ.clone(),
+            Operand::Param { typ, .. } => typ.clone(),
+            Operand::Int(_) => Type::Int,
+            Operand::Float(_) => Type::Float,
+            Operand::Bool(_) => Type::Bool,
+            Operand::Undefined
+            | Operand::Index(_)
+            | Operand::Func(_)
+            | Operand::Reg(_)
+            | Operand::BB(_) => unreachable!("Not allowed to get type of operand: {:?}", operand),
+        }
+    }
+
+    fn has_active_insertion_point(&self) -> bool {
+        self.builder.current_block.is_some()
+    }
+
+    fn current_block_has_terminator(&self) -> bool {
+        let current_func = match self.current_function {
+            Some(idx) => &self.program.funcs[idx],
+            None => return false,
+        };
+        let current_block = match &self.builder.current_block {
+            Some(block) => block,
+            None => return false,
+        };
+
+        let bb = &current_func.cfg[current_block.get_bb_id()];
+        let Some(last_op) = bb.cur.last() else {
+            return false;
+        };
+        matches!(
+            current_func.dfg[last_op.get_op_id()].data,
+            OpData::Br { .. } | OpData::Jump { .. } | OpData::Ret { .. }
+        )
+    }
+
+    // This method is used to insert terminator which does not block the emitting of following instructions, such as conditional branch in the middle of if-else.
+    // Check whether the current block already has a terminator, if not, insert one with the given OpData.
+    fn insert_terminator_if_needed(&mut self, op_data: OpData) {
+        if !self.has_active_insertion_point() || self.current_block_has_terminator() {
+            return;
+        }
+
+        let mut ctx = context_or_err!(self, "Terminator insertion outside function");
+        self.builder
+            .create(&mut ctx, ir::Op::new(Type::Void, vec![], op_data));
+    }
+
+    // This method is used to insert terminator which blocks the emitting of following instructions, such as return, break, continue and goto.
+    fn insert_terminator_and_unplug(&mut self, op_data: OpData) {
+        self.insert_terminator_if_needed(op_data);
+        self.builder.current_block = None;
+        self.builder.current_inst = None;
+    }
+
     pub fn emit(&mut self, node_id: NodeId) -> Option<Operand> {
         fn flat_to_indices(index: usize, dims: &[u32]) -> Vec<usize> {
             if dims.is_empty() {
@@ -71,11 +136,7 @@ impl Emit {
         fn literal_from_const_node(ast: &AST, node_id: NodeId) -> Literal {
             match &ast[node_id] {
                 Node::Literal(lit) => lit.clone(),
-                Node::UnaryOp {
-                    op: ast::Op::Cast(from, to),
-                    operand,
-                    ..
-                } => {
+                Node::UnaryOp { op, operand, .. } => {
                     let lit = match &ast[*operand] {
                         Node::Literal(lit) => lit,
                         _ => panic!(
@@ -84,13 +145,23 @@ impl Emit {
                         ),
                     };
 
-                    match (from, to, lit) {
-                        (Type::Int, Type::Float, Literal::Int(v)) => Literal::Float(*v as f32),
-                        (Type::Float, Type::Int, Literal::Float(v)) => Literal::Int(*v as i32),
-                        _ => panic!(
-                            "Unsupported global cast initializer: from {:?}, to {:?}, lit {:?}",
-                            from, to, lit
-                        ),
+                    // Remember, SysY doesn't have Bool literals.
+                    match op {
+                        ast::Op::Int2Float => match lit {
+                            Literal::Int(i) => Literal::Float(*i as f32),
+                            _ => panic!(
+                                "Int2Float operand must be Int literal: {:?}",
+                                ast[*operand]
+                            ),
+                        },
+                        ast::Op::Float2Int => match lit {
+                            Literal::Float(f) => Literal::Int(*f as i32),
+                            _ => panic!(
+                                "Float2Int operand must be Float literal: {:?}",
+                                ast[*operand]
+                            ),
+                        },
+                        _ => unreachable!("Only Int2Float and Float2Int should be used in global initializer casts"),
                     }
                 }
                 _ => panic!(
@@ -143,6 +214,32 @@ impl Emit {
             op
         }
 
+        fn emit_cast(this: &mut Emit, operand: Operand, from: Type, to: Type) -> Operand {
+            if from == to {
+                return operand;
+            }
+
+            let op_data = match (&from, &to) {
+                (Type::Bool, Type::Int) => OpData::Zext { value: operand },
+                (Type::Int, Type::Bool) => OpData::SNe {
+                    lhs: operand,
+                    rhs: Operand::Int(0),
+                },
+                (Type::Float, Type::Bool) => OpData::ONe {
+                    lhs: operand,
+                    rhs: Operand::Float(0.0),
+                },
+                (Type::Bool, Type::Float) => OpData::Uitofp { value: operand },
+                (Type::Int, Type::Float) => OpData::Sitofp { value: operand },
+                (Type::Float, Type::Int) => OpData::Fptosi { value: operand },
+                _ => panic!("Unsupported implicit cast in Emit: {:?} -> {:?}", from, to),
+            };
+
+            let mut ctx = context_or_err!(this, "Cast outside function");
+            this.builder
+                .create(&mut ctx, ir::Op::new(to, vec![], op_data))
+        }
+
         match &self.ast[node_id] {
             Node::DeclAggr { decls } => {
                 let ids: Vec<NodeId> = decls.clone();
@@ -165,7 +262,7 @@ impl Emit {
                 self.current_function = Some(self.program.funcs.add(Function::new(
                     name.clone(),
                     false,
-                    typ,
+                    typ.clone(),
                 )));
 
                 if let Some(func_id) = self.current_function {
@@ -179,14 +276,6 @@ impl Emit {
                     self.syms.enter_scope();
 
                     for (i, (arg_name, arg_typ)) in params.iter().enumerate() {
-                        let get_arg = self.builder.create(
-                            &mut ctx,
-                            ir::Op::new(
-                                arg_typ.clone(),
-                                vec![Attr::Name(arg_name.clone())],
-                                OpData::GetArg(Operand::ParamId(i as u32)),
-                            ),
-                        );
                         let alloca = self.builder.create(
                             &mut ctx,
                             ir::Op::new(
@@ -208,7 +297,11 @@ impl Emit {
                                 vec![],
                                 OpData::Store {
                                     addr: alloca.clone(),
-                                    value: get_arg,
+                                    value: Operand::Param {
+                                        idx: i,
+                                        name: arg_name.clone(),
+                                        typ: arg_typ.clone(),
+                                    },
                                 },
                             ),
                         );
@@ -230,6 +323,23 @@ impl Emit {
                 }
 
                 self.emit(body);
+
+                if self.has_active_insertion_point() && !self.current_block_has_terminator() {
+                    crate::debug::info!(
+                        "Inserting implicit return at the end of function. current_block: {:?}, fnDecl: {:?}",
+                        self.builder.current_block, self.ast[node_id]
+                    );
+                    match typ {
+                        Type::Function { return_type, .. } => {
+                            if !matches!(*return_type, Type::Void) {
+                                // TODO: Add reachability check to determine whether the implicit return is actually reachable.
+                            }
+                        }
+                        _ => panic!("Function type expected"),
+                    }
+                    self.insert_terminator_and_unplug(OpData::Ret { value: None });
+                }
+
                 self.syms.exit_scope();
                 None
             }
@@ -283,6 +393,9 @@ impl Emit {
                     );
                     self.globals.insert(name, alloca);
                 } else {
+                    if self.current_function.is_some() && !self.has_active_insertion_point() {
+                        return None;
+                    }
                     let alloca = {
                         let mut ctx = context!(self);
                         self.builder.create(
@@ -359,6 +472,9 @@ impl Emit {
                     );
                     self.globals.insert(name, alloca);
                 } else {
+                    if self.current_function.is_some() && !self.has_active_insertion_point() {
+                        return None;
+                    }
                     let (dims, base) = match &typ {
                         Type::Array { dims, base } => (dims.clone(), *base.clone()),
                         _ => panic!("VarArray typ is not Array"),
@@ -460,16 +576,15 @@ impl Emit {
                 None
             }
             Node::Return(expr) => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let expr = *expr;
                 let value = match expr {
                     Some(e) => Some(emit_rval(self, e)),
                     None => None,
                 };
-                let mut ctx = context_or_err!(self, "Return outside function");
-                self.builder.create(
-                    &mut ctx,
-                    ir::Op::new(Type::Void, vec![], OpData::Ret { value }),
-                );
+                self.insert_terminator_and_unplug(OpData::Ret { value });
                 None
             }
             Node::If {
@@ -481,75 +596,94 @@ impl Emit {
                 let then_block = *then_block;
                 let else_block = *else_block;
 
-                let (then_bb, else_bb, end_bb) = {
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    (
-                        self.builder.create_new_block(&mut ctx),
-                        if else_block.is_some() {
-                            Some(self.builder.create_new_block(&mut ctx))
-                        } else {
-                            None
-                        },
-                        self.builder.create_new_block(&mut ctx),
-                    )
-                };
-
-                let cond = emit_rval(self, condition);
-                {
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Br {
-                                cond,
-                                then_bb: then_bb.clone(),
-                                else_bb: else_bb.clone().unwrap_or_else(|| end_bb.clone()),
-                            },
-                        ),
-                    );
-                }
-
-                self.builder.set_current_block(then_bb);
-                self.emit(then_block);
-                {
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: end_bb.clone(),
-                            },
-                        ),
-                    );
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
                 }
 
                 if let Some(else_id) = else_block {
-                    let else_bb_id = else_bb.expect("Else block must exist");
-                    self.builder.set_current_block(else_bb_id);
-                    self.emit(else_id);
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: end_bb.clone(),
-                            },
-                        ),
-                    );
-                }
+                    let (then_bb, else_bb) = {
+                        let mut ctx = context_or_err!(self, "If statement outside function");
+                        (
+                            self.builder.create_new_block(&mut ctx),
+                            self.builder.create_new_block(&mut ctx),
+                        )
+                    };
 
-                self.builder.set_current_block(end_bb);
+                    let cond = emit_rval(self, condition);
+                    self.insert_terminator_if_needed(OpData::Br {
+                        cond,
+                        then_bb: then_bb.clone(),
+                        else_bb: else_bb.clone(),
+                    });
+
+                    self.builder.set_current_block(then_bb.clone());
+                    self.emit(then_block);
+                    let then_fallthrough = self.builder.current_block.clone();
+
+                    self.builder.set_current_block(else_bb.clone());
+                    self.emit(else_id);
+                    let else_fallthrough = self.builder.current_block.clone();
+
+                    if then_fallthrough.is_some() || else_fallthrough.is_some() {
+                        let end_bb = {
+                            let mut ctx = context_or_err!(self, "If statement outside function");
+                            self.builder.create_new_block(&mut ctx)
+                        };
+
+                        if let Some(bb) = then_fallthrough {
+                            self.builder.set_current_block(bb);
+                            self.insert_terminator_if_needed(OpData::Jump {
+                                target_bb: end_bb.clone(),
+                            });
+                        }
+
+                        if let Some(bb) = else_fallthrough {
+                            self.builder.set_current_block(bb);
+                            self.insert_terminator_if_needed(OpData::Jump {
+                                target_bb: end_bb.clone(),
+                            });
+                        }
+
+                        self.builder.set_current_block(end_bb);
+                    } else {
+                        self.builder.current_block = None;
+                        self.builder.current_inst = None;
+                    }
+                } else {
+                    let (then_bb, end_bb) = {
+                        let mut ctx = context_or_err!(self, "If statement outside function");
+                        (
+                            self.builder.create_new_block(&mut ctx),
+                            self.builder.create_new_block(&mut ctx),
+                        )
+                    };
+
+                    let cond = emit_rval(self, condition);
+                    self.insert_terminator_if_needed(OpData::Br {
+                        cond,
+                        then_bb: then_bb.clone(),
+                        else_bb: end_bb.clone(),
+                    });
+
+                    self.builder.set_current_block(then_bb);
+                    self.emit(then_block);
+                    if self.has_active_insertion_point() {
+                        self.insert_terminator_if_needed(OpData::Jump {
+                            target_bb: end_bb.clone(),
+                        });
+                    }
+
+                    self.builder.set_current_block(end_bb);
+                }
                 None
             }
             Node::While { condition, body } => {
                 let condition = *condition;
                 let body = *body;
+
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
 
                 let (while_entry, while_body, while_end) = {
                     let mut ctx = context_or_err!(self, "While statement outside function");
@@ -557,36 +691,20 @@ impl Emit {
                     let while_body = self.builder.create_new_block(&mut ctx);
                     let while_end = self.builder.create_new_block(&mut ctx);
 
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: while_entry.clone(),
-                            },
-                        ),
-                    );
                     (while_entry, while_body, while_end)
                 };
 
+                self.insert_terminator_if_needed(OpData::Jump {
+                    target_bb: while_entry.clone(),
+                });
+
                 self.builder.set_current_block(while_entry.clone());
                 let cond = emit_rval(self, condition);
-                {
-                    let mut ctx = context_or_err!(self, "While statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Br {
-                                cond,
-                                then_bb: while_body.clone(),
-                                else_bb: while_end.clone(),
-                            },
-                        ),
-                    );
-                }
+                self.insert_terminator_if_needed(OpData::Br {
+                    cond,
+                    then_bb: while_body.clone(),
+                    else_bb: while_end.clone(),
+                });
 
                 self.builder.set_current_block(while_body);
                 self.builder.push_loop(LoopInfo {
@@ -596,63 +714,48 @@ impl Emit {
                 self.emit(body);
                 self.builder.pop_loop();
 
-                {
-                    let mut ctx = context_or_err!(self, "While statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: while_entry,
-                            },
-                        ),
-                    );
+                if self.has_active_insertion_point() {
+                    self.insert_terminator_if_needed(OpData::Jump {
+                        target_bb: while_entry,
+                    });
                 }
 
                 self.builder.set_current_block(while_end);
                 None
             }
             Node::Break => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let loop_info = self
                     .builder
                     .loop_stack
                     .last()
                     .unwrap_or_else(|| panic!("Break statement not inside a loop"));
-                let mut ctx = context_or_err!(self, "Break statement not inside a function");
-                self.builder.create(
-                    &mut ctx,
-                    ir::Op::new(
-                        Type::Void,
-                        vec![],
-                        OpData::Jump {
-                            target_bb: loop_info.end_block.clone().unwrap(),
-                        },
-                    ),
-                );
+                self.insert_terminator_and_unplug(OpData::Jump {
+                    target_bb: loop_info.end_block.clone().unwrap(),
+                });
                 None
             }
             Node::Continue => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let loop_info = self
                     .builder
                     .loop_stack
                     .last()
                     .unwrap_or_else(|| panic!("Continue statement not inside a loop"));
 
-                let mut ctx = context_or_err!(self, "Continue statement not inside a function");
-                self.builder.create(
-                    &mut ctx,
-                    ir::Op::new(
-                        Type::Void,
-                        vec![],
-                        OpData::Jump {
-                            target_bb: loop_info.while_entry.clone().unwrap(),
-                        },
-                    ),
-                );
+                self.insert_terminator_and_unplug(OpData::Jump {
+                    target_bb: loop_info.while_entry.clone().unwrap(),
+                });
                 None
             }
             Node::Assign { lhs, rhs } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let lhs = *lhs;
                 let rhs = *rhs;
 
@@ -685,6 +788,9 @@ impl Emit {
                 }
             }
             Node::ArrayAccess { name, indices, typ } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let name = name.clone();
                 let indices: Vec<NodeId> = indices.clone();
                 let typ = typ.clone();
@@ -698,8 +804,7 @@ impl Emit {
                 let ptr_typ = Type::Pointer {
                     base: Box::new(typ),
                 };
-                let ptr_addr = 
-                if let Some(local_ptr) = self.syms.get(&name) {
+                let ptr_addr = if let Some(local_ptr) = self.syms.get(&name) {
                     self.builder.create(
                         &mut ctx,
                         ir::Op::new(
@@ -708,7 +813,7 @@ impl Emit {
                             OpData::GEP {
                                 base: local_ptr.clone(),
                                 indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
+                                    .chain(index_ops)
                                     .collect(),
                             },
                         ),
@@ -728,7 +833,7 @@ impl Emit {
                             OpData::GEP {
                                 base: global_id.clone(),
                                 indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops.into_iter())
+                                    .chain(index_ops)
                                     .collect(),
                             },
                         ),
@@ -757,6 +862,9 @@ impl Emit {
                 func_name,
                 args,
             } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let typ = typ.clone();
                 let func_name = func_name.clone();
                 let args: Vec<NodeId> = args.clone();
@@ -781,6 +889,9 @@ impl Emit {
                 Some(call_op)
             }
             Node::BinaryOp { op, .. } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let op = op.clone();
 
                 let mut op_list: Vec<NodeId> = vec![];
@@ -801,6 +912,8 @@ impl Emit {
                     ctx: &mut BuilderContext,
                     lhs: Operand,
                     rhs: Operand,
+                    lhs_typ: Type,
+                    rhs_typ: Type,
                     op: ast::Op,
                     typ: Type,
                 ) -> Operand {
@@ -841,53 +954,88 @@ impl Emit {
                             }
                         }
                         ast::Op::Eq => {
-                            if typ == Type::Int {
-                                OpData::SEq { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SEq { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OEq { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Eq operator");
+                                }
                             } else {
-                                OpData::OEq { lhs, rhs }
+                                panic!("Eq operator only returns Bool type");
                             }
                         }
                         ast::Op::Ne => {
-                            if typ == Type::Int {
-                                OpData::SNe { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SNe { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::ONe { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Ne operator");
+                                }
                             } else {
-                                OpData::ONe { lhs, rhs }
+                                panic!("Ne operator only returns Bool type");
                             }
                         }
                         ast::Op::Gt => {
-                            if typ == Type::Int {
-                                OpData::SGt { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SGt { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OGt { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Gt operator");
+                                }
                             } else {
-                                OpData::OGt { lhs, rhs }
+                                panic!("Gt operator only returns Bool type");
                             }
                         }
                         ast::Op::Lt => {
-                            if typ == Type::Int {
-                                OpData::SLt { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SLt { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OLt { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Lt operator");
+                                }
                             } else {
-                                OpData::OLt { lhs, rhs }
+                                panic!("Lt operator only returns Bool type");
                             }
                         }
                         ast::Op::Ge => {
-                            if typ == Type::Int {
-                                OpData::SGe { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SGe { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OGe { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Ge operator");
+                                }
                             } else {
-                                OpData::OGe { lhs, rhs }
+                                panic!("Ge operator only returns Bool type");
                             }
                         }
                         ast::Op::Le => {
-                            if typ == Type::Int {
-                                OpData::SLe { lhs, rhs }
+                            if typ == Type::Bool {
+                                if lhs_typ == Type::Int && rhs_typ == Type::Int {
+                                    OpData::SLe { lhs, rhs }
+                                } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
+                                    OpData::OLe { lhs, rhs }
+                                } else {
+                                    panic!("Types of lhs and rhs must match for Le operator");
+                                }
                             } else {
-                                OpData::OLe { lhs, rhs }
+                                panic!("Le operator only returns Bool type");
                             }
                         }
                         ast::Op::And | ast::Op::Or => unreachable!("And/Or handled above"),
                         _ => panic!("Unsupported binary operator {:?} in Emit", op),
                     };
 
-                    let bin_op = builder.create(ctx, ir::Op::new(typ, vec![], op_data));
-                    bin_op
+                    builder.create(ctx, ir::Op::new(typ, vec![], op_data))
                 }
 
                 let mut res = Operand::Value(0);
@@ -907,10 +1055,10 @@ impl Emit {
                                     &mut ctx,
                                     ir::Op::new(
                                         Type::Pointer {
-                                            base: Box::new(Type::Int),
+                                            base: Box::new(Type::Bool),
                                         },
                                         vec![Attr::Promotion],
-                                        OpData::Alloca(Type::Int),
+                                        OpData::Alloca(Type::Bool),
                                     ),
                                 );
                                 self.builder.create(
@@ -920,7 +1068,7 @@ impl Emit {
                                         vec![],
                                         OpData::Store {
                                             addr: result_alloca.clone(),
-                                            value: Operand::Int(0),
+                                            value: Operand::Bool(false),
                                         },
                                     ),
                                 );
@@ -988,7 +1136,7 @@ impl Emit {
                             let load_result = self.builder.create(
                                 &mut ctx,
                                 ir::Op::new(
-                                    Type::Int,
+                                    Type::Bool,
                                     vec![],
                                     OpData::Load {
                                         addr: result_alloca,
@@ -1005,10 +1153,10 @@ impl Emit {
                                     &mut ctx,
                                     ir::Op::new(
                                         Type::Pointer {
-                                            base: Box::new(Type::Int),
+                                            base: Box::new(Type::Bool),
                                         },
                                         vec![Attr::Promotion],
-                                        OpData::Alloca(Type::Int),
+                                        OpData::Alloca(Type::Bool),
                                     ),
                                 );
                                 self.builder.create(
@@ -1018,7 +1166,7 @@ impl Emit {
                                         vec![],
                                         OpData::Store {
                                             addr: result_alloca.clone(),
-                                            value: Operand::Int(1),
+                                            value: Operand::Bool(true),
                                         },
                                     ),
                                 );
@@ -1078,7 +1226,7 @@ impl Emit {
                             let load_result = self.builder.create(
                                 &mut ctx,
                                 ir::Op::new(
-                                    Type::Int,
+                                    Type::Bool,
                                     vec![],
                                     OpData::Load {
                                         addr: result_alloca,
@@ -1091,19 +1239,28 @@ impl Emit {
                         _ => {}
                     }
 
-                    let lhs_op = if idx == 0 {
+                    let mut lhs_op = if idx == 0 {
                         emit_rval(self, lhs)
                     } else {
                         // It's impossibe that res is not a Value operand,
                         // since the only way to get a non-Value operand is from a short-circuit op, which must be the first op in the list.
                         res
                     };
+                    let expected_lhs_typ = node_value_type(&self.ast, lhs);
+                    let actual_lhs_typ = self.get_type(&lhs_op);
+                    if actual_lhs_typ != expected_lhs_typ {
+                        lhs_op = emit_cast(self, lhs_op, actual_lhs_typ, expected_lhs_typ);
+                    }
                     let rhs_op = emit_rval(self, rhs);
+                    let lhs_typ = self.get_type(&lhs_op);
+                    let rhs_typ = self.get_type(&rhs_op);
                     let new_op_id = emit_code(
                         &mut self.builder,
                         &mut context_or_err!(self, "BinaryOp outside function"),
                         lhs_op,
                         rhs_op,
+                        lhs_typ,
+                        rhs_typ,
                         op_kind,
                         match &self.ast[*op_id] {
                             Node::BinaryOp { typ, .. } => typ.clone(),
@@ -1115,6 +1272,9 @@ impl Emit {
                 Some(res)
             }
             Node::UnaryOp { typ, op, operand } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let typ = typ.clone();
                 let op = op.clone();
                 let operand = *operand;
@@ -1140,24 +1300,29 @@ impl Emit {
                         }
                     }
                     ast::Op::Not => {
-                        if typ == Type::Int {
-                            OpData::SEq {
+                        if typ == Type::Bool {
+                            OpData::Xor {
                                 lhs: operand_op,
-                                rhs: Operand::Int(0),
+                                rhs: Operand::Bool(true),
                             }
                         } else {
                             panic!(
-                                "Not operator only supports Int type: {:?}",
+                                "Not operator only supports Bool type: {:?}",
                                 self.ast[node_id]
                             );
                         }
                     }
-                    ast::Op::Cast(from, to) => match (&from, &to) {
-                        (Type::Int, Type::Float) => OpData::Sitofp { value: operand_op },
-                        (Type::Float, Type::Int) => OpData::Fptosi { value: operand_op },
-                        _ => {
-                            panic!("Unsupported cast from {:?} to {:?}", from, to);
-                        }
+                    ast::Op::Bool2Int => OpData::Zext { value: operand_op },
+                    ast::Op::Int2Bool => OpData::SNe {
+                        lhs: operand_op,
+                        rhs: Operand::Int(0),
+                    },
+                    ast::Op::Float2Int => OpData::Fptosi { value: operand_op },
+                    ast::Op::Int2Float => OpData::Sitofp { value: operand_op },
+                    ast::Op::Bool2Float => OpData::Uitofp { value: operand_op },
+                    ast::Op::Float2Bool => OpData::ONe {
+                        lhs: operand_op,
+                        rhs: Operand::Float(0.0),
                     },
                     _ => {
                         panic!(
@@ -1221,10 +1386,6 @@ impl Emit {
             }
             _ => None,
         }
-    }
-
-    pub fn emit_flattened(&mut self, _node_id: NodeId) {
-        todo!()
     }
 }
 

@@ -4,6 +4,7 @@ use strum_macros::EnumDiscriminants;
 
 use crate::asm::config::Reg;
 use crate::base::Type;
+use crate::debug::info;
 use crate::frontend::ast::Literal;
 use crate::utils::arena::*;
 
@@ -16,7 +17,6 @@ pub type DFG = IndexedArena<Op>;
 pub enum OpData {
     // customized instructions for convenience
     GlobalAlloca(u32),
-    GetArg(Operand),
     // getelementptr
     GEP {
         base: Operand,
@@ -25,7 +25,7 @@ pub enum OpData {
     },
     Move {
         value: Operand,
-        reg: Reg,
+        reg: Operand,
     },
     Declare {
         name: String,
@@ -163,6 +163,12 @@ pub enum OpData {
     Fptosi {
         value: Operand,
     }, // float to int
+    Uitofp {
+        value: Operand,
+    }, // bool to float
+    Zext {
+        value: Operand,
+    }, // bool to int
 
     // SysY doesn't support bitwise shift for float
     /// Memory operations
@@ -221,6 +227,7 @@ impl OpData {
                 | OpData::Jump { .. }
                 | OpData::Ret { .. }
                 | OpData::Move { .. }
+                | OpData::Alloca(_)
                 | OpData::GlobalAlloca(_)
                 | OpData::Declare { .. }
         )
@@ -230,7 +237,6 @@ impl OpData {
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data {
-            OpData::GetArg(idx) => write!(f, "get_arg <idx = {}>", idx),
             OpData::GEP { base, indices } => {
                 write!(f, "gep {}, [", base);
                 for (i, index) in indices.iter().enumerate() {
@@ -299,6 +305,8 @@ impl std::fmt::Display for Op {
 
             OpData::Sitofp { value } => write!(f, "sitofp {}", value),
             OpData::Fptosi { value } => write!(f, "fptosi {}", value),
+            OpData::Uitofp { value } => write!(f, "uitofp {}", value),
+            OpData::Zext { value } => write!(f, "zext {}", value),
 
             OpData::Store { addr, value } => write!(f, "store {}, {}", addr, value),
             OpData::Load { addr } => write!(f, "load {}", addr),
@@ -371,10 +379,6 @@ impl Op {
         self.data.is(op_typ)
     }
 
-    pub fn is_inner_control_flow(&self) -> bool {
-        self.data.is_inner_control_flow()
-    }
-
     pub fn is_impure(&self) -> bool {
         self.data.is_impure()
     }
@@ -382,16 +386,22 @@ impl Op {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operand {
+    // Ids
     Value(usize),
     BB(usize),
     Func(usize),
     Global(usize),
+
+    // Literals
     Int(i32),
     Float(f32),
+    Bool(bool),
+
     // for GEP: Raw integer index
     Index(usize),
-    // for GetArg
-    ParamId(u32),
+    // Param
+    Param { idx: usize, name: String, typ: Type },
+    // for move
     Reg(Reg),
     // for phi
     Undefined,
@@ -428,12 +438,6 @@ impl Operand {
             _ => panic!("Operand is not a Float: {:?}", self),
         }
     }
-    pub fn get_param_id(&self) -> u32 {
-        match self {
-            Operand::ParamId(param_id) => *param_id,
-            _ => panic!("Operand is not a ParamId: {:?}", self),
-        }
-    }
     pub fn get_func_id(&self) -> usize {
         match self {
             Operand::Func(func_id) => *func_id,
@@ -446,6 +450,9 @@ impl Operand {
             _ => panic!("Operand is not a Reg: {:?}", self),
         }
     }
+    pub fn is_literal(&self) -> bool {
+        matches!(self, Operand::Int(_) | Operand::Float(_) | Operand::Bool(_))
+    }
 }
 
 impl std::fmt::Display for Operand {
@@ -456,8 +463,9 @@ impl std::fmt::Display for Operand {
             Operand::Global(global_id) => write!(f, "@{}", global_id),
             Operand::Int(value) => write!(f, "{}", value),
             Operand::Float(value) => write!(f, "{}", value),
+            Operand::Bool(value) => write!(f, "{}", value),
+            Operand::Param { idx, .. } => write!(f, "%arg{}", idx),
             Operand::Index(index) => write!(f, "{}", index),
-            Operand::ParamId(param_id) => write!(f, "{}", param_id),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
             Operand::Reg(reg) => write!(f, "{}", reg),
             Operand::Undefined => write!(f, "undefined"),
@@ -527,10 +535,20 @@ impl Arena<Op> for IndexedArena<Op> {
             }
         });
 
+        info!(
+            "DFG GC: {} ops collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
+        );
+
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
-                _ => panic!("DFG gc: index {} is not a valid NewIndex: {:?}", *idx, old_arena.get(*idx)),
+                _ => panic!(
+                    "DFG gc: index {} is not a valid NewIndex: {:?}",
+                    *idx,
+                    old_arena.get(*idx)
+                ),
             };
         };
 
@@ -610,7 +628,10 @@ impl Arena<Op> for IndexedArena<Op> {
                         remap_value(rhs, &old_arena);
                     }
 
-                    OpData::Sitofp { value } | OpData::Fptosi { value } => {
+                    OpData::Sitofp { value }
+                    | OpData::Fptosi { value }
+                    | OpData::Uitofp { value }
+                    | OpData::Zext { value } => {
                         remap_value(value, &old_arena);
                     }
                     OpData::Store { addr, value } => {
@@ -653,10 +674,7 @@ impl Arena<Op> for IndexedArena<Op> {
                         }
                     }
 
-                    // Get global should be processed outside of gc()
-                    // TODO: As long as program global arena is not changed, the indices are stable.
                     OpData::GlobalAlloca { .. }
-                    | OpData::GetArg { .. }
                     | OpData::Alloca(_)
                     | OpData::Jump { .. }
                     | OpData::Declare { .. } => { /* no operands to rewrite */ }
@@ -673,9 +691,15 @@ impl IndexedArena<Op> {
     pub fn add_use(&mut self, op_idx: Operand, use_idx: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
+            Operand::Global(global_id) => global_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
+            Operand::Int(_)
+            | Operand::Float(_)
+            | Operand::Bool(_)
+            | Operand::Undefined
+            | Operand::Param { .. }
+            | Operand::Index(_) => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
         let node = &mut self[op_id];
@@ -690,9 +714,15 @@ impl IndexedArena<Op> {
     pub fn remove_use(&mut self, op_idx: Operand, use_idx: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
+            Operand::Global(global_id) => global_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
+            Operand::Int(_)
+            | Operand::Float(_)
+            | Operand::Bool(_)
+            | Operand::Undefined
+            | Operand::Param { .. }
+            | Operand::Index(_) => return,
             _ => panic!(
                 "Operand is not a valid data: {}: {:?}",
                 op_idx.clone(),
@@ -719,9 +749,15 @@ impl IndexedArena<Op> {
     pub fn replace_use(&mut self, op_idx: Operand, old: Operand, new: Operand) {
         let op_id = match op_idx {
             Operand::Value(op_id) => op_id,
+            Operand::Global(global_id) => global_id,
             // literals don't have uses in the DFG
             // For global variables, we don't maintain uses in the DFG, so just return.
-            Operand::Int(_) | Operand::Float(_) | Operand::Global(_) | Operand::Undefined => return,
+            Operand::Int(_)
+            | Operand::Float(_)
+            | Operand::Bool(_)
+            | Operand::Undefined
+            | Operand::Param { .. }
+            | Operand::Index(_) => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
 
@@ -763,7 +799,10 @@ impl IndexedArena<Op> {
                 };
             }
 
-            OpData::Sitofp { value } | OpData::Fptosi { value } => {
+            OpData::Sitofp { value }
+            | OpData::Fptosi { value }
+            | OpData::Uitofp { value }
+            | OpData::Zext { value } => {
                 if *value == old {
                     *value = new.clone();
                 };
@@ -825,7 +864,6 @@ impl IndexedArena<Op> {
                 }
             }
             OpData::GlobalAlloca { .. }
-            | OpData::GetArg { .. }
             | OpData::Alloca(_)
             | OpData::Jump { .. }
             | OpData::Declare { .. } => { /* no operands to replace */ }

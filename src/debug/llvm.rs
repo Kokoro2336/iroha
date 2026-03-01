@@ -4,12 +4,11 @@
 use crate::base::ir::*;
 use crate::base::Pass;
 use crate::base::Type;
-use crate::debug::info;
 use crate::frontend::ast;
 use crate::utils::arena::{ArenaItem, IndexedArena};
 use std::fmt::Write;
 
-pub trait DumpLlvm {
+pub trait DumpLLVM {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error>;
 }
 
@@ -29,13 +28,7 @@ fn value_operand_name(id: usize, ctx: &DumpContext) -> String {
     if let Some(func) = ctx.function {
         let op = &func.dfg[id];
         if let Some(name) = op_name_attr(op) {
-            if matches!(op.data, OpData::Alloca(_)) {
-                return format!("@{}", name);
-            }
             return format!("%{}", name);
-        }
-        if matches!(op.data, OpData::Alloca(_)) {
-            return format!("@{}", id);
         }
     }
     format!("%{}", id)
@@ -49,12 +42,13 @@ fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
     format!("@{}", id)
 }
 
-impl DumpLlvm for Type {
+impl DumpLLVM for Type {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
             Type::Int => write!(s, "i32")?,
             Type::Float => write!(s, "float")?,
+            Type::Bool => write!(s, "i1")?,
             Type::Void => write!(s, "void")?,
             Type::Pointer { base } => write!(s, "{}*", base.dump_to_llvm(ctx)?)?,
             Type::Array { dims, base } => {
@@ -71,7 +65,7 @@ impl DumpLlvm for Type {
     }
 }
 
-impl DumpLlvm for Operand {
+impl DumpLLVM for Operand {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
@@ -79,9 +73,10 @@ impl DumpLlvm for Operand {
             Operand::Global(id) => write!(s, "{}", global_operand_name(*id, ctx))?,
             Operand::Int(val) => write!(s, "{}", val)?,
             Operand::Float(val) => write!(s, "{}", val)?,
+            Operand::Bool(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
+            Operand::Param { idx, .. } => write!(s, "%arg{}", idx)?,
             Operand::Func(id) => write!(s, "@{}", ctx.program.funcs[*id].name)?,
-            Operand::ParamId(id) => write!(s, "{}", id)?,
             Operand::Index(id) => write!(s, "{}", id)?,
             Operand::Reg(reg) => write!(s, "{:?}", reg)?,
             Operand::Undefined => write!(s, "undef")?,
@@ -90,7 +85,7 @@ impl DumpLlvm for Operand {
     }
 }
 
-impl DumpLlvm for Op {
+impl DumpLLVM for Op {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match &self.data {
@@ -442,6 +437,50 @@ impl DumpLlvm for Op {
                     self.typ.dump_to_llvm(ctx)?
                 )?
             }
+            OpData::Zext { value } => {
+                let from_op_typ = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Bool;
+                        if let Some(f) = ctx.function {
+                            t = f.dfg[*id].typ.clone();
+                        }
+                        t
+                    }
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
+                    Operand::Bool(_) => Type::Bool,
+                    _ => Type::Bool,
+                };
+
+                write!(
+                    s,
+                    "zext {} {} to {}",
+                    from_op_typ.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::Uitofp { value } => {
+                let from_op_typ = match value {
+                    Operand::Value(id) => {
+                        let mut t = Type::Bool;
+                        if let Some(f) = ctx.function {
+                            t = f.dfg[*id].typ.clone();
+                        }
+                        t
+                    }
+                    Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
+                    Operand::Bool(_) => Type::Bool,
+                    _ => Type::Bool,
+                };
+
+                write!(
+                    s,
+                    "uitofp {} {} to {}",
+                    from_op_typ.dump_to_llvm(ctx)?,
+                    value.dump_to_llvm(ctx)?,
+                    self.typ.dump_to_llvm(ctx)?
+                )?
+            }
 
             OpData::Jump { target_bb } => write!(s, "br label {}", target_bb.dump_to_llvm(ctx)?)?,
             OpData::Br {
@@ -506,13 +545,6 @@ impl DumpLlvm for Op {
                     }
                 }
             }
-            OpData::GetArg(idx) => {
-                let id = match idx {
-                    Operand::ParamId(id) => *id,
-                    _ => 0,
-                };
-                write!(s, "add {} %arg{}, 0", self.typ.dump_to_llvm(ctx)?, id)?;
-            }
             OpData::Move { value, reg } => {
                 write!(s, "# move {} to reg {:?}", value.dump_to_llvm(ctx)?, reg)?
             }
@@ -563,7 +595,7 @@ impl DumpLlvm for Op {
     }
 }
 
-impl DumpLlvm for BasicBlock {
+impl DumpLLVM for BasicBlock {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let dfg = match ctx.function {
@@ -591,7 +623,7 @@ impl DumpLlvm for BasicBlock {
     }
 }
 
-impl DumpLlvm for Function {
+impl DumpLLVM for Function {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
 
@@ -606,25 +638,20 @@ impl DumpLlvm for Function {
             return Ok(s);
         }
 
-        let ret_ty = if let Type::Function { return_type, .. } = &self.typ {
-            return_type.clone()
+        let (ret_ty, param_types) = if let Type::Function {
+            return_type,
+            param_types,
+        } = &self.typ
+        {
+            (return_type.clone(), param_types)
         } else {
             return Err(std::fmt::Error);
         };
 
         let mut args_str = String::new();
-        let mut get_arg_ops = vec![];
-        for (_id, op) in self.dfg.get_all_items() {
-            if let Some(op) = op {
-                if let OpData::GetArg(Operand::ParamId(id)) = &op.data {
-                    get_arg_ops.push((*id, op.typ.clone()));
-                }
-            }
-        }
-        get_arg_ops.sort_by_key(|a| a.0);
-        for (i, (id, ty)) in get_arg_ops.iter().enumerate() {
-            write!(args_str, "{} %arg{}", ty.dump_to_llvm(ctx)?, id)?;
-            if i < get_arg_ops.len() - 1 {
+        for (i, ty) in param_types.iter().enumerate() {
+            write!(args_str, "{} %arg{}", ty.dump_to_llvm(ctx)?, i)?;
+            if i < param_types.len() - 1 {
                 write!(args_str, ", ")?;
             }
         }
@@ -651,7 +678,7 @@ impl DumpLlvm for Function {
     }
 }
 
-impl DumpLlvm for Program {
+impl DumpLLVM for Program {
     fn dump_to_llvm(&self, _ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let program_ctx = DumpContext {
@@ -828,34 +855,37 @@ where
     }
 }
 
-pub struct DumpLlvmPass {
-    program: Program,
+pub struct DumpLLVMPass<'a> {
+    program: &'a mut Program,
     filename: String,
 }
 
-impl DumpLlvmPass {
-    pub fn new(program: Program, filename: String) -> Self {
+impl<'a> DumpLLVMPass<'a> {
+    pub fn new(program: &'a mut Program, filename: String) -> Self {
         Self { program, filename }
     }
 }
 
-impl Pass<Program> for DumpLlvmPass {
-    fn run(&mut self) -> Program {
+impl Pass<()> for DumpLLVMPass<'_> {
+    fn run(&mut self) {
         let ctx = DumpContext {
-            program: &self.program,
+            program: &*self.program,
             function: None,
         };
         match self.program.dump_to_llvm(&ctx) {
             Ok(s) => {
                 let dump_dir = std::path::Path::new("dump_llvm");
                 if !dump_dir.exists() {
-                    std::fs::create_dir_all(dump_dir).map_err(|e| e.to_string());
+                    if let Err(e) = std::fs::create_dir_all(dump_dir) {
+                        panic!("Error creating dump directory: {}", e);
+                    }
                 }
                 let file_path = dump_dir.join(format!("{}.ll", self.filename));
-                std::fs::write(file_path, s).map_err(|e| e.to_string());
+                if let Err(e) = std::fs::write(file_path, s) {
+                    panic!("Error writing LLVM dump: {}", e);
+                }
             }
-            Err(e) => info!("Error dumping LLVM IR: {}", e),
+            Err(e) => panic!("Error dumping LLVM IR: {}", e),
         }
-        std::mem::take(&mut self.program)
     }
 }

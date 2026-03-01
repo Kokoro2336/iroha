@@ -3,6 +3,7 @@
  */
 use crate::base::Type;
 use crate::utils::arena::*;
+use crate::debug::info;
 
 use strum_macros::EnumDiscriminants;
 
@@ -174,8 +175,14 @@ pub enum Op {
     Plus,
     Minus,
     Not,
+
     // special op which only occurs in type casting
-    Cast(Type, Type),
+    Int2Float,  // Sitofp
+    Float2Int,  // Fptosi
+    Bool2Int,   // Zext
+    Int2Bool,   // Sne with 0
+    Float2Bool, // One with 0.0
+    Bool2Float, // Uitofp
 
     // binary
     Mul,
@@ -250,6 +257,12 @@ impl Arena<Node> for AST {
                 self.storage.push(data);
             }
         });
+
+        info!(
+            "AST GC: {} nodes collected, recycle rate: {:.2}%",
+            old_arena.len() - self.storage.len(),
+            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
+        );
 
         let remap_idx = |idx: &mut NodeId| {
             *idx = match old_arena.get(*idx).unwrap() {

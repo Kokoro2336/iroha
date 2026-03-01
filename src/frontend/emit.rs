@@ -71,6 +71,36 @@ impl Emit {
         }
     }
 
+    fn current_block_has_terminator(&self) -> bool {
+        let current_func = match self.current_function {
+            Some(idx) => &self.program.funcs[idx],
+            None => return false,
+        };
+        let current_bb = match &self.builder.current_block {
+            Some(bb) => bb,
+            None => return false,
+        };
+
+        let bb = &current_func.cfg[current_bb.get_bb_id()];
+        let Some(last_op) = bb.cur.last() else {
+            return false;
+        };
+        matches!(
+            current_func.dfg[last_op.get_op_id()].data,
+            OpData::Br { .. } | OpData::Jump { .. } | OpData::Ret { .. }
+        )
+    }
+
+    fn insert_terminator_if_needed(&mut self, op_data: OpData) {
+        if self.current_block_has_terminator() {
+            return;
+        }
+
+        let mut ctx = context_or_err!(self, "Terminator insertion outside function");
+        self.builder
+            .create(&mut ctx, ir::Op::new(Type::Void, vec![], op_data));
+    }
+
     pub fn emit(&mut self, node_id: NodeId) -> Option<Operand> {
         fn flat_to_indices(index: usize, dims: &[u32]) -> Vec<usize> {
             if dims.is_empty() {
@@ -281,44 +311,23 @@ impl Emit {
 
                 self.emit(body);
 
-                // TODO: Check if the last block has a terminator. If not, insert an implicit return.
-                // This may require control flow analysis.
-                // let needs_terminator = if let Some(current_bb) = &self.builder.current_block {
-                //     let func = &self.program.funcs[self.current_function.unwrap()];
-                //     let bb = &func.cfg[current_bb.get_bb_id()];
-                //     if let Some(last_op) = bb.cur.last() {
-                //         let inst = &func.dfg[last_op.get_op_id()];
-                //         !matches!(
-                //             inst.data,
-                //             OpData::Br { .. } | OpData::Jump { .. } | OpData::Ret { .. }
-                //         )
-                //     } else {
-                //         true
-                //     }
-                // } else {
-                //     false
-                // };
-
-                // if needs_terminator {
-                //     let mut ctx = context_or_err!(self, "Implicit return");
-                //     crate::debug::info!(
-                //         "Inserting implicit return at the end of function. current_block: {:?}, fnDecl: {:?}",
-                //         self.builder.current_block, self.ast[node_id]
-                //     );
-                //     match typ {
-                //         Type::Function { return_type, .. } => {
-                //             if !matches!(*return_type, Type::Void) {
-                //                 panic!("Non-void function missing return statement");
-                //             }
-                //         }
-                //         _ => panic!("Function type expected"),
-                //     }
-                //     self.builder.set_before_inst(&mut ctx, None);
-                //     self.builder.create(
-                //         &mut ctx,
-                //         ir::Op::new(Type::Void, vec![], OpData::Ret { value: None }),
-                //     );
-                // }
+                if !self.current_block_has_terminator() {
+                    let mut ctx = context_or_err!(self, "Implicit return");
+                    crate::debug::info!(
+                        "Inserting implicit return at the end of function. current_block: {:?}, fnDecl: {:?}",
+                        self.builder.current_block, self.ast[node_id]
+                    );
+                    match typ {
+                        Type::Function { return_type, .. } => {
+                            if !matches!(*return_type, Type::Void) {
+                                panic!("Non-void function missing return statement");
+                            }
+                        }
+                        _ => panic!("Function type expected"),
+                    }
+                    self.builder.set_before_inst(&mut ctx, None);
+                    self.insert_terminator_if_needed(OpData::Ret { value: None });
+                }
 
                 self.syms.exit_scope();
                 None
@@ -555,11 +564,7 @@ impl Emit {
                     Some(e) => Some(emit_rval(self, e)),
                     None => None,
                 };
-                let mut ctx = context_or_err!(self, "Return outside function");
-                self.builder.create(
-                    &mut ctx,
-                    ir::Op::new(Type::Void, vec![], OpData::Ret { value }),
-                );
+                self.insert_terminator_if_needed(OpData::Ret { value });
                 None
             }
             Node::If {
@@ -585,53 +590,25 @@ impl Emit {
                 };
 
                 let cond = emit_rval(self, condition);
-                {
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Br {
-                                cond,
-                                then_bb: then_bb.clone(),
-                                else_bb: else_bb.clone().unwrap_or_else(|| end_bb.clone()),
-                            },
-                        ),
-                    );
-                }
+                self.insert_terminator_if_needed(OpData::Br {
+                    cond,
+                    then_bb: then_bb.clone(),
+                    else_bb: else_bb.clone().unwrap_or_else(|| end_bb.clone()),
+                });
 
                 self.builder.set_current_block(then_bb);
                 self.emit(then_block);
-                {
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: end_bb.clone(),
-                            },
-                        ),
-                    );
-                }
+                self.insert_terminator_if_needed(OpData::Jump {
+                    target_bb: end_bb.clone(),
+                });
 
                 if let Some(else_id) = else_block {
                     let else_bb_id = else_bb.expect("Else block must exist");
                     self.builder.set_current_block(else_bb_id);
                     self.emit(else_id);
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: end_bb.clone(),
-                            },
-                        ),
-                    );
+                    self.insert_terminator_if_needed(OpData::Jump {
+                        target_bb: end_bb.clone(),
+                    });
                 }
 
                 self.builder.set_current_block(end_bb);
@@ -646,37 +623,20 @@ impl Emit {
                     let while_entry = self.builder.create_new_block(&mut ctx);
                     let while_body = self.builder.create_new_block(&mut ctx);
                     let while_end = self.builder.create_new_block(&mut ctx);
-
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: while_entry.clone(),
-                            },
-                        ),
-                    );
                     (while_entry, while_body, while_end)
                 };
 
+                self.insert_terminator_if_needed(OpData::Jump {
+                    target_bb: while_entry.clone(),
+                });
+
                 self.builder.set_current_block(while_entry.clone());
                 let cond = emit_rval(self, condition);
-                {
-                    let mut ctx = context_or_err!(self, "While statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Br {
-                                cond,
-                                then_bb: while_body.clone(),
-                                else_bb: while_end.clone(),
-                            },
-                        ),
-                    );
-                }
+                self.insert_terminator_if_needed(OpData::Br {
+                    cond,
+                    then_bb: while_body.clone(),
+                    else_bb: while_end.clone(),
+                });
 
                 self.builder.set_current_block(while_body);
                 self.builder.push_loop(LoopInfo {
@@ -686,19 +646,9 @@ impl Emit {
                 self.emit(body);
                 self.builder.pop_loop();
 
-                {
-                    let mut ctx = context_or_err!(self, "While statement outside function");
-                    self.builder.create(
-                        &mut ctx,
-                        ir::Op::new(
-                            Type::Void,
-                            vec![],
-                            OpData::Jump {
-                                target_bb: while_entry,
-                            },
-                        ),
-                    );
-                }
+                self.insert_terminator_if_needed(OpData::Jump {
+                    target_bb: while_entry,
+                });
 
                 self.builder.set_current_block(while_end);
                 None
@@ -709,17 +659,9 @@ impl Emit {
                     .loop_stack
                     .last()
                     .unwrap_or_else(|| panic!("Break statement not inside a loop"));
-                let mut ctx = context_or_err!(self, "Break statement not inside a function");
-                self.builder.create(
-                    &mut ctx,
-                    ir::Op::new(
-                        Type::Void,
-                        vec![],
-                        OpData::Jump {
-                            target_bb: loop_info.end_block.clone().unwrap(),
-                        },
-                    ),
-                );
+                self.insert_terminator_if_needed(OpData::Jump {
+                    target_bb: loop_info.end_block.clone().unwrap(),
+                });
                 None
             }
             Node::Continue => {
@@ -729,17 +671,9 @@ impl Emit {
                     .last()
                     .unwrap_or_else(|| panic!("Continue statement not inside a loop"));
 
-                let mut ctx = context_or_err!(self, "Continue statement not inside a function");
-                self.builder.create(
-                    &mut ctx,
-                    ir::Op::new(
-                        Type::Void,
-                        vec![],
-                        OpData::Jump {
-                            target_bb: loop_info.while_entry.clone().unwrap(),
-                        },
-                    ),
-                );
+                self.insert_terminator_if_needed(OpData::Jump {
+                    target_bb: loop_info.while_entry.clone().unwrap(),
+                });
                 None
             }
             Node::Assign { lhs, rhs } => {

@@ -190,14 +190,13 @@ impl Builder {
     // constructing data flow
     pub fn add_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder add_users: ctx.dfg is None");
-        let globals = &mut ctx.globals;
         let data = dfg[op.get_op_id()].data.clone();
 
         match data {
             OpData::Load { addr } => {
                 if matches!(addr, Operand::Global(_)) {
-                    // For global variables, we don't maintain uses in the DFG, so just return.
-                    globals.add_use(addr, op.clone());
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
                 } else if matches!(addr, Operand::Value(_)) {
                     dfg.add_use(addr, op);
                 } else {
@@ -206,8 +205,8 @@ impl Builder {
             }
             OpData::Store { addr, value } => {
                 if matches!(addr, Operand::Global(_)) {
-                    // For global variables, we don't maintain uses in the DFG, so just return.
-                    globals.add_use(addr, op.clone());
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
                 } else if matches!(addr, Operand::Value(_)) {
                     dfg.add_use(addr, op.clone());
                 } else {
@@ -273,7 +272,8 @@ impl Builder {
 
             OpData::GEP { base, indices } => {
                 if matches!(base, Operand::Global(_)) {
-                    globals.add_use(base, op.clone());
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
                 } else if matches!(base, Operand::Value(_)) {
                     dfg.add_use(base, op.clone());
                 } else {
@@ -300,13 +300,13 @@ impl Builder {
     // Remove CURRENT Op from Another one's USERS.
     pub fn remove_uses(&mut self, ctx: &mut BuilderContext, op: Operand) {
         let dfg = acquire_dfg!(ctx, "Builder remove_users: ctx.dfg is None");
-        let globals = &mut ctx.globals;
         let data = dfg[op.get_op_id()].data.clone();
 
         match data {
             OpData::Load { addr } => {
                 if matches!(addr, Operand::Global(_)) {
-                    globals.remove_use(addr, op);
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
                 } else if matches!(addr, Operand::Value(_)) {
                     dfg.remove_use(addr, op);
                 } else {
@@ -315,7 +315,8 @@ impl Builder {
             }
             OpData::Store { addr, value } => {
                 if matches!(addr, Operand::Global(_)) {
-                    globals.remove_use(addr, op.clone());
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
                 } else if matches!(addr, Operand::Value(_)) {
                     dfg.remove_use(addr, op.clone());
                 } else {
@@ -390,7 +391,8 @@ impl Builder {
 
             OpData::GEP { base, indices } => {
                 if matches!(base, Operand::Global(_)) {
-                    globals.remove_use(base, op.clone());
+                    // TODO(SCCP): Restore global use tracking after SCCP dead-block/use-list cleanup is stabilized.
+                    // Do not maintain uses for global operands.
                 } else if matches!(base, Operand::Value(_)) {
                     dfg.remove_use(base, op.clone());
                 } else {
@@ -775,7 +777,7 @@ impl Builder {
                     bb.cur.remove(pos);
                 } else {
                     panic!(
-                        "Builder remove_op: instruction {:?} not found in current_block {:?}",
+                        "Builder remove_op: instruction {:?} not found in block {:?}",
                         op, bb_id
                     );
                 }
@@ -822,7 +824,7 @@ impl Builder {
                 pos
             } else {
                 panic!(
-                    "Builder replace_op: instruction {:?} not found in current_block {:?}",
+                    "Builder replace_op: instruction {:?} not found in block {:?}",
                     op_id, bb_id
                 );
             }

@@ -624,6 +624,7 @@ impl<'a> SCCP<'a> {
             .filter(|bb_id| !self.visited.contains(*bb_id))
             .collect::<FxHashSet<usize>>();
 
+        crate::debug::info!("SCCP: dead blocks.");
         dead_blocks.iter().for_each(|bb_id| {
             let (last, terminator) = {
                 let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
@@ -654,7 +655,7 @@ impl<'a> SCCP<'a> {
             // Split users check and removal due to data dependency.
             for inst in cur.iter().rev() {
                 let func_id = self.current_function.unwrap();
-                let (funcs, globals) = (&mut self.program.funcs, &mut self.program.globals);
+                let funcs = &mut self.program.funcs;
                 let dfg = &mut funcs[func_id].dfg;
 
                 // inst can be used by the instructions inside the block, but it cannot be used by instructions outside the block.
@@ -686,16 +687,14 @@ impl<'a> SCCP<'a> {
 
                 match data {
                     OpData::Load { addr } => {
-                        if matches!(addr, Operand::Global(_)) {
-                            globals.remove_use(addr, op);
-                        } else if is_live_value(&addr) {
+                        // TODO(SCCP): Re-enable global use-list maintenance after rewrite/dead-block phases avoid stale-use removals.
+                        if is_live_value(&addr) {
                             dfg.remove_use(addr, op);
                         }
                     }
                     OpData::Store { addr, value } => {
-                        if matches!(addr, Operand::Global(_)) {
-                            globals.remove_use(addr, op.clone());
-                        } else if is_live_value(&addr) {
+                        // TODO(SCCP): Re-enable global use-list maintenance after rewrite/dead-block phases avoid stale-use removals.
+                        if is_live_value(&addr) {
                             dfg.remove_use(addr, op.clone());
                         }
                         if is_live_value(&value) {
@@ -776,9 +775,8 @@ impl<'a> SCCP<'a> {
                     }
 
                     OpData::GEP { base, indices } => {
-                        if matches!(base, Operand::Global(_)) {
-                            globals.remove_use(base, op.clone());
-                        } else if is_live_value(&base) {
+                        // TODO(SCCP): Re-enable global use-list maintenance after rewrite/dead-block phases avoid stale-use removals.
+                        if is_live_value(&base) {
                             dfg.remove_use(base, op.clone());
                         }
                         for index in indices {
@@ -818,7 +816,6 @@ impl<'a> SCCP<'a> {
             // remove the block from cfg
             let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
             cfg.remove(bb_id);
-            crate::debug::info!("SCCP: removed dead block {}", bb_id);
         }
 
         // Collect the surviving phi nodes after rewriting.

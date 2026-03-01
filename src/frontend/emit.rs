@@ -332,7 +332,7 @@ impl Emit {
                     match typ {
                         Type::Function { return_type, .. } => {
                             if !matches!(*return_type, Type::Void) {
-                                panic!("Non-void function missing return statement");
+                                // TODO: Add reachability check to determine whether the implicit return is actually reachable.
                             }
                         }
                         _ => panic!("Function type expected"),

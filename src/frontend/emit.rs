@@ -71,17 +71,21 @@ impl Emit {
         }
     }
 
+    fn has_active_insertion_point(&self) -> bool {
+        self.builder.current_block.is_some()
+    }
+
     fn current_block_has_terminator(&self) -> bool {
         let current_func = match self.current_function {
             Some(idx) => &self.program.funcs[idx],
             None => return false,
         };
-        let current_bb = match &self.builder.current_block {
-            Some(bb) => bb,
+        let current_block = match &self.builder.current_block {
+            Some(block) => block,
             None => return false,
         };
 
-        let bb = &current_func.cfg[current_bb.get_bb_id()];
+        let bb = &current_func.cfg[current_block.get_bb_id()];
         let Some(last_op) = bb.cur.last() else {
             return false;
         };
@@ -92,13 +96,19 @@ impl Emit {
     }
 
     fn insert_terminator_if_needed(&mut self, op_data: OpData) {
-        if self.current_block_has_terminator() {
+        if !self.has_active_insertion_point() || self.current_block_has_terminator() {
             return;
         }
 
         let mut ctx = context_or_err!(self, "Terminator insertion outside function");
         self.builder
             .create(&mut ctx, ir::Op::new(Type::Void, vec![], op_data));
+    }
+
+    fn insert_terminator_and_unplug(&mut self, op_data: OpData) {
+        self.insert_terminator_if_needed(op_data);
+        self.builder.current_block = None;
+        self.builder.current_inst = None;
     }
 
     pub fn emit(&mut self, node_id: NodeId) -> Option<Operand> {
@@ -311,8 +321,7 @@ impl Emit {
 
                 self.emit(body);
 
-                if !self.current_block_has_terminator() {
-                    let mut ctx = context_or_err!(self, "Implicit return");
+                if self.has_active_insertion_point() && !self.current_block_has_terminator() {
                     crate::debug::info!(
                         "Inserting implicit return at the end of function. current_block: {:?}, fnDecl: {:?}",
                         self.builder.current_block, self.ast[node_id]
@@ -325,8 +334,7 @@ impl Emit {
                         }
                         _ => panic!("Function type expected"),
                     }
-                    self.builder.set_before_inst(&mut ctx, None);
-                    self.insert_terminator_if_needed(OpData::Ret { value: None });
+                    self.insert_terminator_and_unplug(OpData::Ret { value: None });
                 }
 
                 self.syms.exit_scope();
@@ -382,6 +390,9 @@ impl Emit {
                     );
                     self.globals.insert(name, alloca);
                 } else {
+                    if self.current_function.is_some() && !self.has_active_insertion_point() {
+                        return None;
+                    }
                     let alloca = {
                         let mut ctx = context!(self);
                         self.builder.create(
@@ -458,6 +469,9 @@ impl Emit {
                     );
                     self.globals.insert(name, alloca);
                 } else {
+                    if self.current_function.is_some() && !self.has_active_insertion_point() {
+                        return None;
+                    }
                     let (dims, base) = match &typ {
                         Type::Array { dims, base } => (dims.clone(), *base.clone()),
                         _ => panic!("VarArray typ is not Array"),
@@ -559,12 +573,15 @@ impl Emit {
                 None
             }
             Node::Return(expr) => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let expr = *expr;
                 let value = match expr {
                     Some(e) => Some(emit_rval(self, e)),
                     None => None,
                 };
-                self.insert_terminator_if_needed(OpData::Ret { value });
+                self.insert_terminator_and_unplug(OpData::Ret { value });
                 None
             }
             Node::If {
@@ -576,53 +593,101 @@ impl Emit {
                 let then_block = *then_block;
                 let else_block = *else_block;
 
-                let (then_bb, else_bb, end_bb) = {
-                    let mut ctx = context_or_err!(self, "If statement outside function");
-                    (
-                        self.builder.create_new_block(&mut ctx),
-                        if else_block.is_some() {
-                            Some(self.builder.create_new_block(&mut ctx))
-                        } else {
-                            None
-                        },
-                        self.builder.create_new_block(&mut ctx),
-                    )
-                };
-
-                let cond = emit_rval(self, condition);
-                self.insert_terminator_if_needed(OpData::Br {
-                    cond,
-                    then_bb: then_bb.clone(),
-                    else_bb: else_bb.clone().unwrap_or_else(|| end_bb.clone()),
-                });
-
-                self.builder.set_current_block(then_bb);
-                self.emit(then_block);
-                self.insert_terminator_if_needed(OpData::Jump {
-                    target_bb: end_bb.clone(),
-                });
-
-                if let Some(else_id) = else_block {
-                    let else_bb_id = else_bb.expect("Else block must exist");
-                    self.builder.set_current_block(else_bb_id);
-                    self.emit(else_id);
-                    self.insert_terminator_if_needed(OpData::Jump {
-                        target_bb: end_bb.clone(),
-                    });
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
                 }
 
-                self.builder.set_current_block(end_bb);
+                if let Some(else_id) = else_block {
+                    let (then_bb, else_bb) = {
+                        let mut ctx = context_or_err!(self, "If statement outside function");
+                        (
+                            self.builder.create_new_block(&mut ctx),
+                            self.builder.create_new_block(&mut ctx),
+                        )
+                    };
+
+                    let cond = emit_rval(self, condition);
+                    self.insert_terminator_if_needed(OpData::Br {
+                        cond,
+                        then_bb: then_bb.clone(),
+                        else_bb: else_bb.clone(),
+                    });
+
+                    self.builder.set_current_block(then_bb.clone());
+                    self.emit(then_block);
+                    let then_fallthrough = self.builder.current_block.clone();
+
+                    self.builder.set_current_block(else_bb.clone());
+                    self.emit(else_id);
+                    let else_fallthrough = self.builder.current_block.clone();
+
+                    if then_fallthrough.is_some() || else_fallthrough.is_some() {
+                        let end_bb = {
+                            let mut ctx = context_or_err!(self, "If statement outside function");
+                            self.builder.create_new_block(&mut ctx)
+                        };
+
+                        if let Some(bb) = then_fallthrough {
+                            self.builder.set_current_block(bb);
+                            self.insert_terminator_if_needed(OpData::Jump {
+                                target_bb: end_bb.clone(),
+                            });
+                        }
+
+                        if let Some(bb) = else_fallthrough {
+                            self.builder.set_current_block(bb);
+                            self.insert_terminator_if_needed(OpData::Jump {
+                                target_bb: end_bb.clone(),
+                            });
+                        }
+
+                        self.builder.set_current_block(end_bb);
+                    } else {
+                        self.builder.current_block = None;
+                        self.builder.current_inst = None;
+                    }
+                } else {
+                    let (then_bb, end_bb) = {
+                        let mut ctx = context_or_err!(self, "If statement outside function");
+                        (
+                            self.builder.create_new_block(&mut ctx),
+                            self.builder.create_new_block(&mut ctx),
+                        )
+                    };
+
+                    let cond = emit_rval(self, condition);
+                    self.insert_terminator_if_needed(OpData::Br {
+                        cond,
+                        then_bb: then_bb.clone(),
+                        else_bb: end_bb.clone(),
+                    });
+
+                    self.builder.set_current_block(then_bb);
+                    self.emit(then_block);
+                    if self.has_active_insertion_point() {
+                        self.insert_terminator_if_needed(OpData::Jump {
+                            target_bb: end_bb.clone(),
+                        });
+                    }
+
+                    self.builder.set_current_block(end_bb);
+                }
                 None
             }
             Node::While { condition, body } => {
                 let condition = *condition;
                 let body = *body;
 
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
+
                 let (while_entry, while_body, while_end) = {
                     let mut ctx = context_or_err!(self, "While statement outside function");
                     let while_entry = self.builder.create_new_block(&mut ctx);
                     let while_body = self.builder.create_new_block(&mut ctx);
                     let while_end = self.builder.create_new_block(&mut ctx);
+
                     (while_entry, while_body, while_end)
                 };
 
@@ -646,37 +711,48 @@ impl Emit {
                 self.emit(body);
                 self.builder.pop_loop();
 
-                self.insert_terminator_if_needed(OpData::Jump {
-                    target_bb: while_entry,
-                });
+                if self.has_active_insertion_point() {
+                    self.insert_terminator_if_needed(OpData::Jump {
+                        target_bb: while_entry,
+                    });
+                }
 
                 self.builder.set_current_block(while_end);
                 None
             }
             Node::Break => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let loop_info = self
                     .builder
                     .loop_stack
                     .last()
                     .unwrap_or_else(|| panic!("Break statement not inside a loop"));
-                self.insert_terminator_if_needed(OpData::Jump {
+                self.insert_terminator_and_unplug(OpData::Jump {
                     target_bb: loop_info.end_block.clone().unwrap(),
                 });
                 None
             }
             Node::Continue => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let loop_info = self
                     .builder
                     .loop_stack
                     .last()
                     .unwrap_or_else(|| panic!("Continue statement not inside a loop"));
 
-                self.insert_terminator_if_needed(OpData::Jump {
+                self.insert_terminator_and_unplug(OpData::Jump {
                     target_bb: loop_info.while_entry.clone().unwrap(),
                 });
                 None
             }
             Node::Assign { lhs, rhs } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let lhs = *lhs;
                 let rhs = *rhs;
 
@@ -709,6 +785,9 @@ impl Emit {
                 }
             }
             Node::ArrayAccess { name, indices, typ } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let name = name.clone();
                 let indices: Vec<NodeId> = indices.clone();
                 let typ = typ.clone();
@@ -780,6 +859,9 @@ impl Emit {
                 func_name,
                 args,
             } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let typ = typ.clone();
                 let func_name = func_name.clone();
                 let args: Vec<NodeId> = args.clone();
@@ -804,6 +886,9 @@ impl Emit {
                 Some(call_op)
             }
             Node::BinaryOp { op, .. } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let op = op.clone();
 
                 let mut op_list: Vec<NodeId> = vec![];
@@ -1184,6 +1269,9 @@ impl Emit {
                 Some(res)
             }
             Node::UnaryOp { typ, op, operand } => {
+                if self.current_function.is_some() && !self.has_active_insertion_point() {
+                    return None;
+                }
                 let typ = typ.clone();
                 let op = op.clone();
                 let operand = *operand;
@@ -1295,10 +1383,6 @@ impl Emit {
             }
             _ => None,
         }
-    }
-
-    pub fn emit_flattened(&mut self, _node_id: NodeId) {
-        todo!()
     }
 }
 

@@ -196,6 +196,7 @@ impl<'a> SCCP<'a> {
             None => return, // empty function
         };
 
+        self.lattices.clear();
         self.lattices.resize(func.dfg.storage.len(), Lattice::Top);
 
         // map OpId to BBId
@@ -524,6 +525,26 @@ impl<'a> SCCP<'a> {
 
     // Rewrite the program based on the results of propagation. And then return the existing phi nodes after rewriting.
     fn rewrite(&mut self) -> Vec<(Operand, Operand)> {
+        // Replace optimizable instructions with constants.
+        let removed = self
+            .lattices
+            .iter()
+            .enumerate()
+            .filter_map(|(op_id, lattice)| {
+                if let Lattice::Constant(c) = lattice {
+                    let bb_id = self.op_to_bb[op_id].clone();
+                    let op_id = Operand::Value(op_id);
+                    let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                    crate::debug::info!("SCCP: replace {:?} with constant {:?} in block {:?}", op_id, c, bb_id);
+                    self.builder
+                        .replace_all_uses(&mut ctx, op_id.clone(), c.clone());
+                    Some((op_id.clone(), bb_id.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<(Operand, Operand)>>();
+
         // Slay the edge of dead block in phi operations.
         for phi_op in self.phi_ops.iter() {
             let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
@@ -588,25 +609,6 @@ impl<'a> SCCP<'a> {
                 panic!("SCCP rewrite: op is not a br node");
             }
         }
-
-        // Replace optimizable instructions with constants.
-        let removed = self
-            .lattices
-            .iter()
-            .enumerate()
-            .filter_map(|(op_id, lattice)| {
-                if let Lattice::Constant(c) = lattice {
-                    let bb_id = self.op_to_bb[op_id].clone();
-                    let op_id = Operand::Value(op_id);
-                    let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
-                    self.builder
-                        .replace_all_uses(&mut ctx, op_id.clone(), c.clone());
-                    Some((op_id.clone(), bb_id.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<(Operand, Operand)>>();
 
         // Remove the ops
         removed.into_iter().for_each(|(op_id, bb_id)| {

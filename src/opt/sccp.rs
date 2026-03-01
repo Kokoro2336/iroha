@@ -163,26 +163,28 @@ impl<'a> SCCP<'a> {
         }
     }
 
-    fn cast(operand: Lattice, op_typ: OpType) -> Lattice {
-        let operand = match operand {
-            Lattice::Constant(c) => c,
-            _ => panic!("SCCP cast: operand must be a constant"),
-        };
-        match operand {
-            Operand::Int(i) => match &op_typ {
-                OpType::Sitofp => Lattice::Constant(Operand::Float(i as f32)),
-                _ => unreachable!(),
-            },
-            Operand::Float(f) => match &op_typ {
-                OpType::Fptosi => Lattice::Constant(Operand::Int(f as i32)),
-                _ => unreachable!(),
-            },
-            Operand::Bool(b) => match &op_typ {
-                OpType::Zext => Lattice::Constant(Operand::Int(if b { 1 } else { 0 })),
-                OpType::Uitofp => Lattice::Constant(Operand::Float(if b { 1.0 } else { 0.0 })),
-                _ => unreachable!(),
-            },
-            _ => panic!("SCCP cast: operand must be an integer, float or boolean constant"),
+    fn cast(lattice: Lattice, new_typ: Type) -> Lattice {
+        match (&lattice, &new_typ) {
+            (Lattice::Constant(Operand::Int(i)), Type::Float) => {
+                Lattice::Constant(Operand::Float(*i as f32))
+            }
+            (Lattice::Constant(Operand::Int(i)), Type::Bool) => {
+                Lattice::Constant(Operand::Bool(*i != 0))
+            }
+            (Lattice::Constant(Operand::Float(f)), Type::Int) => {
+                Lattice::Constant(Operand::Int(*f as i32))
+            }
+            (Lattice::Constant(Operand::Float(f)), Type::Bool) => {
+                Lattice::Constant(Operand::Bool(*f != 0.0))
+            }
+            (Lattice::Constant(Operand::Bool(b)), Type::Int) => {
+                Lattice::Constant(Operand::Int(if *b { 1 } else { 0 }))
+            }
+            (Lattice::Constant(Operand::Bool(b)), Type::Float) => {
+                Lattice::Constant(Operand::Float(if *b { 1.0 } else { 0.0 }))
+            }
+            /*Don't need to cast*/
+            _ => lattice,
         }
     }
 
@@ -238,7 +240,10 @@ impl<'a> SCCP<'a> {
             Some(idx) => idx,
             None => panic!("SCCP visit_expr: current_function is None"), // should not happen
         };
-        let op_data = self.program.funcs[func].dfg[op_id.clone()].data.clone();
+        let (op_data, val_typ) = {
+            let op = &mut self.program.funcs[func].dfg[op_id.clone()];
+            (op.data.clone(), op.typ.clone())
+        };
         let old = self.lattices[op_id.get_op_id()].clone();
 
         match op_data.clone() {
@@ -275,8 +280,11 @@ impl<'a> SCCP<'a> {
                 if matches!(left_lattice, Lattice::Constant(_))
                     && matches!(right_lattice, Lattice::Constant(_))
                 {
-                    self.lattices[op_id.get_op_id()] =
-                        Self::fold(left_lattice, right_lattice, OpType::from(&op_data));
+                    self.lattices[op_id.get_op_id()] = 
+                        Self::cast(
+                            Self::fold(left_lattice, right_lattice, OpType::from(&op_data)),
+                            val_typ,
+                        );
                 } else {
                     // If not foldable, we just meet the lattices of the operands.
                     let lattice_list = {
@@ -290,7 +298,7 @@ impl<'a> SCCP<'a> {
                         }
                         list
                     };
-                    self.lattices[op_id.get_op_id()] = Self::meet(lattice_list);
+                    self.lattices[op_id.get_op_id()] = Self::cast(Self::meet(lattice_list), val_typ);
                 }
 
                 if old == self.lattices[op_id.get_op_id()] {
@@ -313,9 +321,9 @@ impl<'a> SCCP<'a> {
                 let operand_lattice = self.get_lattice(&value);
                 if matches!(operand_lattice, Lattice::Constant(_)) {
                     self.lattices[op_id.get_op_id()] =
-                        Self::cast(operand_lattice, OpType::from(&op_data));
+                        Self::cast(operand_lattice, val_typ);
                 } else {
-                    self.lattices[op_id.get_op_id()] = operand_lattice;
+                    self.lattices[op_id.get_op_id()] = Self::cast(operand_lattice, val_typ);
                 }
 
                 if old == self.lattices[op_id.get_op_id()] {
@@ -401,7 +409,10 @@ impl<'a> SCCP<'a> {
             Some(idx) => idx,
             None => panic!("SCCP visit_phi: current_function is None"), // should not happen
         };
-        let op_data = self.program.funcs[func].dfg[op_id.clone()].data.clone();
+        let (op_data, val_typ) = {
+            let op = &mut self.program.funcs[func].dfg[op_id.clone()];
+            (op.data.clone(), op.typ.clone())
+        };
         let old = self.lattices[op_id.get_op_id()].clone();
 
         if let OpData::Phi { incoming } = op_data {
@@ -428,7 +439,10 @@ impl<'a> SCCP<'a> {
                     }
                 })
                 .collect::<Vec<Lattice>>();
-            self.lattices[op_id.get_op_id()] = Self::meet(lattice_list);
+            self.lattices[op_id.get_op_id()] = Self::cast(
+                Self::meet(lattice_list),
+                val_typ
+            );
 
             if old == self.lattices[op_id.get_op_id()] {
                 return;
@@ -568,7 +582,7 @@ impl<'a> SCCP<'a> {
                             panic!("SCCP: condition of br must be a boolean constant");
                         }
                     }
-                    _ => {/*do nothing*/}
+                    _ => { /*do nothing*/ }
                 }
             } else {
                 panic!("SCCP rewrite: op is not a br node");

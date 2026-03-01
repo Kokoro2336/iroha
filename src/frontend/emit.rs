@@ -95,6 +95,8 @@ impl Emit {
         )
     }
 
+    // This method is used to insert terminator which does not block the emitting of following instructions, such as conditional branch in the middle of if-else.
+    // Check whether the current block already has a terminator, if not, insert one with the given OpData.
     fn insert_terminator_if_needed(&mut self, op_data: OpData) {
         if !self.has_active_insertion_point() || self.current_block_has_terminator() {
             return;
@@ -105,6 +107,7 @@ impl Emit {
             .create(&mut ctx, ir::Op::new(Type::Void, vec![], op_data));
     }
 
+    // This method is used to insert terminator which blocks the emitting of following instructions, such as return, break, continue and goto.
     fn insert_terminator_and_unplug(&mut self, op_data: OpData) {
         self.insert_terminator_if_needed(op_data);
         self.builder.current_block = None;

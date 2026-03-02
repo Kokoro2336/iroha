@@ -40,7 +40,13 @@ def clean_directory(directory):
         os.makedirs(directory)
 
 def normalize_output_bytes(data: bytes) -> bytes:
-    return data.replace(b"\r\n", b"\n").rstrip(b"\n")
+    normalized = data.replace(b"\r\n", b"\n")
+    lines = normalized.split(b"\n")
+    while lines and lines[0].strip() == b"":
+        lines.pop(0)
+    while lines and lines[-1].strip() == b"":
+        lines.pop()
+    return b"\n".join(lines)
 
 def main():
     parser = argparse.ArgumentParser(description='Compiler Test Runner')

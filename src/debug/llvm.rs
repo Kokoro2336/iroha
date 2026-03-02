@@ -242,6 +242,7 @@ impl DumpLLVM for Op {
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     Operand::Int(_) => Type::Int,
                     Operand::Float(_) => Type::Float,
+                    Operand::Param { typ, .. } => typ.clone(),
                     _ => Type::Int,
                 };
                 let ptr_ty = match addr {

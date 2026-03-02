@@ -1,12 +1,6 @@
 mod compaction;
-mod mem2reg;
 mod dce;
-mod sccp;
+mod mem2reg;
 mod remove_trivial_phi;
-pub use {
-    compaction::*,
-    mem2reg::*,
-    dce::*,
-    sccp::*,
-    remove_trivial_phi::*,
-};
+mod sccp;
+pub use {compaction::*, dce::*, mem2reg::*, remove_trivial_phi::*, sccp::*};

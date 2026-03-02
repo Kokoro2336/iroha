@@ -205,11 +205,6 @@ impl Emit {
                 }
                 NodeType::ArrayAccess => {
                     let typ = node_value_type(&this.ast, node_id);
-                    crate::debug::info!(
-                        "ArrayAccess node value type: {:?}, op type: {:?}",
-                        typ,
-                        this.program.funcs[this.current_function.unwrap()].dfg[op.get_op_id()].typ
-                    );
                     match typ {
                         Type::Array { .. } => {
                             let mut ctx = context_or_err!(this, "Value load outside function");
@@ -818,11 +813,6 @@ impl Emit {
                     return None;
                 }
                 let name = name.clone();
-                crate::debug::info!(
-                    "Emitting array access: name = {}, indices = {:?}",
-                    name,
-                    indices
-                );
                 let indices: Vec<NodeId> = indices.clone();
                 let typ = typ.clone();
 
@@ -857,12 +847,6 @@ impl Emit {
                         }
                         _ => panic!("Expected pointer operand for array access"),
                     };
-                    crate::debug::info!(
-                        "Loading array access: typ = {:?}, arr_typ = {:?}, indices = {:?}",
-                        typ,
-                        arr_typ,
-                        indices
-                    );
                     match arr_typ {
                         Type::Array { .. } => {
                             // use GEP to reach the element directly

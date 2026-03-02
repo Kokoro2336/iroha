@@ -63,11 +63,9 @@ impl Emit {
             Operand::Int(_) => Type::Int,
             Operand::Float(_) => Type::Float,
             Operand::Bool(_) => Type::Bool,
-            Operand::Undefined
-            | Operand::Index(_)
-            | Operand::Func(_)
-            | Operand::Reg(_)
-            | Operand::BB(_) => unreachable!("Not allowed to get type of operand: {:?}", operand),
+            Operand::Undefined | Operand::Func(_) | Operand::Reg(_) | Operand::BB(_) => {
+                unreachable!("Not allowed to get type of operand: {:?}", operand)
+            }
         }
     }
 
@@ -187,13 +185,6 @@ impl Emit {
             }
         }
 
-        fn is_addr_node(ast: &AST, node_id: NodeId) -> bool {
-            matches!(
-                ast[node_id],
-                Node::VarAccess { .. } | Node::ArrayAccess { .. }
-            )
-        }
-
         fn emit_rval(this: &mut Emit, node_id: NodeId) -> Operand {
             let mut op = this.emit(node_id).unwrap_or_else(|| {
                 panic!(
@@ -202,13 +193,49 @@ impl Emit {
                 )
             });
 
-            if is_addr_node(&this.ast, node_id) {
-                let typ = node_value_type(&this.ast, node_id);
-                let mut ctx = context_or_err!(this, "Value load outside function");
-                op = this.builder.create(
-                    &mut ctx,
-                    ir::Op::new(typ, vec![], OpData::Load { addr: op }),
-                );
+            let node_typ = NodeType::from(&this.ast[node_id]);
+            match node_typ {
+                NodeType::VarAccess => {
+                    let typ = node_value_type(&this.ast, node_id);
+                    let mut ctx = context_or_err!(this, "Value load outside function");
+                    op = this.builder.create(
+                        &mut ctx,
+                        ir::Op::new(typ, vec![], OpData::Load { addr: op }),
+                    );
+                }
+                NodeType::ArrayAccess => {
+                    let typ = node_value_type(&this.ast, node_id);
+                    crate::debug::info!(
+                        "ArrayAccess node value type: {:?}, op type: {:?}",
+                        typ,
+                        this.program.funcs[this.current_function.unwrap()].dfg[op.get_op_id()].typ
+                    );
+                    match typ {
+                        Type::Array { .. } => {
+                            let mut ctx = context_or_err!(this, "Value load outside function");
+                            // decay it.
+                            op = this.builder.create(
+                                &mut ctx,
+                                ir::Op::new(
+                                    decay(typ).unwrap(),
+                                    vec![],
+                                    OpData::GEP {
+                                        base: op,
+                                        indices: vec![Operand::Int(0), Operand::Int(0)],
+                                    },
+                                ),
+                            );
+                        }
+                        _ => {
+                            let mut ctx = context_or_err!(this, "Value load outside function");
+                            op = this.builder.create(
+                                &mut ctx,
+                                ir::Op::new(typ, vec![], OpData::Load { addr: op }),
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
 
             op
@@ -325,10 +352,6 @@ impl Emit {
                 self.emit(body);
 
                 if self.has_active_insertion_point() && !self.current_block_has_terminator() {
-                    crate::debug::info!(
-                        "Inserting implicit return at the end of function. current_block: {:?}, fnDecl: {:?}",
-                        self.builder.current_block, self.ast[node_id]
-                    );
                     match typ {
                         Type::Function { return_type, .. } => {
                             if !matches!(*return_type, Type::Void) {
@@ -511,8 +534,11 @@ impl Emit {
                                     vec![],
                                     OpData::GEP {
                                         base: alloca.clone(),
-                                        indices: std::iter::once(Operand::Index(0))
-                                            .chain(idxs.into_iter().map(Operand::Index))
+                                        indices: std::iter::once(Operand::Int(0))
+                                            .chain(
+                                                idxs.into_iter()
+                                                    .map(|idx| Operand::Int(idx as i32)),
+                                            )
                                             .collect(),
                                     },
                                 ),
@@ -792,6 +818,11 @@ impl Emit {
                     return None;
                 }
                 let name = name.clone();
+                crate::debug::info!(
+                    "Emitting array access: name = {}, indices = {:?}",
+                    name,
+                    indices
+                );
                 let indices: Vec<NodeId> = indices.clone();
                 let typ = typ.clone();
 
@@ -801,22 +832,97 @@ impl Emit {
                 }
 
                 let mut ctx = context_or_err!(self, "Array access outside function");
-                let ptr_typ = Type::Pointer {
-                    base: Box::new(typ),
-                };
+
+                fn load_arr(
+                    builder: &mut Builder,
+                    ctx: &mut BuilderContext,
+                    ptr: Operand,
+                    indices: Vec<Operand>,
+                    typ: Type,
+                ) -> Operand {
+                    let arr_typ = match ptr {
+                        Operand::Value(id) => {
+                            let dfg = ctx.dfg.as_ref().expect("DFG not found in context");
+                            match dfg[id].typ.clone() {
+                                Type::Pointer { base } => *base,
+                                _ => panic!("Expected pointer type for array access"),
+                            }
+                        }
+                        Operand::Global(id) => {
+                            let globals = &ctx.globals;
+                            match globals[id].typ.clone() {
+                                Type::Pointer { base } => *base,
+                                _ => panic!("Expected pointer type for array access"),
+                            }
+                        }
+                        _ => panic!("Expected pointer operand for array access"),
+                    };
+                    crate::debug::info!(
+                        "Loading array access: typ = {:?}, arr_typ = {:?}, indices = {:?}",
+                        typ,
+                        arr_typ,
+                        indices
+                    );
+                    match arr_typ {
+                        Type::Array { .. } => {
+                            // use GEP to reach the element directly
+                            let ptr_typ = Type::Pointer {
+                                base: Box::new(typ.clone()),
+                            };
+                            builder.create(
+                                ctx,
+                                ir::Op::new(
+                                    ptr_typ,
+                                    vec![],
+                                    OpData::GEP {
+                                        base: ptr.clone(),
+                                        indices: std::iter::once(Operand::Int(0))
+                                            .chain(indices)
+                                            .collect(),
+                                    },
+                                ),
+                            )
+                        }
+                        Type::Pointer { .. } => {
+                            if !indices.is_empty() {
+                                // Load the pointer first, then use GEP to reach the element
+                                let loaded_ptr = builder.create(
+                                    ctx,
+                                    ir::Op::new(
+                                        arr_typ,
+                                        vec![],
+                                        OpData::Load { addr: ptr.clone() },
+                                    ),
+                                );
+                                let ptr_typ = Type::Pointer {
+                                    base: Box::new(typ.clone()),
+                                };
+                                builder.create(
+                                    ctx,
+                                    ir::Op::new(
+                                        ptr_typ,
+                                        vec![],
+                                        OpData::GEP {
+                                            base: loaded_ptr,
+                                            indices,
+                                        },
+                                    ),
+                                )
+                            } else {
+                                ptr
+                            }
+                        }
+                        _ => unreachable!("Expected array or pointer type for array access"),
+                    }
+                }
+
                 let ptr_addr = if let Some(local_ptr) = self.syms.get(&name) {
-                    self.builder.create(
+                    load_arr(
+                        &mut self.builder,
                         &mut ctx,
-                        ir::Op::new(
-                            ptr_typ,
-                            vec![],
-                            OpData::GEP {
-                                base: local_ptr.clone(),
-                                indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops)
-                                    .collect(),
-                            },
-                        ),
+                        local_ptr.clone(),
+                        index_ops,
+                        typ,
                     )
                 } else if let Some(mangled_name) = self.mangled.get(&name) {
                     let global_id = self.globals.get(mangled_name).unwrap_or_else(|| {
@@ -825,32 +931,20 @@ impl Emit {
                             mangled_name
                         )
                     });
-                    self.builder.create(
+                    load_arr(
+                        &mut self.builder,
                         &mut ctx,
-                        ir::Op::new(
-                            ptr_typ,
-                            vec![],
-                            OpData::GEP {
-                                base: global_id.clone(),
-                                indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops)
-                                    .collect(),
-                            },
-                        ),
+                        global_id.clone(),
+                        index_ops,
+                        typ,
                     )
                 } else if let Some(global_id) = self.globals.get(&name) {
-                    self.builder.create(
+                    load_arr(
+                        &mut self.builder,
                         &mut ctx,
-                        ir::Op::new(
-                            ptr_typ,
-                            vec![],
-                            OpData::GEP {
-                                base: global_id.clone(),
-                                indices: std::iter::once(Operand::Index(0))
-                                    .chain(index_ops)
-                                    .collect(),
-                            },
-                        ),
+                        global_id.clone(),
+                        index_ops,
+                        typ,
                     )
                 } else {
                     panic!("ArrayAccess: array {} not found in globals", name)
@@ -960,7 +1054,7 @@ impl Emit {
                                 } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
                                     OpData::OEq { lhs, rhs }
                                 } else {
-                                    panic!("Types of lhs and rhs must match for Eq operator");
+                                    panic!("Types of lhs and rhs must match for Eq operator: lhs is {:?}, rhs is {:?}", lhs_typ, rhs_typ);
                                 }
                             } else {
                                 panic!("Eq operator only returns Bool type");
@@ -973,7 +1067,7 @@ impl Emit {
                                 } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
                                     OpData::ONe { lhs, rhs }
                                 } else {
-                                    panic!("Types of lhs and rhs must match for Ne operator");
+                                    panic!("Types of lhs and rhs must match for Ne operator: lhs is {:?}, rhs is {:?}", lhs_typ, rhs_typ);
                                 }
                             } else {
                                 panic!("Ne operator only returns Bool type");
@@ -986,7 +1080,7 @@ impl Emit {
                                 } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
                                     OpData::OGt { lhs, rhs }
                                 } else {
-                                    panic!("Types of lhs and rhs must match for Gt operator");
+                                    panic!("Types of lhs and rhs must match for Gt operator: lhs is {:?}, rhs is {:?}", lhs_typ, rhs_typ);
                                 }
                             } else {
                                 panic!("Gt operator only returns Bool type");
@@ -999,7 +1093,7 @@ impl Emit {
                                 } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
                                     OpData::OLt { lhs, rhs }
                                 } else {
-                                    panic!("Types of lhs and rhs must match for Lt operator");
+                                    panic!("Types of lhs and rhs must match for Lt operator: lhs is {:?}, rhs is {:?}", lhs_typ, rhs_typ);
                                 }
                             } else {
                                 panic!("Lt operator only returns Bool type");
@@ -1012,7 +1106,7 @@ impl Emit {
                                 } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
                                     OpData::OGe { lhs, rhs }
                                 } else {
-                                    panic!("Types of lhs and rhs must match for Ge operator");
+                                    panic!("Types of lhs and rhs must match for Ge operator: lhs is {:?}, rhs is {:?}", lhs_typ, rhs_typ);
                                 }
                             } else {
                                 panic!("Ge operator only returns Bool type");
@@ -1025,7 +1119,7 @@ impl Emit {
                                 } else if lhs_typ == Type::Float && rhs_typ == Type::Float {
                                     OpData::OLe { lhs, rhs }
                                 } else {
-                                    panic!("Types of lhs and rhs must match for Le operator");
+                                    panic!("Types of lhs and rhs must match for Le operator: lhs is {:?}, rhs is {:?}", lhs_typ, rhs_typ);
                                 }
                             } else {
                                 panic!("Le operator only returns Bool type");

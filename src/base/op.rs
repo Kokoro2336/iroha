@@ -397,8 +397,6 @@ pub enum Operand {
     Float(f32),
     Bool(bool),
 
-    // for GEP: Raw integer index
-    Index(usize),
     // Param
     Param { idx: usize, name: String, typ: Type },
     // for move
@@ -465,7 +463,6 @@ impl std::fmt::Display for Operand {
             Operand::Float(value) => write!(f, "{}", value),
             Operand::Bool(value) => write!(f, "{}", value),
             Operand::Param { idx, .. } => write!(f, "%arg{}", idx),
-            Operand::Index(index) => write!(f, "{}", index),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
             Operand::Reg(reg) => write!(f, "{}", reg),
             Operand::Undefined => write!(f, "undefined"),
@@ -698,8 +695,7 @@ impl IndexedArena<Op> {
             | Operand::Float(_)
             | Operand::Bool(_)
             | Operand::Undefined
-            | Operand::Param { .. }
-            | Operand::Index(_) => return,
+            | Operand::Param { .. } => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
         let node = &mut self[op_id];
@@ -721,8 +717,7 @@ impl IndexedArena<Op> {
             | Operand::Float(_)
             | Operand::Bool(_)
             | Operand::Undefined
-            | Operand::Param { .. }
-            | Operand::Index(_) => return,
+            | Operand::Param { .. } => return,
             _ => panic!(
                 "Operand is not a valid data: {}: {:?}",
                 op_idx.clone(),
@@ -756,8 +751,7 @@ impl IndexedArena<Op> {
             | Operand::Float(_)
             | Operand::Bool(_)
             | Operand::Undefined
-            | Operand::Param { .. }
-            | Operand::Index(_) => return,
+            | Operand::Param { .. } => return,
             _ => panic!("Operand is not a valid data: {:?}", op_idx),
         };
 

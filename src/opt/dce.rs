@@ -101,7 +101,6 @@ impl<'a> DCE<'a> {
                 Operand::Int(_)
                 | Operand::Float(_)
                 | Operand::Undefined
-                | Operand::Index(_)
                 | Operand::Param { .. } => { /* do nothing */ }
                 _ => panic!("DCE: operand is not a value or basic block: {:?}", operand),
             }

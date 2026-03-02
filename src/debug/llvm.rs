@@ -42,6 +42,24 @@ fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
     format!("@{}", id)
 }
 
+fn operand_type(operand: &Operand, ctx: &DumpContext, default: Type) -> Type {
+    match operand {
+        Operand::Value(id) => {
+            if let Some(f) = ctx.function {
+                f.dfg[*id].typ.clone()
+            } else {
+                default
+            }
+        }
+        Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
+        Operand::Int(_) => Type::Int,
+        Operand::Float(_) => Type::Float,
+        Operand::Bool(_) => Type::Bool,
+        Operand::Param { typ, .. } => typ.clone(),
+        _ => default,
+    }
+}
+
 impl DumpLLVM for Type {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
@@ -77,7 +95,6 @@ impl DumpLLVM for Operand {
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
             Operand::Param { idx, .. } => write!(s, "%arg{}", idx)?,
             Operand::Func(id) => write!(s, "@{}", ctx.program.funcs[*id].name)?,
-            Operand::Index(id) => write!(s, "{}", id)?,
             Operand::Reg(reg) => write!(s, "{:?}", reg)?,
             Operand::Undefined => write!(s, "undef")?,
         }
@@ -106,10 +123,15 @@ impl DumpLLVM for Op {
                     },
                 };
 
+                let gep_base_ty = match &ptr_ty {
+                    Type::Pointer { base } => base.as_ref().clone(),
+                    _ => ptr_ty.clone(),
+                };
+
                 write!(
                     s,
                     "getelementptr inbounds {}, {} {}",
-                    self.typ.dump_to_llvm(ctx)?,
+                    gep_base_ty.dump_to_llvm(ctx)?,
                     ptr_ty.dump_to_llvm(ctx)?,
                     base.dump_to_llvm(ctx)?
                 )?;
@@ -311,90 +333,126 @@ impl DumpLLVM for Op {
                 rhs.dump_to_llvm(ctx)?
             )?,
 
-            OpData::SEq { lhs, rhs } => write!(
-                s,
-                "icmp eq {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::SNe { lhs, rhs } => write!(
-                s,
-                "icmp ne {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::SLt { lhs, rhs } => write!(
-                s,
-                "icmp slt {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::SGt { lhs, rhs } => write!(
-                s,
-                "icmp sgt {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::SLe { lhs, rhs } => write!(
-                s,
-                "icmp sle {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::SGe { lhs, rhs } => write!(
-                s,
-                "icmp sge {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::OEq { lhs, rhs } => write!(
-                s,
-                "fcmp oeq {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::ONe { lhs, rhs } => write!(
-                s,
-                "fcmp one {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::OLt { lhs, rhs } => write!(
-                s,
-                "fcmp olt {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::OGt { lhs, rhs } => write!(
-                s,
-                "fcmp ogt {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::OLe { lhs, rhs } => write!(
-                s,
-                "fcmp ole {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::OGe { lhs, rhs } => write!(
-                s,
-                "fcmp oge {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
+            OpData::SEq { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Int);
+                write!(
+                    s,
+                    "icmp eq {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::SNe { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Int);
+                write!(
+                    s,
+                    "icmp ne {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::SLt { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Int);
+                write!(
+                    s,
+                    "icmp slt {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::SGt { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Int);
+                write!(
+                    s,
+                    "icmp sgt {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::SLe { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Int);
+                write!(
+                    s,
+                    "icmp sle {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::SGe { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Int);
+                write!(
+                    s,
+                    "icmp sge {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::OEq { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Float);
+                write!(
+                    s,
+                    "fcmp oeq {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::ONe { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Float);
+                write!(
+                    s,
+                    "fcmp one {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::OLt { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Float);
+                write!(
+                    s,
+                    "fcmp olt {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::OGt { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Float);
+                write!(
+                    s,
+                    "fcmp ogt {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::OLe { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Float);
+                write!(
+                    s,
+                    "fcmp ole {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
+            OpData::OGe { lhs, rhs } => {
+                let cmp_ty = operand_type(lhs, ctx, Type::Float);
+                write!(
+                    s,
+                    "fcmp oge {} {}, {}",
+                    cmp_ty.dump_to_llvm(ctx)?,
+                    lhs.dump_to_llvm(ctx)?,
+                    rhs.dump_to_llvm(ctx)?
+                )?
+            }
 
             OpData::Sitofp { value } => {
                 let from_op_typ = match value {

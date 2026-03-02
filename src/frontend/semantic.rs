@@ -542,6 +542,7 @@ impl Semantic {
                     _ => unreachable!(),
                 };
                 let array_type = match self.syms.get(&name) {
+                    // Keep the original array type in the node, and return the decayed pointer type for type inference and codegen.
                     Some(typ) => typ.clone(),
                     None => return Err(format!("Undefined variable: {}", name)),
                 };
@@ -561,12 +562,20 @@ impl Semantic {
                         dims[indices_ids.len()..].to_vec()
                     };
                     if new_dims.is_empty() {
+                        if let Node::ArrayAccess { typ, .. } = &mut self.ast[node_id] {
+                            *typ = base.as_ref().clone();
+                        }
                         base.as_ref().clone()
                     } else {
-                        decay(Type::Array {
+                        // For original array type, we store the array type, but return decayed type
+                        let new_typ = Type::Array {
                             base: base.clone(),
-                            dims: new_dims,
-                        })?
+                            dims: new_dims.clone(),
+                        };
+                        if let Node::ArrayAccess { typ, .. } = &mut self.ast[node_id] {
+                            *typ = new_typ.clone();
+                        }
+                        decay(new_typ)?
                     }
                 } else if let Type::Pointer { .. } = array_type {
                     let raised = raise(array_type)?;
@@ -581,12 +590,21 @@ impl Semantic {
                             dims[indices_ids.len()..].to_vec()
                         };
                         if new_dims.is_empty() {
+                            if let Node::ArrayAccess { typ, .. } = &mut self.ast[node_id] {
+                                *typ = base.as_ref().clone();
+                            }
                             base.as_ref().clone()
                         } else {
-                            decay(Type::Array {
+                            // For decayed array, information has lost.
+                            // So we store the decayed type in the node, and return decayed type for type inference and codegen.
+                            let new_typ = decay(Type::Array {
                                 base: base.clone(),
                                 dims: new_dims,
-                            })?
+                            })?;
+                            if let Node::ArrayAccess { typ, .. } = &mut self.ast[node_id] {
+                                *typ = new_typ.clone();
+                            }
+                            new_typ
                         }
                     } else {
                         unreachable!("Raised pointer type is not array type!")
@@ -598,9 +616,6 @@ impl Semantic {
                     ));
                 };
 
-                if let Node::ArrayAccess { typ, .. } = &mut self.ast[node_id] {
-                    *typ = inferred.clone();
-                }
                 Ok(inferred)
             }
             NodeType::FnDecl => {
@@ -707,7 +722,7 @@ impl Semantic {
                     } => (name.clone(), typ.clone(), init_values.clone()),
                     _ => unreachable!(),
                 };
-                self.syms.insert(name, decay(array_type.clone())?);
+                self.syms.insert(name, array_type.clone());
 
                 if let Some(init_ids) = &mut init_values {
                     let base_typ = match &array_type {

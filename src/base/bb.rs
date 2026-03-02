@@ -47,7 +47,7 @@ impl Function {
             name,
             is_external,
             typ,
-            cfg: IndexedArena::new(),
+            cfg: CFG::new(),
             dfg: DFG::new(),
         }
     }

@@ -100,7 +100,6 @@ impl<'a> RemoveTrivialPhi<'a> {
                 context_or_err!(self, "RemoveTrivialPhi: No current function context found");
             match check_result {
                 CheckType::Empty => {
-                    crate::debug::info!("Remove trivial phi {:?} with undef", phi_id);
                     self.builder
                         .replace_all_uses(&mut ctx, phi_id.clone(), Operand::Undefined);
                     for user in uses {
@@ -126,7 +125,6 @@ impl<'a> RemoveTrivialPhi<'a> {
                     self.builder.remove_op(&mut ctx, phi_id, Some(bb_id));
                 }
                 CheckType::Single(value) => {
-                    crate::debug::info!("Remove trivial phi {:?} with value {:?}", phi_id, value);
                     self.builder
                         .replace_all_uses(&mut ctx, phi_id.clone(), value);
                     for user in uses {

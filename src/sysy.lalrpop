@@ -90,12 +90,14 @@ pub CompUnit: NodeId = {
 EnterScope: () = {
   () => {
     parser.syms.enter_scope();
+    parser.decl_syms.enter_scope();
   },
 };
 
 ExitScope: () = {
   () => {
     parser.syms.exit_scope();
+    parser.decl_syms.exit_scope();
   },
 };
 
@@ -269,10 +271,25 @@ SimpleStmt: NodeId = {
 LVal: NodeId = {
   <ident: Ident> <exps: ("[" Exp "]")*> => {
     if exps.is_empty() {
-      parser.ast.alloc(Node::VarAccess {
-        name: ident,
-        typ: Type::Void,
-      })
+      if let Some(is_array) = parser.decl_syms.get(&ident) {
+        if *is_array {
+          parser.ast.alloc(Node::ArrayAccess {
+            name: ident,
+            indices: vec![],
+            typ: Type::Void,
+          })
+        } else {
+          parser.ast.alloc(Node::VarAccess {
+            name: ident,
+            typ: Type::Void,
+          })
+        }
+      } else {
+        parser.ast.alloc(Node::VarAccess {
+          name: ident,
+          typ: Type::Void,
+        })
+      }
     } else {
       parser.ast.alloc(Node::ArrayAccess {
         name: ident,

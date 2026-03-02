@@ -101,7 +101,7 @@ impl<'a> SCCP<'a> {
     fn get_lattice(&self, operand: &Operand) -> Lattice {
         match operand {
             Operand::Value(id) => self.lattices[*id].clone(),
-            Operand::Int(_) | Operand::Float(_) | Operand::Bool(_) | Operand::Index(_) => {
+            Operand::Int(_) | Operand::Float(_) | Operand::Bool(_) => {
                 Lattice::Constant(operand.clone())
             }
 
@@ -535,7 +535,6 @@ impl<'a> SCCP<'a> {
                     let bb_id = self.op_to_bb[op_id].clone();
                     let op_id = Operand::Value(op_id);
                     let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
-                    crate::debug::info!("SCCP: replace {:?} with constant {:?} in block {:?}", op_id, c, bb_id);
                     self.builder
                         .replace_all_uses(&mut ctx, op_id.clone(), c.clone());
                     Some((op_id.clone(), bb_id.clone()))
@@ -624,7 +623,6 @@ impl<'a> SCCP<'a> {
             .filter(|bb_id| !self.visited.contains(*bb_id))
             .collect::<FxHashSet<usize>>();
 
-        crate::debug::info!("SCCP: dead blocks.");
         dead_blocks.iter().for_each(|bb_id| {
             let (last, terminator) = {
                 let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;

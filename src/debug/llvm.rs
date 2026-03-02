@@ -123,10 +123,15 @@ impl DumpLLVM for Op {
                     },
                 };
 
+                let gep_base_ty = match &ptr_ty {
+                    Type::Pointer { base } => base.as_ref().clone(),
+                    _ => ptr_ty.clone(),
+                };
+
                 write!(
                     s,
                     "getelementptr inbounds {}, {} {}",
-                    self.typ.dump_to_llvm(ctx)?,
+                    gep_base_ty.dump_to_llvm(ctx)?,
                     ptr_ty.dump_to_llvm(ctx)?,
                     base.dump_to_llvm(ctx)?
                 )?;

@@ -245,7 +245,7 @@ impl<'a> SCCP<'a> {
             let op = &mut self.program.funcs[func].dfg[op_id.clone()];
             (op.data.clone(), op.typ.clone())
         };
-        let old = self.lattices[op_id.get_op_id()].clone();
+        let old = Self::get_lattice(self, &op_id);
 
         match op_data.clone() {
             OpData::AddF { lhs, rhs }
@@ -410,7 +410,7 @@ impl<'a> SCCP<'a> {
             let op = &mut self.program.funcs[func].dfg[op_id.clone()];
             (op.data.clone(), op.typ.clone())
         };
-        let old = self.lattices[op_id.get_op_id()].clone();
+        let old = Self::get_lattice(self, &op_id);
 
         if let OpData::Phi { incoming } = op_data {
             let lattice_list = incoming
@@ -604,7 +604,6 @@ impl<'a> SCCP<'a> {
             self.builder.remove_op(&mut ctx, op_id, Some(bb_id));
         });
 
-        // Phase 1: Isolate the dead blocks, disconnect the edges from live blocks to dead blocks.
         let dead_blocks = self.program.funcs[self.current_function.unwrap()]
             .cfg
             .collect()
@@ -612,6 +611,7 @@ impl<'a> SCCP<'a> {
             .filter(|bb_id| !self.visited.contains(*bb_id))
             .collect::<FxHashSet<usize>>();
 
+        // Phase 1: Isolate the dead blocks, disconnect the edges from live blocks to dead blocks.
         dead_blocks.iter().for_each(|bb_id| {
             let (last, terminator) = {
                 let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;

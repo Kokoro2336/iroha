@@ -245,7 +245,7 @@ impl<'a> SCCP<'a> {
             let op = &mut self.program.funcs[func].dfg[op_id.clone()];
             (op.data.clone(), op.typ.clone())
         };
-        let old = self.lattices[op_id.get_op_id()].clone();
+        let old = Self::get_lattice(self, &op_id);
 
         match op_data.clone() {
             OpData::AddF { lhs, rhs }
@@ -288,17 +288,13 @@ impl<'a> SCCP<'a> {
                         );
                 } else {
                     // If not foldable, we just meet the lattices of the operands.
-                    let lattice_list = {
-                        let mut list = Vec::new();
+                    let lattice_list =
+                        vec![
+
                         // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
-                        if let Operand::Value(lhs_id) = lhs {
-                            list.push(self.lattices[lhs_id].clone());
-                        }
-                        if let Operand::Value(rhs_id) = rhs {
-                            list.push(self.lattices[rhs_id].clone());
-                        }
-                        list
-                    };
+                            Self::get_lattice(self, &lhs),
+                            Self::get_lattice(self, &rhs)
+                        ];
                     self.lattices[op_id.get_op_id()] = Self::cast(Self::meet(lattice_list), val_typ);
                 }
 
@@ -400,7 +396,7 @@ impl<'a> SCCP<'a> {
         }
     }
 
-    fn visit_phi(&mut self, op_id: Operand, bb_id: Operand) {
+    fn visit_phi(&mut self, op_id: Operand) {
         // push the phi first.
         if !self.in_phi_ops.contains(op_id.get_op_id()) {
             self.in_phi_ops.insert(op_id.get_op_id());
@@ -414,7 +410,7 @@ impl<'a> SCCP<'a> {
             let op = &mut self.program.funcs[func].dfg[op_id.clone()];
             (op.data.clone(), op.typ.clone())
         };
-        let old = self.lattices[op_id.get_op_id()].clone();
+        let old = Self::get_lattice(self, &op_id);
 
         if let OpData::Phi { incoming } = op_data {
             let lattice_list = incoming
@@ -422,28 +418,21 @@ impl<'a> SCCP<'a> {
                 .filter_map(|incoming| {
                     if let PhiIncoming::Data {
                         value,
-                        bb: Operand::BB(pred),
+                        bb: Operand::BB(bb_id),
                     } = incoming
                     {
-                        if self.executable.contains(&(*pred, bb_id.get_bb_id())) {
-                            // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
-                            if let Operand::Value(value_id) = value {
-                                Some(self.lattices[*value_id].clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
+                        // Checking whether the incoming edge is executable. If not, we just ignore this incoming value. 
+                        // This is the key to handling infeasible paths.
+                        if !self.visited.contains(*bb_id) {
+                            return None;
                         }
+                        Some(self.get_lattice(value))
                     } else {
                         None
                     }
                 })
                 .collect::<Vec<Lattice>>();
-            self.lattices[op_id.get_op_id()] = Self::cast(
-                Self::meet(lattice_list),
-                val_typ
-            );
+            self.lattices[op_id.get_op_id()] = Self::cast(Self::meet(lattice_list), val_typ);
 
             if old == self.lattices[op_id.get_op_id()] {
                 return;
@@ -479,7 +468,7 @@ impl<'a> SCCP<'a> {
                         .builder
                         .get_all_ops_in_block(&mut ctx, to.clone(), OpType::Phi);
                     for phi in phis {
-                        self.visit_phi(phi, to.clone());
+                        self.visit_phi(phi);
                     }
                 }
 
@@ -509,7 +498,7 @@ impl<'a> SCCP<'a> {
                 let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
                 let op_data = dfg[op_id.clone()].data.clone();
                 if op_data.is(OpType::Phi) {
-                    self.visit_phi(op_id.clone(), self.op_to_bb[op_id.get_op_id()].clone());
+                    self.visit_phi(op_id.clone());
                 } else {
                     // If any incoming edge is executable, we need to visit the instruction.
                     if self
@@ -615,7 +604,6 @@ impl<'a> SCCP<'a> {
             self.builder.remove_op(&mut ctx, op_id, Some(bb_id));
         });
 
-        // Phase 1: Isolate the dead blocks, disconnect the edges from live blocks to dead blocks.
         let dead_blocks = self.program.funcs[self.current_function.unwrap()]
             .cfg
             .collect()
@@ -623,6 +611,7 @@ impl<'a> SCCP<'a> {
             .filter(|bb_id| !self.visited.contains(*bb_id))
             .collect::<FxHashSet<usize>>();
 
+        // Phase 1: Isolate the dead blocks, disconnect the edges from live blocks to dead blocks.
         dead_blocks.iter().for_each(|bb_id| {
             let (last, terminator) = {
                 let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;

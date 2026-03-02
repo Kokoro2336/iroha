@@ -1,4 +1,4 @@
-/** 
+/**
  * Build script for the pku-minic project.
  * */
 fn main() {

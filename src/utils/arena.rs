@@ -76,7 +76,11 @@ where
 
     pub fn set_entry(&mut self, idx: usize) {
         if idx >= self.storage.len() {
-            panic!("IndexedArena set_entry: index {} out of bounds, len: {}", idx, self.storage.len());
+            panic!(
+                "IndexedArena set_entry: index {} out of bounds, len: {}",
+                idx,
+                self.storage.len()
+            );
         }
         self.entry = Some(idx);
     }
@@ -97,7 +101,11 @@ where
 
     pub fn get(&self, idx: usize) -> Option<&T> {
         if idx >= self.storage.len() {
-            panic!("IndexedArena get: index {} out of bounds, len: {}", idx, self.storage.len());
+            panic!(
+                "IndexedArena get: index {} out of bounds, len: {}",
+                idx,
+                self.storage.len()
+            );
         }
         match &self.storage[idx] {
             ArenaItem::Data(node) => Some(node),
@@ -109,12 +117,19 @@ where
 
     pub fn get_mut(&mut self, idx: usize) -> Option<&mut T> {
         if idx >= self.storage.len() {
-            panic!("IndexedArena get_mut: index {} out of bounds, len: {}", idx, self.storage.len());
+            panic!(
+                "IndexedArena get_mut: index {} out of bounds, len: {}",
+                idx,
+                self.storage.len()
+            );
         }
         match &mut self.storage[idx] {
             ArenaItem::Data(node) => Some(node),
             ArenaItem::None | ArenaItem::NewIndex(_) => {
-                panic!("IndexedArena get_mut: index {} points to None or NewIndex", idx);
+                panic!(
+                    "IndexedArena get_mut: index {} points to None or NewIndex",
+                    idx
+                );
             }
         }
     }

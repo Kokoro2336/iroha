@@ -23,7 +23,6 @@ pub fn setup(path: &str) -> WorkerGuard {
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
-        .with(fmt::layer().with_writer(std::io::stdout))
         .with(EnvFilter::new("info"))
         .init();
 

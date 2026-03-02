@@ -2,8 +2,8 @@
  * Definition of AST nodes and related types.
  */
 use crate::base::Type;
-use crate::utils::arena::*;
 use crate::debug::info;
+use crate::utils::arena::*;
 
 use strum_macros::EnumDiscriminants;
 

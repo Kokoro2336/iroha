@@ -1,9 +1,9 @@
 pub use crate::base::r#type::Type;
 
-mod r#type;
 mod builder;
 mod pass;
 mod sysy_lib;
+mod r#type;
 pub use crate::base::builder::*;
 pub use crate::base::pass::*;
 pub use crate::base::sysy_lib::*;

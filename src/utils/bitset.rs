@@ -1,5 +1,7 @@
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign, Index, IndexMut};
 use std::fmt;
+use std::ops::{
+    BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, Sub, SubAssign,
+};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BitSet {
@@ -126,7 +128,7 @@ macro_rules! impl_bitop {
                 }
             }
         }
-        
+
         impl $assign_trait<&BitSet> for BitSet {
             fn $assign_method(&mut self, rhs: &BitSet) {
                 let len = std::cmp::max(self.bits.len(), rhs.bits.len());
@@ -155,7 +157,7 @@ impl Sub for &BitSet {
     type Output = BitSet;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        let len = self.bits.len(); 
+        let len = self.bits.len();
         let mut new_bits = Vec::with_capacity(len);
         for i in 0..len {
             let lhs_word = self.bits[i];
@@ -213,7 +215,7 @@ impl<'a> Iterator for Iter<'a> {
             let word_idx = self.idx / 64;
             let bit_idx = self.idx % 64;
             let word = self.bitset.bits[word_idx];
-            
+
             // Optimization: skip empty words
             if word == 0 {
                 self.idx = (word_idx + 1) * 64;
@@ -226,7 +228,7 @@ impl<'a> Iterator for Iter<'a> {
                 self.idx += 1;
                 return Some(ret);
             }
-            
+
             // Find next set bit efficiently
             // Mask out bits before current bit_idx
             let masked_word = word & (!0 << bit_idx);
@@ -235,7 +237,7 @@ impl<'a> Iterator for Iter<'a> {
                 self.idx = word_idx * 64 + next_bit + 1;
                 return Some(word_idx * 64 + next_bit);
             } else {
-                 self.idx = (word_idx + 1) * 64;
+                self.idx = (word_idx + 1) * 64;
             }
         }
         None
@@ -244,7 +246,10 @@ impl<'a> Iterator for Iter<'a> {
 
 impl BitSet {
     pub fn iter(&self) -> Iter<'_> {
-        Iter { bitset: self, idx: 0 }
+        Iter {
+            bitset: self,
+            idx: 0,
+        }
     }
 }
 

@@ -28,10 +28,10 @@ fn value_operand_name(id: usize, ctx: &DumpContext) -> String {
     if let Some(func) = ctx.function {
         let op = &func.dfg[id];
         if let Some(name) = op_name_attr(op) {
-            return format!("%{}", name);
+            return format!("%val_{}", name);
         }
     }
-    format!("%{}", id)
+    format!("%val_{}", id)
 }
 
 fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
@@ -57,6 +57,20 @@ fn operand_type(operand: &Operand, ctx: &DumpContext, default: Type) -> Type {
         Operand::Bool(_) => Type::Bool,
         Operand::Param { typ, .. } => typ.clone(),
         _ => default,
+    }
+}
+
+fn type_alignment(typ: &Type) -> u32 {
+    match typ {
+        Type::Void => 1,
+        Type::Bool | Type::Char => 1,
+        Type::Int | Type::Float => 4,
+        Type::Pointer { .. } => Type::Pointer {
+            base: Box::new(Type::Int),
+        }
+        .size_in_bytes(),
+        Type::Array { base, .. } => type_alignment(base),
+        Type::Function { .. } => 1,
     }
 }
 
@@ -170,7 +184,7 @@ impl DumpLLVM for Op {
                     s,
                     "alloca {}, align {}",
                     typ.dump_to_llvm(ctx)?,
-                    typ.size_in_bytes()
+                    type_alignment(typ)
                 )?;
             }
             OpData::GlobalAlloca(_) => {
@@ -242,6 +256,7 @@ impl DumpLLVM for Op {
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     Operand::Int(_) => Type::Int,
                     Operand::Float(_) => Type::Float,
+                    Operand::Param { typ, .. } => typ.clone(),
                     _ => Type::Int,
                 };
                 let ptr_ty = match addr {
@@ -852,23 +867,26 @@ impl DumpLLVM for Program {
 
                     writeln!(
                         s,
-                        "@{} = dso_local {} {} {}, align 4",
+                        "@{} = dso_local {} {} {}, align {}",
                         name,
                         if *mutable { "global" } else { "constant" },
                         typ.dump_to_llvm(&program_ctx)?,
-                        initializer_str
+                        initializer_str,
+                        type_alignment(typ)
                     )?;
                 } else if let Some(name) = name {
                     // Non-array global
                     let pointee_type = if let Type::Pointer { base } = &global_op.typ {
-                        base.dump_to_llvm(&program_ctx)?
+                        base.as_ref().clone()
                     } else {
-                        global_op.typ.dump_to_llvm(&program_ctx)?
+                        global_op.typ.clone()
                     };
                     writeln!(
                         s,
-                        "@{} = dso_local global {} zeroinitializer, align 4",
-                        name, pointee_type
+                        "@{} = dso_local global {} zeroinitializer, align {}",
+                        name,
+                        pointee_type.dump_to_llvm(&program_ctx)?,
+                        type_alignment(&pointee_type)
                     )?;
                 }
             }

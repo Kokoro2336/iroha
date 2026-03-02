@@ -456,7 +456,7 @@ impl Operand {
 impl std::fmt::Display for Operand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Operand::Value(op_id) => write!(f, "%{}", op_id),
+            Operand::Value(op_id) => write!(f, "%val_{}", op_id),
             Operand::BB(bb_id) => write!(f, "%{}", bb_id),
             Operand::Global(global_id) => write!(f, "@{}", global_id),
             Operand::Int(value) => write!(f, "{}", value),

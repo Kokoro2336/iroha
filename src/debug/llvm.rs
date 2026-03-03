@@ -27,8 +27,12 @@ fn op_name_attr(op: &Op) -> Option<&str> {
 fn value_operand_name(id: usize, ctx: &DumpContext) -> String {
     if let Some(func) = ctx.function {
         let op = &func.dfg[id];
-        if let Some(name) = op_name_attr(op) {
-            return format!("%val_{}", name);
+        if matches!(op.data, OpData::Alloca(_)) {
+            if let Some(name) = op_name_attr(op) {
+                const MAX_LOCAL_NAME_CHARS: usize = 128;
+                let trimmed_name: String = name.chars().take(MAX_LOCAL_NAME_CHARS).collect();
+                return format!("%val_{}_{}", trimmed_name, id);
+            }
         }
     }
     format!("%val_{}", id)
@@ -40,6 +44,10 @@ fn global_operand_name(id: usize, ctx: &DumpContext) -> String {
         return format!("@{}", name);
     }
     format!("@{}", id)
+}
+
+fn format_float_literal(value: f32) -> String {
+    format!("0x{:016X}", (value as f64).to_bits())
 }
 
 fn operand_type(operand: &Operand, ctx: &DumpContext, default: Type) -> Type {
@@ -56,7 +64,7 @@ fn operand_type(operand: &Operand, ctx: &DumpContext, default: Type) -> Type {
         Operand::Float(_) => Type::Float,
         Operand::Bool(_) => Type::Bool,
         Operand::Param { typ, .. } => typ.clone(),
-        _ => default,
+        Operand::BB(_) | Operand::Func(_) | Operand::Reg(_) | Operand::Undefined => default,
     }
 }
 
@@ -91,7 +99,7 @@ impl DumpLLVM for Type {
                 write!(s, "{}", current)?;
             }
             Type::Char => write!(s, "i8")?,
-            _ => todo!("dump type {:?}", self),
+            Type::Function { .. } => todo!("dump type {:?}", self),
         }
         Ok(s)
     }
@@ -104,7 +112,7 @@ impl DumpLLVM for Operand {
             Operand::Value(id) => write!(s, "{}", value_operand_name(*id, ctx))?,
             Operand::Global(id) => write!(s, "{}", global_operand_name(*id, ctx))?,
             Operand::Int(val) => write!(s, "{}", val)?,
-            Operand::Float(val) => write!(s, "{}", val)?,
+            Operand::Float(val) => write!(s, "{}", format_float_literal(*val))?,
             Operand::Bool(val) => write!(s, "{}", val)?,
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
             Operand::Param { idx, .. } => write!(s, "%arg{}", idx)?,
@@ -132,7 +140,14 @@ impl DumpLLVM for Op {
                         t
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
-                    _ => Type::Pointer {
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Bool(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
                 };
@@ -167,7 +182,12 @@ impl DumpLLVM for Op {
                         Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                         Operand::Int(_) => Type::Int,
                         Operand::Float(_) => Type::Float,
-                        _ => Type::Int,
+                        Operand::Bool(_) => Type::Bool,
+                        Operand::BB(_)
+                        | Operand::Func(_)
+                        | Operand::Param { .. }
+                        | Operand::Reg(_)
+                        | Operand::Undefined => Type::Int,
                     };
                     write!(
                         s,
@@ -231,7 +251,14 @@ impl DumpLLVM for Op {
                         t
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
-                    _ => Type::Pointer {
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Bool(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
                 };
@@ -256,8 +283,11 @@ impl DumpLLVM for Op {
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     Operand::Int(_) => Type::Int,
                     Operand::Float(_) => Type::Float,
+                    Operand::Bool(_) => Type::Bool,
                     Operand::Param { typ, .. } => typ.clone(),
-                    _ => Type::Int,
+                    Operand::BB(_) | Operand::Func(_) | Operand::Reg(_) | Operand::Undefined => {
+                        Type::Int
+                    }
                 };
                 let ptr_ty = match addr {
                     Operand::Value(id) => {
@@ -270,7 +300,14 @@ impl DumpLLVM for Op {
                         t
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
-                    _ => Type::Pointer {
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Bool(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
                 };
@@ -479,7 +516,14 @@ impl DumpLLVM for Op {
                         t
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
-                    _ => Type::Int,
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Bool(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Int,
                 };
                 write!(
                     s,
@@ -499,7 +543,14 @@ impl DumpLLVM for Op {
                         t
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
-                    _ => Type::Float,
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Bool(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Float,
                 };
 
                 write!(
@@ -521,7 +572,13 @@ impl DumpLLVM for Op {
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     Operand::Bool(_) => Type::Bool,
-                    _ => Type::Bool,
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Bool,
                 };
 
                 write!(
@@ -543,7 +600,13 @@ impl DumpLLVM for Op {
                     }
                     Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                     Operand::Bool(_) => Type::Bool,
-                    _ => Type::Bool,
+                    Operand::BB(_)
+                    | Operand::Func(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => Type::Bool,
                 };
 
                 write!(
@@ -573,7 +636,15 @@ impl DumpLLVM for Op {
             OpData::Call { func, args } => {
                 let func_name = match func {
                     Operand::Func(id) => ctx.program.funcs[*id].name.clone(),
-                    _ => "unknown".to_string(),
+                    Operand::Value(_)
+                    | Operand::BB(_)
+                    | Operand::Global(_)
+                    | Operand::Int(_)
+                    | Operand::Float(_)
+                    | Operand::Bool(_)
+                    | Operand::Param { .. }
+                    | Operand::Reg(_)
+                    | Operand::Undefined => "unknown".to_string(),
                 };
                 write!(s, "call {} @{}(", self.typ.dump_to_llvm(ctx)?, func_name)?;
                 for (i, arg) in args.iter().enumerate() {
@@ -588,7 +659,12 @@ impl DumpLLVM for Op {
                         Operand::Global(id) => ctx.program.globals[*id].typ.clone(),
                         Operand::Int(_) => Type::Int,
                         Operand::Float(_) => Type::Float,
-                        _ => Type::Int,
+                        Operand::Bool(_) => Type::Bool,
+                        Operand::BB(_)
+                        | Operand::Func(_)
+                        | Operand::Param { .. }
+                        | Operand::Reg(_)
+                        | Operand::Undefined => Type::Int,
                     };
                     write!(
                         s,
@@ -803,7 +879,9 @@ impl DumpLLVM for Program {
                                         let v = &values[i];
                                         match v {
                                             ast::Literal::Int(x) => write!(s, "i32 {}", x)?,
-                                            ast::Literal::Float(x) => write!(s, "float {}", x)?,
+                                            ast::Literal::Float(x) => {
+                                                write!(s, "float {}", format_float_literal(*x))?
+                                            }
                                             _ => {}
                                         }
                                         if i < current_dim - 1 {
@@ -845,7 +923,7 @@ impl DumpLLVM for Program {
                                 if let Some(v) = values.get(0) {
                                     match v {
                                         ast::Literal::Int(x) => Ok(x.to_string()),
-                                        ast::Literal::Float(x) => Ok(x.to_string()),
+                                        ast::Literal::Float(x) => Ok(format_float_literal(*x)),
                                         _ => Ok("zeroinitializer".to_string()),
                                     }
                                 } else {

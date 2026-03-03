@@ -290,8 +290,7 @@ impl<'a> SCCP<'a> {
                     // If not foldable, we just meet the lattices of the operands.
                     let lattice_list =
                         vec![
-
-                        // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
+                            // DO NOT invoke get_xx_id() directly. We just ignore non-value operands, never panics.
                             Self::get_lattice(self, &lhs),
                             Self::get_lattice(self, &rhs)
                         ];

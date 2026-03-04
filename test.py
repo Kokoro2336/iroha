@@ -96,8 +96,7 @@ def main():
     parser = argparse.ArgumentParser(description='Compiler Test Runner')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--test', type=str, help='Test file name (excluding .sy suffix) or test number')
-    group.add_argument('--test-all', action='store_true', help='Test all .sy source files')
-    parser.add_argument('--hidden', action='store_true', help='Include hidden functional tests')
+    group.add_argument('--basic', action='store_true', help='Test all .sy source files (including hidden tests)')
     parser.add_argument('--clean', action='store_true', help='Clean test directories before running')
     parser.add_argument('--graph', action='store_true', help='Generate CFG graphs (.dot/.svg) from linked LLVM IR using opt + graphviz')
     parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -108,7 +107,7 @@ def main():
 
     exec_mode = 'llc' if args.llc else 'lli'
 
-    if args.clean and not (args.test or args.test_all or args.hidden):
+    if args.clean and not (args.test or args.basic):
         clean_directory("./test")
         print("Cleaned test directory.")
         sys.exit(0)
@@ -131,12 +130,7 @@ def main():
     functional_dir = os.path.join(base_dir, "functional")
     h_functional_dir = os.path.join(base_dir, "h_functional")
 
-    if args.test_all and args.hidden:
-        search_dirs = [functional_dir, h_functional_dir]
-    elif args.hidden:
-        search_dirs = [h_functional_dir]
-    else:
-        search_dirs = [functional_dir]
+    search_dirs = [functional_dir, h_functional_dir]
 
     if args.test:
         # Find specific test file
@@ -146,7 +140,7 @@ def main():
             current_search_dirs = [h_functional_dir]
         else:
             search_prefix = args.test
-            current_search_dirs = [functional_dir]
+            current_search_dirs = [functional_dir, h_functional_dir]
 
         target_name = search_prefix + ".sy"
         all_sy = []
@@ -161,7 +155,7 @@ def main():
         if not found:
             print(f"Test file {args.test} not found.")
             sys.exit(1)
-    elif args.test_all or args.hidden:
+    elif args.basic:
         # Find all test files
         for d in search_dirs:
             test_files.extend(find_files(d, ".sy"))
@@ -179,7 +173,7 @@ def main():
     sylib_ll = "./sylib/sylib.ll"
 
     # clean test/ first
-    if args.test_all or args.hidden or args.clean:
+    if args.basic or args.clean:
         clean_directory(test_output_base)
     passed = 0
     failed = 0

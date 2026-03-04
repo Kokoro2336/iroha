@@ -41,7 +41,8 @@ impl<'a> RemoveTrivialPhi<'a> {
                         PhiIncoming::Data { value, bb } => (value, bb),
                         PhiIncoming::None => continue,
                     };
-                    if matches!(value, Operand::Undefined) || *value == phi {
+                    // Crucial: Treat Undefined as a concrete value, you should not ignore it.
+                    if *value == phi {
                         continue;
                     }
 

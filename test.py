@@ -48,6 +48,50 @@ def normalize_output_bytes(data: bytes) -> bytes:
         lines.pop()
     return b"\n".join(lines)
 
+def generate_cfg_graphs(ll_path: str, graph_dir: str, test_name: str):
+    os.makedirs(graph_dir, exist_ok=True)
+    abs_ll_path = os.path.abspath(ll_path)
+
+    opt_commands = [
+        ["opt", "-passes=dot-cfg", "-disable-output", "-disable-verify", abs_ll_path],
+        ["opt", "-enable-new-pm=0", "-dot-cfg", "-disable-output", "-disable-verify", abs_ll_path],
+        ["opt", "-enable-new-pm=0", "-dot-cfg-only", "-disable-output", "-disable-verify", abs_ll_path],
+    ]
+
+    opt_ok = False
+    opt_stderr = b""
+    for cmd in opt_commands:
+        result = subprocess.run(cmd, cwd=graph_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        opt_stderr += result.stderr
+        if result.returncode == 0:
+            opt_ok = True
+            break
+
+    if not opt_ok:
+        return 1, b"", opt_stderr + b"\n[ERROR] Failed to generate CFG .dot via opt\n"
+
+    dot_files = [f for f in os.listdir(graph_dir) if f.endswith(".dot")]
+    if not dot_files:
+        return 1, b"", b"[ERROR] opt succeeded but produced no .dot files\n"
+    graphviz_stdout = b""
+    graphviz_stderr = b""
+
+    for dot_file in dot_files:
+        dot_path = os.path.join(graph_dir, dot_file)
+        svg_base = os.path.splitext(dot_file)[0]
+        svg_path = os.path.join(graph_dir, f"{test_name}_{svg_base}.svg")
+        dot_result = subprocess.run(
+            ["dot", "-Tsvg", dot_path, "-o", svg_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        graphviz_stdout += dot_result.stdout
+        graphviz_stderr += dot_result.stderr
+        if dot_result.returncode != 0:
+            return dot_result.returncode, graphviz_stdout, graphviz_stderr + b"\n[ERROR] Graphviz dot failed\n"
+
+    return 0, graphviz_stdout, graphviz_stderr
+
 def main():
     parser = argparse.ArgumentParser(description='Compiler Test Runner')
     group = parser.add_mutually_exclusive_group()
@@ -55,7 +99,7 @@ def main():
     group.add_argument('--test-all', action='store_true', help='Test all .sy source files')
     parser.add_argument('--hidden', action='store_true', help='Include hidden functional tests')
     parser.add_argument('--clean', action='store_true', help='Clean test directories before running')
-    parser.add_argument('--graph', action='store_true', help='Dump AST graph')
+    parser.add_argument('--graph', action='store_true', help='Generate CFG graphs (.dot/.svg) from linked LLVM IR using opt + graphviz')
     parser.add_argument('--trace', action='store_true', help='Enable trace logging')
     backend_group = parser.add_mutually_exclusive_group()
     backend_group.add_argument('--lli', action='store_true', help='Use lli to interpret linked .ll')
@@ -161,7 +205,9 @@ def main():
             output_file_name = f"{name_no_ext}.out"
             linked_ll_name = f"{name_no_ext}.linked.ll"
             target_dir = os.path.join(work_test_output_dir, "target")
+            graph_output_dir = os.path.join(work_test_output_dir, "graph")
             os.makedirs(target_dir, exist_ok=True)
+            os.makedirs(graph_output_dir, exist_ok=True)
             linked_ll_path = os.path.join(target_dir, linked_ll_name)
             if os.path.exists(linked_ll_path):
                 os.unlink(linked_ll_path)
@@ -191,20 +237,33 @@ def main():
                         final_stderr += (
                             f"\n[ERROR] Generated LLVM IR not found: {generated_ll}\n"
                         ).encode()
-                    elif not os.path.exists(sylib_ll):
-                        final_returncode = 1
-                        final_stderr += (
-                            f"\n[ERROR] Runtime library LLVM IR not found: {sylib_ll}\n"
-                        ).encode()
                     else:
-                        link_cmd = ["llvm-link", generated_ll, sylib_ll, "-S", "-o", linked_ll_path]
-                        link_result = subprocess.run(link_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        final_stdout += link_result.stdout
-                        final_stderr += link_result.stderr
+                        if args.graph:
+                            graph_code, graph_stdout, graph_stderr = generate_cfg_graphs(
+                                generated_ll,
+                                graph_output_dir,
+                                name_no_ext,
+                            )
+                            final_stdout += graph_stdout
+                            final_stderr += graph_stderr
+                            if graph_code != 0:
+                                final_returncode = graph_code
 
-                        if link_result.returncode != 0:
-                            final_returncode = link_result.returncode
-                        else:
+                        if final_returncode == 0 and not os.path.exists(sylib_ll):
+                            final_returncode = 1
+                            final_stderr += (
+                                f"\n[ERROR] Runtime library LLVM IR not found: {sylib_ll}\n"
+                            ).encode()
+
+                        if final_returncode == 0:
+                            link_cmd = ["llvm-link", generated_ll, sylib_ll, "-S", "-o", linked_ll_path]
+                            link_result = subprocess.run(link_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            final_stdout += link_result.stdout
+                            final_stderr += link_result.stderr
+
+                            if link_result.returncode != 0:
+                                final_returncode = link_result.returncode
+                        if final_returncode == 0:
                             input_file = os.path.splitext(test_file)[0] + ".in"
                             if exec_mode == 'lli':
                                 lli_cmd = ["lli", linked_ll_path]
@@ -353,7 +412,7 @@ def main():
                     for f in os.listdir(logs_dir):
                         shutil.move(os.path.join(logs_dir, f), os.path.join(work_test_output_dir, f))
                 
-                # Move graphs
+                # Move compiler-generated graphs (if any)
                 if os.path.exists(graphs_dir):
                     for f in os.listdir(graphs_dir):
                         shutil.move(os.path.join(graphs_dir, f), os.path.join(work_test_output_dir, f))

@@ -145,11 +145,11 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
 
                 let gep_base_ty = match &ptr_ty {
@@ -183,9 +183,9 @@ impl DumpLLVM for Op {
                         Operand::Int(_) => Type::Int,
                         Operand::Float(_) => Type::Float,
                         Operand::Bool(_) => Type::Bool,
+                        Operand::Param { typ, .. } => typ.clone(),
                         Operand::BB(_)
                         | Operand::Func(_)
-                        | Operand::Param { .. }
                         | Operand::Reg(_)
                         | Operand::Undefined => Type::Int,
                     };
@@ -256,11 +256,11 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
 
                 write!(
@@ -305,11 +305,11 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
 
                 write!(
@@ -521,9 +521,9 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Int,
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
                 write!(
                     s,
@@ -548,9 +548,9 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Float,
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
 
                 write!(
@@ -576,9 +576,9 @@ impl DumpLLVM for Op {
                     | Operand::Func(_)
                     | Operand::Int(_)
                     | Operand::Float(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Bool,
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
 
                 write!(
@@ -604,9 +604,9 @@ impl DumpLLVM for Op {
                     | Operand::Func(_)
                     | Operand::Int(_)
                     | Operand::Float(_)
-                    | Operand::Param { .. }
                     | Operand::Reg(_)
                     | Operand::Undefined => Type::Bool,
+                    Operand::Param { typ, .. } => typ.clone(),
                 };
 
                 write!(
@@ -660,9 +660,9 @@ impl DumpLLVM for Op {
                         Operand::Int(_) => Type::Int,
                         Operand::Float(_) => Type::Float,
                         Operand::Bool(_) => Type::Bool,
+                        Operand::Param { typ, .. } => typ.clone(),
                         Operand::BB(_)
                         | Operand::Func(_)
-                        | Operand::Param { .. }
                         | Operand::Reg(_)
                         | Operand::Undefined => Type::Int,
                     };

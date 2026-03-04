@@ -41,8 +41,6 @@ pub struct SCCP<'a> {
     // Ancillary infrastructure
     // We need to know the mapping from op_id to bb_id for phi nodes.
     op_to_bb: Vec<Operand>,
-    phi_ops: Vec<Operand>,
-    in_phi_ops: BitSet,
     // br_ops excluding ret.
     br_ops: Vec<Operand>,
     in_br_ops: BitSet,
@@ -62,8 +60,6 @@ impl<'a> SCCP<'a> {
             in_inst_list: BitSet::new(),
             visited: BitSet::new(),
             op_to_bb: Vec::new(),
-            phi_ops: Vec::new(),
-            in_phi_ops: BitSet::new(),
             br_ops: Vec::new(),
             in_br_ops: BitSet::new(),
             current_function: None,
@@ -230,8 +226,6 @@ impl<'a> SCCP<'a> {
         self.inst_list.clear();
         self.in_inst_list.clear();
 
-        self.phi_ops.clear();
-        self.in_phi_ops.clear();
         self.br_ops.clear();
         self.in_br_ops.clear();
     }
@@ -396,11 +390,6 @@ impl<'a> SCCP<'a> {
     }
 
     fn visit_phi(&mut self, op_id: Operand) {
-        // push the phi first.
-        if !self.in_phi_ops.contains(op_id.get_op_id()) {
-            self.in_phi_ops.insert(op_id.get_op_id());
-            self.phi_ops.push(op_id.clone());
-        }
         let func = match self.current_function {
             Some(idx) => idx,
             None => panic!("SCCP visit_phi: current_function is None"), // should not happen
@@ -533,7 +522,9 @@ impl<'a> SCCP<'a> {
             .collect::<Vec<(Operand, Operand)>>();
 
         // Slay the edge of dead block in phi operations.
-        for phi_op in self.phi_ops.iter() {
+        let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+        let phis = self.builder.get_all_ops(&mut ctx, OpType::Phi);
+        for phi_op in &phis {
             let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
             let op = dfg[phi_op.clone()].clone();
             if let OpData::Phi { incoming } = op.data {
@@ -805,7 +796,7 @@ impl<'a> SCCP<'a> {
         }
 
         // Collect the surviving phi nodes after rewriting.
-        self.phi_ops
+        phis
             .iter()
             .filter_map(|phi_op| {
                 let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;

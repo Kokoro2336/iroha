@@ -115,7 +115,11 @@ impl<'a> RemoveTrivialPhi<'a> {
                                 .map(|(id, bb)| (id.clone(), bb.clone()))
                             {
                                 // We should check whether the user phi is already in the worklist to avoid duplicate entries.
-                                if !self.worklist.iter().any(|(w_id, _, _)| *w_id == id) {
+                                let pos = self.worklist.iter().position(|(w_id, _, _)| *w_id == id);
+                                if let Some(pos) = pos {
+                                    self.worklist[pos] =
+                                        (id.clone(), bb.clone(), check_result);
+                                } else {
                                     self.worklist.push((id.clone(), bb.clone(), check_result));
                                 }
                             }
@@ -139,7 +143,11 @@ impl<'a> RemoveTrivialPhi<'a> {
                                 .map(|(id, bb)| (id.clone(), bb.clone()))
                             {
                                 // We should check whether the user phi is already in the worklist to avoid duplicate entries.
-                                if !self.worklist.iter().any(|(w_id, _, _)| *w_id == id) {
+                                let pos = self.worklist.iter().position(|(w_id, _, _)| *w_id == id);
+                                if let Some(pos) = pos {
+                                    self.worklist[pos] =
+                                        (id.clone(), bb.clone(), check_result);
+                                } else {
                                     self.worklist.push((id.clone(), bb.clone(), check_result));
                                 }
                             }

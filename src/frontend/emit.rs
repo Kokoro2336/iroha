@@ -567,7 +567,7 @@ impl Emit {
                                     acc + x
                                 }
                             });
-                            let op_id = self.emit(init_values[idx]);
+                            let op_id = emit_rval(self, init_values[idx]);
 
                             let mut ctx =
                                 context_or_err!(self, "Local array init outside function");
@@ -595,7 +595,7 @@ impl Emit {
                                     vec![],
                                     OpData::Store {
                                         addr,
-                                        value: op_id.unwrap(),
+                                        value: op_id,
                                     },
                                 ),
                             );

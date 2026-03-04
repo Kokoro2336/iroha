@@ -297,7 +297,7 @@ impl Parser {
 
                 if mutable {
                     let init_values = if let Some(init_val) = raw_decl.init_val {
-                        self.flatten(aggr_typ.clone(), dims.clone(), init_val)
+                        self.flatten(aggr_typ.clone(), dims.clone(), init_val, self.is_global())
                     } else {
                         None
                     };
@@ -323,7 +323,7 @@ impl Parser {
                             base: Box::new(aggr_typ.clone()),
                             dims: dims.clone(),
                         },
-                        init_values: self.flatten(aggr_typ.clone(), dims, init_val),
+                        init_values: self.flatten(aggr_typ.clone(), dims, init_val, self.is_global()),
                     };
 
                     let const_array_id = self.ast.alloc(const_array);
@@ -341,10 +341,11 @@ impl Parser {
         base_typ: Type,
         indices: Vec<u32>,
         node_id: NodeId,
+        is_global: bool,
     ) -> Option<Vec<NodeId>> {
         let node = self.take_node(node_id);
         let init_vals = if let Node::ArrayInitVal { init_vals } = node {
-            if init_vals.is_empty() {
+            if init_vals.is_empty() && is_global {
                 return None;
             }
             init_vals
@@ -378,7 +379,7 @@ impl Parser {
         }
 
         info!("Successfully flattened array: {:?}", new_vals);
-        if !has_non_zero {
+        if !has_non_zero && is_global {
             None
         } else {
             Some(new_vals)

@@ -115,6 +115,10 @@ fn main() -> Result<()> {
     let mut ir = Emit::new(result).run();
     info!("Finish Emitting.");
 
+    info!("Start Running Mem2Reg.");
+    Mem2Reg::new(&mut ir).run();
+    info!("Finish Running Mem2Reg.");
+
     info!("Start Dumping LLVM IR.");
     let filename = input_path
         .file_stem()
@@ -123,10 +127,6 @@ fn main() -> Result<()> {
         .to_string();
     DumpLLVMPass::new(&mut ir, filename).run();
     info!("Finish Dumping LLVM IR.");
-
-    info!("Start Running Mem2Reg.");
-    Mem2Reg::new(&mut ir).run();
-    info!("Finish Running Mem2Reg.");
 
     info!("Start Running SCCP.");
     SCCP::new(&mut ir).run();

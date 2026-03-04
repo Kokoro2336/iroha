@@ -57,7 +57,12 @@ def main():
     parser.add_argument('--clean', action='store_true', help='Clean test directories before running')
     parser.add_argument('--graph', action='store_true', help='Dump AST graph')
     parser.add_argument('--trace', action='store_true', help='Enable trace logging')
+    backend_group = parser.add_mutually_exclusive_group()
+    backend_group.add_argument('--lli', action='store_true', help='Use lli to interpret linked .ll')
+    backend_group.add_argument('--llc', action='store_true', help='Use llc to compile linked .ll into executable and run it')
     args = parser.parse_args()
+
+    exec_mode = 'llc' if args.llc else 'lli'
 
     if args.clean and not (args.test or args.test_all or args.hidden):
         clean_directory("./test")
@@ -155,7 +160,9 @@ def main():
             # We specify an output file in CWD, then move it.
             output_file_name = f"{name_no_ext}.out"
             linked_ll_name = f"{name_no_ext}.linked.ll"
-            linked_ll_path = os.path.join(work_test_output_dir, linked_ll_name)
+            target_dir = os.path.join(work_test_output_dir, "target")
+            os.makedirs(target_dir, exist_ok=True)
+            linked_ll_path = os.path.join(target_dir, linked_ll_name)
             if os.path.exists(linked_ll_path):
                 os.unlink(linked_ll_path)
             
@@ -199,29 +206,95 @@ def main():
                             final_returncode = link_result.returncode
                         else:
                             input_file = os.path.splitext(test_file)[0] + ".in"
-                            lli_cmd = ["lli", linked_ll_path]
-                            if os.path.exists(input_file):
-                                with open(input_file, "rb") as f_in:
-                                    lli_result = subprocess.run(
+                            if exec_mode == 'lli':
+                                lli_cmd = ["lli", linked_ll_path]
+                                if os.path.exists(input_file):
+                                    with open(input_file, "rb") as f_in:
+                                        exec_result = subprocess.run(
+                                            lli_cmd,
+                                            stdin=f_in,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                        )
+                                else:
+                                    exec_result = subprocess.run(
                                         lli_cmd,
-                                        stdin=f_in,
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE,
                                     )
                             else:
-                                lli_result = subprocess.run(
-                                    lli_cmd,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                )
-                            runtime_raw = lli_result.stdout
-                            runtime_with_ret = runtime_raw
-                            if not runtime_with_ret.endswith(b"\n"):
-                                runtime_with_ret += b"\n"
-                            runtime_with_ret += f"{lli_result.returncode}\n".encode()
+                                obj_path = os.path.join(target_dir, f"{name_no_ext}.o")
+                                asm_path = os.path.join(target_dir, f"{name_no_ext}.s")
+                                exe_path = os.path.join(target_dir, f"{name_no_ext}.out")
 
-                            final_stdout += runtime_with_ret
-                            final_stderr += lli_result.stderr
+                                llc_asm_cmd = ["llc", linked_ll_path, "-filetype=asm", "-o", asm_path]
+                                llc_asm_result = subprocess.run(llc_asm_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                final_stdout += llc_asm_result.stdout
+                                final_stderr += llc_asm_result.stderr
+
+                                if llc_asm_result.returncode != 0:
+                                    final_returncode = llc_asm_result.returncode
+                                    exec_result = None
+                                else:
+                                    llc_obj_cmd = ["llc", linked_ll_path, "-filetype=obj", "-o", obj_path]
+                                    llc_obj_result = subprocess.run(llc_obj_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                    final_stdout += llc_obj_result.stdout
+                                    final_stderr += llc_obj_result.stderr
+
+                                    if llc_obj_result.returncode != 0:
+                                        final_returncode = llc_obj_result.returncode
+                                        exec_result = None
+
+                                    linker = shutil.which("clang") or shutil.which("cc") or shutil.which("gcc")
+                                    if linker is None:
+                                        final_returncode = 1
+                                        final_stderr += b"\n[ERROR] No system linker found (clang/cc/gcc).\n"
+                                        exec_result = None
+                                    else:
+                                        link_exe_cmd = [linker, obj_path, "-o", exe_path, "-no-pie"]
+                                        link_exe_result = subprocess.run(
+                                            link_exe_cmd,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                        )
+                                        final_stdout += link_exe_result.stdout
+                                        final_stderr += link_exe_result.stderr
+
+                                        if link_exe_result.returncode != 0:
+                                            final_returncode = link_exe_result.returncode
+                                            exec_result = None
+                                        else:
+                                            if os.path.exists(input_file):
+                                                with open(input_file, "rb") as f_in:
+                                                    exec_result = subprocess.run(
+                                                        [exe_path],
+                                                        stdin=f_in,
+                                                        stdout=subprocess.PIPE,
+                                                        stderr=subprocess.PIPE,
+                                                    )
+                                            else:
+                                                exec_result = subprocess.run(
+                                                    [exe_path],
+                                                    stdout=subprocess.PIPE,
+                                                    stderr=subprocess.PIPE,
+                                                )
+
+                            if exec_result is None:
+                                runtime_raw = b""
+                                runtime_with_ret = None
+                            else:
+                                runtime_raw = exec_result.stdout
+                                runtime_with_ret = runtime_raw
+                                if not runtime_with_ret.endswith(b"\n"):
+                                    runtime_with_ret += b"\n"
+                                runtime_with_ret += f"{exec_result.returncode}\n".encode()
+
+                                final_stdout += runtime_with_ret
+                                final_stderr += exec_result.stderr
+
+                            if final_returncode == 0 and runtime_with_ret is None:
+                                final_returncode = 1
+                                final_stderr += b"\n[ERROR] Runtime execution did not produce output.\n"
 
                 expected_output_file = os.path.splitext(test_file)[0] + ".out"
                 if final_returncode == 0:
@@ -288,7 +361,12 @@ def main():
                 # Move dumped LLVM IR
                 if os.path.exists(dump_llvm_dir):
                     for f in os.listdir(dump_llvm_dir):
-                        shutil.move(os.path.join(dump_llvm_dir, f), os.path.join(work_test_output_dir, f))
+                        src = os.path.join(dump_llvm_dir, f)
+                        if f.endswith('.ll'):
+                            dst = os.path.join(target_dir, f)
+                        else:
+                            dst = os.path.join(work_test_output_dir, f)
+                        shutil.move(src, dst)
                 
                 # Move output file
                 if os.path.exists(output_file_name):

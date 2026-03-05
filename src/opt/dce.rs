@@ -81,7 +81,15 @@ impl<'a> DCE<'a> {
             }
         }
     }
+}
 
+impl<'a> Pass<'a> for DCE<'a> {
+    fn name(&self) -> &str {
+        "DCE"
+    }
+    fn set_program(&mut self, program: &'a mut crate::ir::mir::Program) {
+        self.program = Some(program);
+    }
     fn run(&mut self) {
         fn check(this: &mut DCE, operand: &Operand) {
             let program = this.program.as_ref().unwrap();
@@ -207,17 +215,5 @@ impl<'a> DCE<'a> {
                 }
             }
         }
-    }
-}
-
-impl<'a> Pass<'a> for DCE<'a> {
-    fn name(&self) -> &str {
-        "DCE"
-    }
-    fn set_program(&mut self, program: &'a mut crate::ir::mir::Program) {
-        self.program = Some(program);
-    }
-    fn run(&mut self) {
-        self.run()
     }
 }

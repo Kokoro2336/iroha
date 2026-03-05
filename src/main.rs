@@ -71,6 +71,7 @@ fn main() -> Result<()> {
     let mut ir = Emit::new(result).run();
     info!("Finish Emitting.");
 
+    // Run optimizations.
     PassManager::new(&cli)
         .register(Box::new(Mem2Reg::new()))
         .register(Box::new(RemoveTrivialPhi::new()))

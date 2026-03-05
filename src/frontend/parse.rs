@@ -37,6 +37,19 @@ impl Parser {
         self.ast.remove(id)
     }
 
+    fn cast(literal: Literal, typ: &Type) -> Literal {
+        match (literal, typ) {
+            (Literal::Int(v), Type::Int) => Literal::Int(v),
+            (Literal::Float(v), Type::Float) => Literal::Float(v),
+            (Literal::Int(v), Type::Float) => Literal::Float(v as f32),
+            (Literal::Float(v), Type::Int) => Literal::Int(v as i32),
+            (lit, _) => panic!(
+                "Const variable initializer literal {:?} does not match declaration type {:?}",
+                lit, typ
+            ),
+        }
+    }
+
     // early constant folding optimization
     // NOTE: fold consumes the ownership of node.
     pub fn fold(&mut self, node: Node) -> Node {
@@ -253,9 +266,10 @@ impl Parser {
                     if let Some(init_val) = init_value {
                         let init_node = self.take_node(init_val);
                         let folded_init_val = self.fold(init_node);
-                        let folded_init_id = self.ast.alloc(folded_init_val);
-                        match self.ast[folded_init_id] {
-                            Node::Literal(_) => {
+                        match folded_init_val {
+                            Node::Literal(literal) => {
+                                let coerced_literal = Self::cast(literal, &aggr_typ);
+                                let folded_init_id = self.ast.alloc(Node::Literal(coerced_literal));
                                 self.syms.insert(raw_decl.ident.clone(), folded_init_id);
                                 init_value = Some(folded_init_id);
                             }
@@ -323,7 +337,12 @@ impl Parser {
                             base: Box::new(aggr_typ.clone()),
                             dims: dims.clone(),
                         },
-                        init_values: self.flatten(aggr_typ.clone(), dims, init_val, self.is_global()),
+                        init_values: self.flatten(
+                            aggr_typ.clone(),
+                            dims,
+                            init_val,
+                            self.is_global(),
+                        ),
                     };
 
                     let const_array_id = self.ast.alloc(const_array);

@@ -935,7 +935,11 @@ impl Builder {
                 }
                 // Critical: retrieve the data again, DO NOT use the cloned one!
                 if let OpData::Phi { incoming } = &mut dfg[phi_id].data {
-                    incoming.remove(pos);
+                    incoming.swap_remove(pos);
+                }
+                // Check whether the phi node has no incoming edge. If so, we remove it.
+                if incoming.is_empty() {
+                    dfg.remove(phi_id);
                 }
             } else {
                 panic!(

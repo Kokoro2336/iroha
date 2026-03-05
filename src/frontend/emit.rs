@@ -379,15 +379,32 @@ impl Emit {
                 self.emit(body);
 
                 if self.has_active_insertion_point() && !self.current_block_has_terminator() {
-                    match typ {
-                        Type::Function { return_type, .. } => {
-                            if !matches!(*return_type, Type::Void) {
-                                // TODO: Add reachability check to determine whether the implicit return is actually reachable.
-                            }
-                        }
-                        _ => panic!("Function type expected"),
-                    }
-                    self.insert_terminator_and_unplug(OpData::Ret { value: None });
+                    // Add reachability check to determine whether the implicit return is actually reachable.
+                    // We simply apply a dummy ret here.
+                    // The type might mismatch with function return type, but it's ok, since the later simplify CFG pass will remove it if it's not reachable.
+                    let op_data = match self.program.funcs[self.current_function.unwrap()]
+                        .typ
+                        .clone()
+                    {
+                        Type::Function { return_type, .. } => match *return_type {
+                            Type::Void => OpData::Ret { value: None },
+                            Type::Int => OpData::Ret {
+                                value: Some(Operand::Int(0)),
+                            },
+                            Type::Float => OpData::Ret {
+                                value: Some(Operand::Float(0.0)),
+                            },
+                            Type::Bool => OpData::Ret {
+                                value: Some(Operand::Bool(false)),
+                            },
+                            _ => unimplemented!(
+                                "Unsupported function return type in Emit: {:?}",
+                                return_type
+                            ),
+                        },
+                        _ => unreachable!("The current function should have a function type"),
+                    };
+                    self.insert_terminator_and_unplug(op_data);
                 }
 
                 self.syms.exit_scope();
@@ -593,10 +610,7 @@ impl Emit {
                                 ir::Op::new(
                                     Type::Void,
                                     vec![],
-                                    OpData::Store {
-                                        addr,
-                                        value: op_id,
-                                    },
+                                    OpData::Store { addr, value: op_id },
                                 ),
                             );
                         }

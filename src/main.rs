@@ -1,51 +1,30 @@
-use clap::Parser;
 use lalrpop_util::lalrpop_mod;
 use std::fs::read_to_string;
 use std::io::Result;
+use clap::Parser;
 
-mod asm;
+mod analysis;
+mod backend;
 mod base;
 mod debug;
 mod frontend;
+mod ir;
 mod opt;
 mod utils;
-use crate::base::Pass;
-use crate::debug::setup;
+mod cli;
+use crate::base::PassManager;
+use crate::debug::log::setup;
 use crate::frontend::parse;
 use crate::frontend::*;
 use crate::opt::*;
 use crate::utils::arena::Arena;
+use crate::cli::Cli;
 
 use debug::info;
-use debug::DumpLLVMPass;
 
 // 引用 lalrpop 生成的解析器
 // 因为我们刚刚创建了 sysy.lalrpop, 所以模块名是 sysy
 lalrpop_mod!(sysy);
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    /// enable this to transform src to koopa ir.
-    #[arg(short = 'k', long = "koopa", default_value_t = false)]
-    koopa: bool,
-
-    /// enable this to transform koopa ir to riscv asm.
-    #[arg(short = 'r', long = "riscv", default_value_t = false)]
-    riscv: bool,
-
-    /// dump graph
-    #[arg(long = "graph", default_value_t = false)]
-    graph: bool,
-
-    /// positional argument for input file.
-    #[arg(value_name = "INPUT")]
-    input: std::path::PathBuf,
-
-    /// use this flag to specify output file.
-    #[arg(short, long, default_value = None)]
-    output: std::path::PathBuf,
-}
 
 fn main() -> Result<()> {
     // setup logging
@@ -53,28 +32,12 @@ fn main() -> Result<()> {
     let _guard = setup("rsyc.log");
     info!("Logger initialized.");
 
-    // preprocess argv so single-dash long-style `-koopa` becomes `--koopa`
-    let args = std::env::args_os()
-        .enumerate()
-        .map(|(i, a)| {
-            if i == 0 {
-                return a;
-            }
-            if let Some(s) = a.to_str() {
-                if s.starts_with('-') && !s.starts_with("--") && &s[1..] == "koopa" {
-                    return std::ffi::OsString::from(format!("--{}", &s[1..]));
-                } else if s.starts_with('-') && !s.starts_with("--") && &s[1..] == "riscv" {
-                    return std::ffi::OsString::from(format!("--{}", &s[1..]));
-                }
-            }
-            a
-        })
-        .collect::<Vec<_>>();
+    // Parse the args
+    let cli = Cli::parse();
 
-    let cli = Cli::parse_from(args);
-
-    let input_path = cli.input;
-    let output = cli.output;
+    let input_path = cli.input.clone();
+    #[allow(unused)]
+    let output = cli.output.clone();
 
     // 读取输入文件
     let input_str = read_to_string(&input_path)?;
@@ -95,8 +58,7 @@ fn main() -> Result<()> {
 
     info!("Start Semantic Analysis.");
     let result = {
-        let mut pass = Semantic::new(result);
-        match pass.run() {
+        match Semantic::new(result).run() {
             Ok(res) => res,
             Err(e) => {
                 panic!("Semantic Error: {}", e);
@@ -109,28 +71,14 @@ fn main() -> Result<()> {
     let mut ir = Emit::new(result).run();
     info!("Finish Emitting.");
 
-    info!("Start Running Mem2Reg.");
-    Mem2Reg::new(&mut ir).run();
-    info!("Finish Running Mem2Reg.");
-
-    info!("Start Running SCCP.");
-    SCCP::new(&mut ir).run();
-    info!("Finish Running SCCP.");
-
-    info!("Start Running DCE.");
-    DCE::new(&mut ir).run();
-    info!("Finish Running DCE. Start running compaction pass.");
-    Compaction::new(&mut ir).run();
-    info!("Finish Running Compaction.");
-
-    info!("Start Dumping LLVM IR.");
-    let filename = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output")
-        .to_string();
-    DumpLLVMPass::new(&mut ir, filename).run();
-    info!("Finish Dumping LLVM IR.");
+    PassManager::new(&cli)
+        .register(Box::new(Mem2Reg::new()))
+        .register(Box::new(RemoveTrivialPhi::new()))
+        .register(Box::new(SCCP::new()))
+        .register(Box::new(RemoveTrivialPhi::new()))
+        .register(Box::new(DCE::new()))
+        .register(Box::new(Compaction::new()))
+        .run(&mut ir);
 
     Ok(())
 }

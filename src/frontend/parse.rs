@@ -1,8 +1,8 @@
-use crate::base::SymbolTable;
 use crate::base::Type;
 use crate::debug::{error, info};
 use crate::frontend::ast::*;
 use crate::utils::arena::Arena;
+use crate::utils::table::SymbolTable;
 
 /**
  * A module which provides a variety of utilities for parsing.
@@ -419,7 +419,7 @@ impl Parser {
         match val {
             Node::ArrayInitVal { init_vals } => {
                 info!("Catch ArrayInitVal at depth {}", depth);
-                if new_vals.len() as u32 % indices.last().unwrap() != 0 {
+                if !(new_vals.len() as u32).is_multiple_of(*indices.last().unwrap()) {
                     panic!("Array has insufficient initializers");
                 }
 
@@ -427,7 +427,7 @@ impl Parser {
                 let mut idx = indices.len();
                 for index in indices.iter().skip(depth as usize).rev() {
                     acc *= *index as usize;
-                    if new_vals.len() % acc == 0 {
+                    if new_vals.len().is_multiple_of(acc) {
                         idx -= 1;
                     }
                 }

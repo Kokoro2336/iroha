@@ -1,3 +1,4 @@
+/// A simple BitSet implementation using Vec<u64> as the underlying storage.
 use std::fmt;
 use std::ops::{
     BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, Sub, SubAssign,
@@ -14,7 +15,7 @@ impl BitSet {
     }
 
     pub fn with_capacity(nbits: usize) -> Self {
-        let len = (nbits + 63) / 64;
+        let len = nbits.div_ceil(64);
         Self {
             bits: Vec::with_capacity(len),
         }

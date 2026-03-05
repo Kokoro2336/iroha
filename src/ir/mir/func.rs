@@ -1,36 +1,10 @@
-use crate::base::ir::{OpData, Operand, PhiIncoming, DFG};
 use crate::base::Type;
 use crate::debug::info;
+use crate::ir::mir::{BasicBlock, Op, OpData, Operand, PhiIncoming, CFG, DFG};
 use crate::utils::arena::*;
 use std::ops::{Index, IndexMut};
 
-pub type CFG = IndexedArena<BasicBlock>;
 pub type CG = IndexedArena<Function>;
-
-#[derive(Debug, Clone)]
-pub struct Program {
-    // Including:
-    // 1. global variables
-    // 2. SysY library functions
-    pub globals: DFG,
-    // global funcs
-    pub funcs: CG,
-}
-
-impl Program {
-    pub fn new() -> Self {
-        Self {
-            globals: DFG::new(),
-            funcs: CG::new(),
-        }
-    }
-}
-
-impl Default for Program {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -49,141 +23,6 @@ impl Function {
             typ,
             cfg: CFG::new(),
             dfg: DFG::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BasicBlock {
-    pub preds: Vec<Operand>,
-    pub cur: Vec<Operand>,
-    pub succs: Vec<Operand>,
-}
-
-impl BasicBlock {
-    pub fn new() -> Self {
-        Self {
-            preds: vec![],
-            cur: vec![],
-            succs: vec![],
-        }
-    }
-}
-
-// impl cfg
-impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
-    fn remove(&mut self, idx: usize) -> BasicBlock {
-        if let ArenaItem::Data(data) = std::mem::replace(&mut self.storage[idx], ArenaItem::None) {
-            data
-        } else {
-            panic!("ArenaItem is not BasicBlock Data");
-        }
-    }
-
-    fn gc(&mut self) -> Vec<ArenaItem<BasicBlock>> {
-        let new_arena: Vec<ArenaItem<BasicBlock>> = vec![];
-        let mut old_arena = std::mem::replace(&mut self.storage, new_arena);
-
-        // Transport
-        old_arena.iter_mut().for_each(|item| {
-            if matches!(item, ArenaItem::Data(_)) {
-                let new_idx = self.storage.len();
-                let data = item.replace(new_idx);
-                self.storage.push(data);
-            }
-        });
-
-        info!(
-            "CFG GC: {} blocks collected, recycle rate: {:.2}%",
-            old_arena.len() - self.storage.len(),
-            (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
-        );
-
-        let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<BasicBlock>>| {
-            *idx = match old_arena.get(*idx) {
-                Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
-                _ => panic!("CFG gc: index {} not found", *idx),
-            };
-        };
-
-        if let Some(entry) = self.entry.as_mut() {
-            remap_idx(entry, &old_arena);
-        }
-
-        for idx in self.map.values_mut() {
-            remap_idx(idx, &old_arena);
-        }
-
-        let remap_bb = |bb_idx: &mut Operand| {
-            let old_idx = bb_idx.get_bb_id();
-            *bb_idx = match old_arena.get(old_idx) {
-                Some(ArenaItem::NewIndex(new_idx)) => Operand::BB(*new_idx),
-                _ => panic!("CFG gc: BB index {} not found", old_idx),
-            };
-        };
-
-        // rewrite idx
-        for item in self.storage.iter_mut() {
-            // item can't be any other variant than Data here
-            if let ArenaItem::Data(node) = item {
-                for pred in node.preds.iter_mut() {
-                    remap_bb(pred);
-                }
-                // rewrite data.cur needs the old arena of DFG, we'll do it in Compaction pass
-                for succ in node.succs.iter_mut() {
-                    remap_bb(succ);
-                }
-            }
-        }
-
-        // replace old storage
-        old_arena
-    }
-}
-
-impl IndexedArena<BasicBlock> {
-    pub fn add_succ(&mut self, bb_idx: Operand, succ_idx: Operand) {
-        if !self[bb_idx.get_bb_id()].succs.contains(&succ_idx) {
-            self[bb_idx.get_bb_id()].succs.push(succ_idx);
-        }
-    }
-    pub fn add_pred(&mut self, bb_idx: Operand, pred_idx: Operand) {
-        if !self[bb_idx.get_bb_id()].preds.contains(&pred_idx) {
-            self[bb_idx.get_bb_id()].preds.push(pred_idx);
-        }
-    }
-    pub fn remove_succ(&mut self, bb_idx: Operand, succ_idx: Operand) {
-        if let Some(pos) = self[bb_idx.get_bb_id()]
-            .succs
-            .iter()
-            .position(|x| *x == succ_idx)
-        {
-            self[bb_idx.get_bb_id()].succs.swap_remove(pos);
-        } else {
-            panic!(
-                "Remove succ {}: {:?} not found in succs of block {}: {:?}",
-                succ_idx,
-                succ_idx,
-                bb_idx,
-                self[bb_idx.get_bb_id()]
-            );
-        }
-    }
-    pub fn remove_pred(&mut self, bb_idx: Operand, pred_idx: Operand) {
-        if let Some(pos) = self[bb_idx.get_bb_id()]
-            .preds
-            .iter()
-            .position(|x| *x == pred_idx)
-        {
-            self[bb_idx.get_bb_id()].preds.swap_remove(pos);
-        } else {
-            panic!(
-                "Remove pred {}: {:?} not found in preds of block {}: {:?}",
-                pred_idx,
-                pred_idx,
-                bb_idx,
-                self[bb_idx.get_bb_id()]
-            );
         }
     }
 }
@@ -231,16 +70,15 @@ impl Arena<Function> for IndexedArena<Function> {
             remap_idx(idx, &old_arena);
         }
 
-        let remap_with_dfg =
-            |op_idx: &mut Operand, old_arena_dfg: &Vec<ArenaItem<crate::base::ir::Op>>| {
-                let old_idx = op_idx.get_op_id();
-                *op_idx = match old_arena_dfg.get(old_idx) {
-                    Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
-                    _ => {
-                        panic!("Compaction gc: op index {} in BB not found", old_idx);
-                    }
-                };
+        let remap_with_dfg = |op_idx: &mut Operand, old_arena_dfg: &Vec<ArenaItem<Op>>| {
+            let old_idx = op_idx.get_op_id();
+            *op_idx = match old_arena_dfg.get(old_idx) {
+                Some(ArenaItem::NewIndex(new_idx)) => Operand::Value(*new_idx),
+                _ => {
+                    panic!("Compaction gc: op index {} in BB not found", old_idx);
+                }
             };
+        };
 
         let remap_with_cfg = |bb_idx: &mut Operand, old_arena_cfg: &Vec<ArenaItem<BasicBlock>>| {
             let old_idx = bb_idx.get_bb_id();
@@ -314,7 +152,6 @@ impl Arena<Function> for IndexedArena<Function> {
                             | OpData::Alloca(_)
                             | OpData::GlobalAlloca { .. }
                             | OpData::Declare { .. }
-                            | OpData::Move { .. }
                             | OpData::GEP { .. }
                             | OpData::Sitofp { .. }
                             | OpData::Fptosi { .. }
@@ -326,8 +163,6 @@ impl Arena<Function> for IndexedArena<Function> {
                             | OpData::Sar { .. }
                             | OpData::SNe { .. }
                             | OpData::SEq { .. }
-                            | OpData::And { .. }
-                            | OpData::Or { .. }
                             | OpData::Xor { .. }
                             | OpData::SGt { .. }
                             | OpData::SLt { .. }
@@ -373,26 +208,6 @@ impl IndexedArena<Function> {
                 }
             })
             .collect()
-    }
-}
-
-impl Index<Operand> for CFG {
-    type Output = BasicBlock;
-
-    fn index(&self, index: Operand) -> &Self::Output {
-        match index {
-            Operand::BB(id) => self.get(id).unwrap(),
-            _ => panic!("CFG index: expected Operand::BB, got {:?}", index),
-        }
-    }
-}
-
-impl IndexMut<Operand> for CFG {
-    fn index_mut(&mut self, index: Operand) -> &mut Self::Output {
-        match index {
-            Operand::BB(id) => self.get_mut(id).unwrap(),
-            _ => panic!("CFG index_mut: expected Operand::BB, got {:?}", index),
-        }
     }
 }
 

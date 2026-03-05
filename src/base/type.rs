@@ -1,4 +1,4 @@
-use crate::asm::config::RISCV_BITS;
+use crate::backend::config::RISCV_BITS;
 
 /// type of value
 #[derive(Debug, Clone, PartialEq, Eq)]

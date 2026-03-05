@@ -126,7 +126,7 @@ def main():
         sys.exit(1)
 
     test_files = []
-    base_dir = "./functional_recover"
+    base_dir = "./testcases/functional_recover"
     functional_dir = os.path.join(base_dir, "functional")
     h_functional_dir = os.path.join(base_dir, "h_functional")
 
@@ -208,7 +208,7 @@ def main():
             
             # Run compiler
             # Command: ./target/debug/compiler <input> -o <output>
-            cmd = [compiler_binary, test_file, "-o", output_file_name]
+            cmd = [compiler_binary, "--emit-llvm", test_file, "-o", output_file_name]
             if args.graph:
                 cmd.append("--graph")
             

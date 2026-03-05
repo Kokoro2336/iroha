@@ -1,112 +1,113 @@
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
+use crate::base::BuilderContext;
+use crate::debug::info;
+use crate::debug::DumpLLVM;
+use crate::ir::mir::Program;
 
-pub trait Pass<T> {
-    fn run(&mut self) -> T;
+use crate::cli::Cli;
+use std::collections::VecDeque;
+
+pub trait Pass<'a> {
+    fn name(&self) -> &str;
+    fn set_program(&mut self, program: &'a mut Program);
+    fn run(&mut self);
 }
 
-pub struct SymbolTable<T, U> {
-    tables: Vec<HashMap<T, U>>,
+pub struct PassManager<'a> {
+    // The lifetime 'a is tied to the Program that the passes will operate on.
+    // The `+ 'a` bound is necessary because the passes themselves (like DCE<'a>)
+    // contain a mutable reference to the Program with lifetime 'a.
+    passes: VecDeque<Box<dyn Pass<'a> + 'a>>,
+    cli: &'a Cli,
 }
 
-impl<T: std::hash::Hash + Eq, U> SymbolTable<T, U> {
-    pub fn new() -> Self {
-        SymbolTable { tables: vec![] }
+impl<'a> PassManager<'a> {
+    pub fn new(cli: &'a Cli) -> Self {
+        PassManager {
+            passes: VecDeque::new(),
+            cli,
+        }
     }
 
-    pub fn enter_scope(&mut self) {
-        self.tables.push(HashMap::new());
+    pub fn register(mut self, pass: Box<dyn Pass<'a> + 'a>) -> Self {
+        self.passes.push_back(pass);
+        self
     }
 
-    pub fn exit_scope(&mut self) {
-        if self.tables.pop().is_none() {
-            panic!("No scope to exit");
-        };
-    }
+    pub fn run(mut self, ir: &'a mut Program) {
+        let ir_ptr: *mut Program = ir;
+        while let Some(mut pass) = self.passes.pop_front() {
+            info!("Running pass: {}", pass.name());
+            // SAFETY: Passes run sequentially and each pass only borrows `ir` during this iteration.
+            unsafe { pass.set_program(&mut *ir_ptr) };
+            pass.run();
+            info!("Finished pass: {}", pass.name());
 
-    pub fn insert(&mut self, key: T, value: U) {
-        self.tables.last_mut().unwrap().insert(key, value);
-    }
-
-    pub fn get(&self, key: &T) -> Option<&U> {
-        for table in self.tables.iter().rev() {
-            if let Some(value) = table.get(key) {
-                return Some(value);
+            if self.cli.emit_llvm && self.cli.dump_after == pass.name() {
+                info!("Dumping IR after pass: {}", pass.name());
+                let filename = self
+                    .cli
+                    .input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output")
+                    .to_string();
+                unsafe {
+                    DumpLLVM::new(&mut *ir_ptr, filename).run();
+                }
+                info!("Finished dumping IR after pass: {}", pass.name());
             }
         }
-        None
-    }
 
-    pub fn current_scope(&self) -> usize {
-        self.tables.len()
-    }
-}
-
-macro_rules! context {
-    ($self:ident) => {
-        if let Some(func_idx) = $self.current_function {
-            let (funcs, globals) = (&mut $self.program.funcs, &mut $self.program.globals);
-            let func = &mut funcs[func_idx];
-            BuilderContext {
-                cfg: Some(&mut func.cfg),
-                dfg: Some(&mut func.dfg),
-                globals,
+        // If no pass specified, dump the LLVM IR after all optimizations.
+        if self.cli.dump_after.is_empty() && self.cli.emit_llvm {
+            info!("Start Dumping LLVM IR.");
+            let filename = self
+                .cli
+                .input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output")
+                .to_string();
+            unsafe {
+                DumpLLVM::new(&mut *ir_ptr, filename).run();
             }
-        } else {
-            BuilderContext {
-                cfg: None,
-                dfg: None,
-                globals: &mut $self.program.globals,
-            }
+            info!("Finish Dumping LLVM IR.");
         }
-    };
+    }
 }
 
-macro_rules! context_or_err {
-    ($self:ident, $msg:expr) => {
-        if let Some(func_idx) = $self.current_function {
-            let (funcs, globals) = (&mut $self.program.funcs, &mut $self.program.globals);
-            let func = &mut funcs[func_idx];
-            BuilderContext {
-                cfg: Some(&mut func.cfg),
-                dfg: Some(&mut func.dfg),
-                globals,
-            }
-        } else {
-            panic!($msg);
+pub fn context_or_err<'a>(
+    program: &'a mut Program,
+    idx: Option<usize>,
+    msg: &str,
+) -> BuilderContext<'a> {
+    if let Some(func_idx) = idx {
+        let (funcs, globals) = (&mut program.funcs, &mut program.globals);
+        let func = &mut funcs[func_idx];
+        BuilderContext {
+            cfg: Some(&mut func.cfg),
+            dfg: Some(&mut func.dfg),
+            globals,
         }
-    };
-}
-
-pub struct ScopeGuard<'a, T: std::hash::Hash + Eq, U> {
-    symbol_table: &'a mut SymbolTable<T, U>,
-}
-
-impl<'a, T: std::hash::Hash + Eq, U> ScopeGuard<'a, T, U> {
-    pub fn new(symbol_table: &'a mut SymbolTable<T, U>) -> Self {
-        symbol_table.enter_scope();
-        ScopeGuard { symbol_table }
+    } else {
+        panic!("{}", msg);
     }
 }
 
-impl<'a, T: std::hash::Hash + Eq, U> Drop for ScopeGuard<'a, T, U> {
-    fn drop(&mut self) {
-        self.symbol_table.exit_scope();
+pub fn context<'a>(program: &'a mut Program, idx: Option<usize>) -> BuilderContext<'a> {
+    if let Some(func_idx) = idx {
+        let (funcs, globals) = (&mut program.funcs, &mut program.globals);
+        let func = &mut funcs[func_idx];
+        BuilderContext {
+            cfg: Some(&mut func.cfg),
+            dfg: Some(&mut func.dfg),
+            globals,
+        }
+    } else {
+        BuilderContext {
+            cfg: None,
+            dfg: None,
+            globals: &mut program.globals,
+        }
     }
 }
-
-impl<'a, T: std::hash::Hash + Eq, U> Deref for ScopeGuard<'a, T, U> {
-    type Target = SymbolTable<T, U>;
-
-    fn deref(&self) -> &Self::Target {
-        self.symbol_table
-    }
-}
-
-impl<'a, T: std::hash::Hash + Eq, U> DerefMut for ScopeGuard<'a, T, U> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.symbol_table
-    }
-}
-
-pub(crate) use {context, context_or_err};

@@ -1,14 +1,13 @@
+use crate::base::Type;
+use crate::frontend::ast;
 /**
  * Dump customized IR into LLVM format for debugging.
  */
-use crate::base::ir::*;
-use crate::base::Pass;
-use crate::base::Type;
-use crate::frontend::ast;
+use crate::ir::mir::*;
 use crate::utils::arena::{ArenaItem, IndexedArena};
 use std::fmt::Write;
 
-pub trait DumpLLVM {
+pub trait Dump {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error>;
 }
 
@@ -64,7 +63,7 @@ fn operand_type(operand: &Operand, ctx: &DumpContext, default: Type) -> Type {
         Operand::Float(_) => Type::Float,
         Operand::Bool(_) => Type::Bool,
         Operand::Param { typ, .. } => typ.clone(),
-        Operand::BB(_) | Operand::Func(_) | Operand::Reg(_) | Operand::Undefined => default,
+        Operand::BB(_) | Operand::Func(_) | Operand::Undefined => default,
     }
 }
 
@@ -82,30 +81,34 @@ fn type_alignment(typ: &Type) -> u32 {
     }
 }
 
-impl DumpLLVM for Type {
-    fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
-        let mut s = String::new();
-        match self {
-            Type::Int => write!(s, "i32")?,
-            Type::Float => write!(s, "float")?,
-            Type::Bool => write!(s, "i1")?,
-            Type::Void => write!(s, "void")?,
-            Type::Pointer { base } => write!(s, "{}*", base.dump_to_llvm(ctx)?)?,
-            Type::Array { dims, base } => {
-                let mut current = base.dump_to_llvm(ctx)?;
-                for dim in dims.iter().rev() {
-                    current = format!("[{} x {}]", dim, current);
+impl Dump for Type {
+    fn dump_to_llvm(&self, _ctx: &DumpContext) -> Result<String, std::fmt::Error> {
+        fn dump_type(typ: &Type) -> Result<String, std::fmt::Error> {
+            let mut s = String::new();
+            match typ {
+                Type::Int => write!(s, "i32")?,
+                Type::Float => write!(s, "float")?,
+                Type::Bool => write!(s, "i1")?,
+                Type::Void => write!(s, "void")?,
+                Type::Pointer { base } => write!(s, "{}*", dump_type(base)?)?,
+                Type::Array { dims, base } => {
+                    let mut current = dump_type(base)?;
+                    for dim in dims.iter().rev() {
+                        current = format!("[{} x {}]", dim, current);
+                    }
+                    write!(s, "{}", current)?;
                 }
-                write!(s, "{}", current)?;
+                Type::Char => write!(s, "i8")?,
+                Type::Function { .. } => todo!("dump type {:?}", typ),
             }
-            Type::Char => write!(s, "i8")?,
-            Type::Function { .. } => todo!("dump type {:?}", self),
+            Ok(s)
         }
-        Ok(s)
+
+        dump_type(self)
     }
 }
 
-impl DumpLLVM for Operand {
+impl Dump for Operand {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
@@ -117,14 +120,13 @@ impl DumpLLVM for Operand {
             Operand::BB(id) => write!(s, "%bb_{}", id)?,
             Operand::Param { idx, .. } => write!(s, "%arg{}", idx)?,
             Operand::Func(id) => write!(s, "@{}", ctx.program.funcs[*id].name)?,
-            Operand::Reg(reg) => write!(s, "{:?}", reg)?,
             Operand::Undefined => write!(s, "undef")?,
         }
         Ok(s)
     }
 }
 
-impl DumpLLVM for Op {
+impl Dump for Op {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match &self.data {
@@ -145,7 +147,6 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
@@ -184,10 +185,7 @@ impl DumpLLVM for Op {
                         Operand::Float(_) => Type::Float,
                         Operand::Bool(_) => Type::Bool,
                         Operand::Param { typ, .. } => typ.clone(),
-                        Operand::BB(_)
-                        | Operand::Func(_)
-                        | Operand::Reg(_)
-                        | Operand::Undefined => Type::Int,
+                        Operand::BB(_) | Operand::Func(_) | Operand::Undefined => Type::Int,
                     };
                     write!(
                         s,
@@ -256,7 +254,6 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
@@ -285,9 +282,7 @@ impl DumpLLVM for Op {
                     Operand::Float(_) => Type::Float,
                     Operand::Bool(_) => Type::Bool,
                     Operand::Param { typ, .. } => typ.clone(),
-                    Operand::BB(_) | Operand::Func(_) | Operand::Reg(_) | Operand::Undefined => {
-                        Type::Int
-                    }
+                    Operand::BB(_) | Operand::Func(_) | Operand::Undefined => Type::Int,
                 };
                 let ptr_ty = match addr {
                     Operand::Value(id) => {
@@ -305,7 +300,6 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Pointer {
                         base: Box::new(Type::Int),
                     },
@@ -521,7 +515,6 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Int,
                     Operand::Param { typ, .. } => typ.clone(),
                 };
@@ -548,7 +541,6 @@ impl DumpLLVM for Op {
                     | Operand::Int(_)
                     | Operand::Float(_)
                     | Operand::Bool(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Float,
                     Operand::Param { typ, .. } => typ.clone(),
                 };
@@ -576,7 +568,6 @@ impl DumpLLVM for Op {
                     | Operand::Func(_)
                     | Operand::Int(_)
                     | Operand::Float(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Bool,
                     Operand::Param { typ, .. } => typ.clone(),
                 };
@@ -604,7 +595,6 @@ impl DumpLLVM for Op {
                     | Operand::Func(_)
                     | Operand::Int(_)
                     | Operand::Float(_)
-                    | Operand::Reg(_)
                     | Operand::Undefined => Type::Bool,
                     Operand::Param { typ, .. } => typ.clone(),
                 };
@@ -643,7 +633,6 @@ impl DumpLLVM for Op {
                     | Operand::Float(_)
                     | Operand::Bool(_)
                     | Operand::Param { .. }
-                    | Operand::Reg(_)
                     | Operand::Undefined => "unknown".to_string(),
                 };
                 write!(s, "call {} @{}(", self.typ.dump_to_llvm(ctx)?, func_name)?;
@@ -661,10 +650,7 @@ impl DumpLLVM for Op {
                         Operand::Float(_) => Type::Float,
                         Operand::Bool(_) => Type::Bool,
                         Operand::Param { typ, .. } => typ.clone(),
-                        Operand::BB(_)
-                        | Operand::Func(_)
-                        | Operand::Reg(_)
-                        | Operand::Undefined => Type::Int,
+                        Operand::BB(_) | Operand::Func(_) | Operand::Undefined => Type::Int,
                     };
                     write!(
                         s,
@@ -694,23 +680,6 @@ impl DumpLLVM for Op {
                     }
                 }
             }
-            OpData::Move { value, reg } => {
-                write!(s, "# move {} to reg {:?}", value.dump_to_llvm(ctx)?, reg)?
-            }
-            OpData::And { lhs, rhs } => write!(
-                s,
-                "and {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
-            OpData::Or { lhs, rhs } => write!(
-                s,
-                "or {} {}, {}",
-                self.typ.dump_to_llvm(ctx)?,
-                lhs.dump_to_llvm(ctx)?,
-                rhs.dump_to_llvm(ctx)?
-            )?,
             OpData::Xor { lhs, rhs } => write!(
                 s,
                 "xor {} {}, {}",
@@ -744,7 +713,7 @@ impl DumpLLVM for Op {
     }
 }
 
-impl DumpLLVM for BasicBlock {
+impl Dump for BasicBlock {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let dfg = match ctx.function {
@@ -772,7 +741,7 @@ impl DumpLLVM for BasicBlock {
     }
 }
 
-impl DumpLLVM for Function {
+impl Dump for Function {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
 
@@ -827,7 +796,7 @@ impl DumpLLVM for Function {
     }
 }
 
-impl DumpLLVM for Program {
+impl Dump for Program {
     fn dump_to_llvm(&self, _ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let program_ctx = DumpContext {
@@ -875,8 +844,7 @@ impl DumpLLVM for Program {
                                 if dims.len() == 1 {
                                     let mut s = String::new();
                                     write!(s, "[")?;
-                                    for i in 0..current_dim {
-                                        let v = &values[i];
+                                    for (i, v) in values.iter().take(current_dim).enumerate() {
                                         match v {
                                             ast::Literal::Int(x) => write!(s, "i32 {}", x)?,
                                             ast::Literal::Float(x) => {
@@ -920,7 +888,7 @@ impl DumpLLVM for Program {
                             }
                             _ => {
                                 // Scalar type
-                                if let Some(v) = values.get(0) {
+                                if let Some(v) = values.first() {
                                     match v {
                                         ast::Literal::Int(x) => Ok(x.to_string()),
                                         ast::Literal::Float(x) => Ok(format_float_literal(*x)),
@@ -1009,19 +977,17 @@ where
     }
 }
 
-pub struct DumpLLVMPass<'a> {
+pub struct DumpLLVM<'a> {
     program: &'a mut Program,
     filename: String,
 }
 
-impl<'a> DumpLLVMPass<'a> {
+impl<'a> DumpLLVM<'a> {
     pub fn new(program: &'a mut Program, filename: String) -> Self {
         Self { program, filename }
     }
-}
 
-impl Pass<()> for DumpLLVMPass<'_> {
-    fn run(&mut self) {
+    pub fn run(&mut self) {
         let ctx = DumpContext {
             program: &*self.program,
             function: None,

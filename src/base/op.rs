@@ -726,7 +726,7 @@ impl IndexedArena<Op> {
         };
         let node = &mut self[op_id];
         if let Some(pos) = node.users.iter().position(|x| *x == use_idx) {
-            node.users.remove(pos);
+            node.users.swap_remove(pos);
         } else {
             panic!(
                 "Use {}: {:?} not found in users of op {}: {:?}",

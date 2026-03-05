@@ -619,6 +619,22 @@ impl<'a> Renaming<'a> {
                     .get_all_ops_in_block(&mut ctx, Operand::BB(bb_id), OpType::Alloca)
             };
 
+            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+            // Raise all the allocas to the entry block.
+            for alloca in &allocas {
+                // raise alloca to the entry block if it's not already in the entry block
+                if bb_id != entry {
+                    self.builder.move_op_to_bb_at(
+                        &mut ctx,
+                        alloca.clone(),
+                        Operand::BB(bb_id),
+                        Operand::BB(entry),
+                        // Entry block has at least one jump.
+                        Some(Operand::Value(0)),
+                    );
+                }
+            }
+
             // Filter allocas that are not promoted (e.g., those without the Promotion attribute). We won't promote them, so we can just ignore them in renaming.
             let promoted_allocas: Vec<Operand> = allocas
                 .into_iter()
@@ -632,26 +648,12 @@ impl<'a> Renaming<'a> {
                 })
                 .collect();
 
-            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
-
             // Initialize the map between OpId and VarId
             for alloca in promoted_allocas {
                 let op_id = match alloca {
                     Operand::Value(id) => id,
                     _ => panic!("Renaming: allocas contains non-op"),
                 };
-
-                // raise alloca to the entry block if it's not already in the entry block
-                if bb_id != entry {
-                    self.builder.move_op_to_bb_at(
-                        &mut ctx,
-                        alloca.clone(),
-                        Operand::BB(bb_id),
-                        Operand::BB(entry),
-                        // Entry block has at least one jump.
-                        Some(Operand::Value(0)),
-                    );
-                }
 
                 let var_id = self.var_counter;
                 self.var_counter += 1;

@@ -45,11 +45,12 @@ impl<T: std::hash::Hash + Eq, U> SymbolTable<T, U> {
 macro_rules! context {
     ($self:ident) => {
         if let Some(func_idx) = $self.current_function {
-            let func = &mut $self.program.funcs[func_idx];
+            let (funcs, globals) = (&mut $self.program.funcs, &mut $self.program.globals);
+            let func = &mut funcs[func_idx];
             BuilderContext {
                 cfg: Some(&mut func.cfg),
                 dfg: Some(&mut func.dfg),
-                globals: &mut $self.program.globals,
+                globals,
             }
         } else {
             BuilderContext {
@@ -64,11 +65,12 @@ macro_rules! context {
 macro_rules! context_or_err {
     ($self:ident, $msg:expr) => {
         if let Some(func_idx) = $self.current_function {
-            let func = &mut $self.program.funcs[func_idx];
+            let (funcs, globals) = (&mut $self.program.funcs, &mut $self.program.globals);
+            let func = &mut funcs[func_idx];
             BuilderContext {
                 cfg: Some(&mut func.cfg),
                 dfg: Some(&mut func.dfg),
-                globals: &mut $self.program.globals,
+                globals,
             }
         } else {
             panic!($msg);

@@ -143,20 +143,48 @@ impl Arena<BasicBlock> for IndexedArena<BasicBlock> {
 
 impl IndexedArena<BasicBlock> {
     pub fn add_succ(&mut self, bb_idx: Operand, succ_idx: Operand) {
-        self[bb_idx.get_bb_id()].succs.push(succ_idx);
+        if !self[bb_idx.get_bb_id()].succs.contains(&succ_idx) {
+            self[bb_idx.get_bb_id()].succs.push(succ_idx);
+        }
     }
     pub fn add_pred(&mut self, bb_idx: Operand, pred_idx: Operand) {
-        self[bb_idx.get_bb_id()].preds.push(pred_idx);
+        if !self[bb_idx.get_bb_id()].preds.contains(&pred_idx) {
+            self[bb_idx.get_bb_id()].preds.push(pred_idx);
+        }
     }
     pub fn remove_succ(&mut self, bb_idx: Operand, succ_idx: Operand) {
-        self[bb_idx.get_bb_id()]
+        if let Some(pos) = self[bb_idx.get_bb_id()]
             .succs
-            .retain(|succ| *succ != succ_idx);
+            .iter()
+            .position(|x| *x == succ_idx)
+        {
+            self[bb_idx.get_bb_id()].succs.swap_remove(pos);
+        } else {
+            panic!(
+                "Remove succ {}: {:?} not found in succs of block {}: {:?}",
+                succ_idx,
+                succ_idx,
+                bb_idx,
+                self[bb_idx.get_bb_id()]
+            );
+        }
     }
     pub fn remove_pred(&mut self, bb_idx: Operand, pred_idx: Operand) {
-        self[bb_idx.get_bb_id()]
+        if let Some(pos) = self[bb_idx.get_bb_id()]
             .preds
-            .retain(|pred| *pred != pred_idx);
+            .iter()
+            .position(|x| *x == pred_idx)
+        {
+            self[bb_idx.get_bb_id()].preds.swap_remove(pos);
+        } else {
+            panic!(
+                "Remove pred {}: {:?} not found in preds of block {}: {:?}",
+                pred_idx,
+                pred_idx,
+                bb_idx,
+                self[bb_idx.get_bb_id()]
+            );
+        }
     }
 }
 

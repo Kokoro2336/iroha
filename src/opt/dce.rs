@@ -1,7 +1,5 @@
+/// Dead Code Elimination (DCE).
 use crate::base::ir::{OpData, Operand, PhiIncoming};
-/**
- * Dead Code Elimination (DCE).
- */
 use crate::base::{context_or_err, Pass};
 use crate::base::{Builder, BuilderContext};
 use crate::utils::arena::ArenaItem;

@@ -4,22 +4,26 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:
 target triple = "x86_64-pc-linux-gnu"
 
 %struct.timeval = type { i64, i64 }
+%struct.__va_list_tag = type { i32, i32, ptr, ptr }
 
 @.str = private unnamed_addr constant [3 x i8] c"%d\00", align 1
 @.str.1 = private unnamed_addr constant [3 x i8] c"%c\00", align 1
-@.str.2 = private unnamed_addr constant [4 x i8] c"%d:\00", align 1
-@.str.3 = private unnamed_addr constant [4 x i8] c" %d\00", align 1
-@.str.4 = private unnamed_addr constant [2 x i8] c"\0A\00", align 1
+@.str.2 = private unnamed_addr constant [3 x i8] c"%a\00", align 1
+@.str.3 = private unnamed_addr constant [4 x i8] c"%d:\00", align 1
+@.str.4 = private unnamed_addr constant [4 x i8] c" %d\00", align 1
+@.str.5 = private unnamed_addr constant [2 x i8] c"\0A\00", align 1
+@.str.6 = private unnamed_addr constant [4 x i8] c" %a\00", align 1
+@stdout = external global ptr, align 8
 @_sysy_us = dso_local global [1024 x i32] zeroinitializer, align 16
 @_sysy_s = dso_local global [1024 x i32] zeroinitializer, align 16
 @_sysy_m = dso_local global [1024 x i32] zeroinitializer, align 16
 @_sysy_h = dso_local global [1024 x i32] zeroinitializer, align 16
 @_sysy_idx = dso_local global i32 0, align 4
 @stderr = external global ptr, align 8
-@.str.5 = private unnamed_addr constant [35 x i8] c"Timer@%04d-%04d: %dH-%dM-%dS-%dus\0A\00", align 1
+@.str.7 = private unnamed_addr constant [35 x i8] c"Timer@%04d-%04d: %dH-%dM-%dS-%dus\0A\00", align 1
 @_sysy_l1 = dso_local global [1024 x i32] zeroinitializer, align 16
 @_sysy_l2 = dso_local global [1024 x i32] zeroinitializer, align 16
-@.str.6 = private unnamed_addr constant [25 x i8] c"TOTAL: %dH-%dM-%dS-%dus\0A\00", align 1
+@.str.8 = private unnamed_addr constant [25 x i8] c"TOTAL: %dH-%dM-%dS-%dus\0A\00", align 1
 @_sysy_start = dso_local global %struct.timeval zeroinitializer, align 8
 @_sysy_end = dso_local global %struct.timeval zeroinitializer, align 8
 @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @before_main, ptr null }]
@@ -42,6 +46,14 @@ define dso_local i32 @getch() #0 {
   %3 = load i8, ptr %1, align 1
   %4 = sext i8 %3 to i32
   ret i32 %4
+}
+
+; Function Attrs: noinline nounwind optnone uwtable
+define dso_local float @getfloat() #0 {
+  %1 = alloca float, align 4
+  %2 = call i32 (ptr, ...) @__isoc99_scanf(ptr noundef @.str.2, ptr noundef %1)
+  %3 = load float, ptr %1, align 4
+  ret float %3
 }
 
 ; Function Attrs: noinline nounwind optnone uwtable
@@ -80,6 +92,41 @@ define dso_local i32 @getarray(ptr noundef %0) #0 {
 }
 
 ; Function Attrs: noinline nounwind optnone uwtable
+define dso_local i32 @getfarray(ptr noundef %0) #0 {
+  %2 = alloca ptr, align 8
+  %3 = alloca i32, align 4
+  %4 = alloca i32, align 4
+  store ptr %0, ptr %2, align 8
+  %5 = call i32 (ptr, ...) @__isoc99_scanf(ptr noundef @.str, ptr noundef %3)
+  store i32 0, ptr %4, align 4
+  br label %6
+
+6:                                                ; preds = %16, %1
+  %7 = load i32, ptr %4, align 4
+  %8 = load i32, ptr %3, align 4
+  %9 = icmp slt i32 %7, %8
+  br i1 %9, label %10, label %19
+
+10:                                               ; preds = %6
+  %11 = load ptr, ptr %2, align 8
+  %12 = load i32, ptr %4, align 4
+  %13 = sext i32 %12 to i64
+  %14 = getelementptr inbounds float, ptr %11, i64 %13
+  %15 = call i32 (ptr, ...) @__isoc99_scanf(ptr noundef @.str.2, ptr noundef %14)
+  br label %16
+
+16:                                               ; preds = %10
+  %17 = load i32, ptr %4, align 4
+  %18 = add nsw i32 %17, 1
+  store i32 %18, ptr %4, align 4
+  br label %6, !llvm.loop !8
+
+19:                                               ; preds = %6
+  %20 = load i32, ptr %3, align 4
+  ret i32 %20
+}
+
+; Function Attrs: noinline nounwind optnone uwtable
 define dso_local void @putint(i32 noundef %0) #0 {
   %2 = alloca i32, align 4
   store i32 %0, ptr %2, align 4
@@ -107,7 +154,7 @@ define dso_local void @putarray(i32 noundef %0, ptr noundef %1) #0 {
   store i32 %0, ptr %3, align 4
   store ptr %1, ptr %4, align 8
   %6 = load i32, ptr %3, align 4
-  %7 = call i32 (ptr, ...) @printf(ptr noundef @.str.2, i32 noundef %6)
+  %7 = call i32 (ptr, ...) @printf(ptr noundef @.str.3, i32 noundef %6)
   store i32 0, ptr %5, align 4
   br label %8
 
@@ -123,19 +170,92 @@ define dso_local void @putarray(i32 noundef %0, ptr noundef %1) #0 {
   %15 = sext i32 %14 to i64
   %16 = getelementptr inbounds i32, ptr %13, i64 %15
   %17 = load i32, ptr %16, align 4
-  %18 = call i32 (ptr, ...) @printf(ptr noundef @.str.3, i32 noundef %17)
+  %18 = call i32 (ptr, ...) @printf(ptr noundef @.str.4, i32 noundef %17)
   br label %19
 
 19:                                               ; preds = %12
   %20 = load i32, ptr %5, align 4
   %21 = add nsw i32 %20, 1
   store i32 %21, ptr %5, align 4
-  br label %8, !llvm.loop !8
+  br label %8, !llvm.loop !9
 
 22:                                               ; preds = %8
-  %23 = call i32 (ptr, ...) @printf(ptr noundef @.str.4)
+  %23 = call i32 (ptr, ...) @printf(ptr noundef @.str.5)
   ret void
 }
+
+; Function Attrs: noinline nounwind optnone uwtable
+define dso_local void @putfloat(float noundef %0) #0 {
+  %2 = alloca float, align 4
+  store float %0, ptr %2, align 4
+  %3 = load float, ptr %2, align 4
+  %4 = fpext float %3 to double
+  %5 = call i32 (ptr, ...) @printf(ptr noundef @.str.2, double noundef %4)
+  ret void
+}
+
+; Function Attrs: noinline nounwind optnone uwtable
+define dso_local void @putfarray(i32 noundef %0, ptr noundef %1) #0 {
+  %3 = alloca i32, align 4
+  %4 = alloca ptr, align 8
+  %5 = alloca i32, align 4
+  store i32 %0, ptr %3, align 4
+  store ptr %1, ptr %4, align 8
+  %6 = load i32, ptr %3, align 4
+  %7 = call i32 (ptr, ...) @printf(ptr noundef @.str.3, i32 noundef %6)
+  store i32 0, ptr %5, align 4
+  br label %8
+
+8:                                                ; preds = %20, %2
+  %9 = load i32, ptr %5, align 4
+  %10 = load i32, ptr %3, align 4
+  %11 = icmp slt i32 %9, %10
+  br i1 %11, label %12, label %23
+
+12:                                               ; preds = %8
+  %13 = load ptr, ptr %4, align 8
+  %14 = load i32, ptr %5, align 4
+  %15 = sext i32 %14 to i64
+  %16 = getelementptr inbounds float, ptr %13, i64 %15
+  %17 = load float, ptr %16, align 4
+  %18 = fpext float %17 to double
+  %19 = call i32 (ptr, ...) @printf(ptr noundef @.str.6, double noundef %18)
+  br label %20
+
+20:                                               ; preds = %12
+  %21 = load i32, ptr %5, align 4
+  %22 = add nsw i32 %21, 1
+  store i32 %22, ptr %5, align 4
+  br label %8, !llvm.loop !10
+
+23:                                               ; preds = %8
+  %24 = call i32 (ptr, ...) @printf(ptr noundef @.str.5)
+  ret void
+}
+
+; Function Attrs: noinline nounwind optnone uwtable
+define dso_local void @putf(ptr noundef %0, ...) #0 {
+  %2 = alloca ptr, align 8
+  %3 = alloca [1 x %struct.__va_list_tag], align 16
+  store ptr %0, ptr %2, align 8
+  %4 = getelementptr inbounds [1 x %struct.__va_list_tag], ptr %3, i64 0, i64 0
+  call void @llvm.va_start(ptr %4)
+  %5 = load ptr, ptr @stdout, align 8
+  %6 = load ptr, ptr %2, align 8
+  %7 = getelementptr inbounds [1 x %struct.__va_list_tag], ptr %3, i64 0, i64 0
+  %8 = call i32 @vfprintf(ptr noundef %5, ptr noundef %6, ptr noundef %7)
+  %9 = getelementptr inbounds [1 x %struct.__va_list_tag], ptr %3, i64 0, i64 0
+  call void @llvm.va_end(ptr %9)
+  ret void
+}
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn
+declare void @llvm.va_start(ptr) #2
+
+declare i32 @vfprintf(ptr noundef, ptr noundef, ptr noundef) #1
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn
+declare void @llvm.va_end(ptr) #2
 
 ; Function Attrs: noinline nounwind optnone uwtable
 define dso_local void @before_main() #0 {
@@ -171,7 +291,7 @@ define dso_local void @before_main() #0 {
   %19 = load i32, ptr %1, align 4
   %20 = add nsw i32 %19, 1
   store i32 %20, ptr %1, align 4
-  br label %2, !llvm.loop !9
+  br label %2, !llvm.loop !11
 
 21:                                               ; preds = %2
   store i32 1, ptr @_sysy_idx, align 4
@@ -216,7 +336,7 @@ define dso_local void @after_main() #0 {
   %29 = sext i32 %28 to i64
   %30 = getelementptr inbounds [1024 x i32], ptr @_sysy_us, i64 0, i64 %29
   %31 = load i32, ptr %30, align 4
-  %32 = call i32 (ptr, ptr, ...) @fprintf(ptr noundef %7, ptr noundef @.str.5, i32 noundef %11, i32 noundef %15, i32 noundef %19, i32 noundef %23, i32 noundef %27, i32 noundef %31)
+  %32 = call i32 (ptr, ptr, ...) @fprintf(ptr noundef %7, ptr noundef @.str.7, i32 noundef %11, i32 noundef %15, i32 noundef %19, i32 noundef %23, i32 noundef %27, i32 noundef %31)
   %33 = load i32, ptr %1, align 4
   %34 = sext i32 %33 to i64
   %35 = getelementptr inbounds [1024 x i32], ptr @_sysy_us, i64 0, i64 %34
@@ -260,7 +380,7 @@ define dso_local void @after_main() #0 {
   %64 = load i32, ptr %1, align 4
   %65 = add nsw i32 %64, 1
   store i32 %65, ptr %1, align 4
-  br label %2, !llvm.loop !10
+  br label %2, !llvm.loop !12
 
 66:                                               ; preds = %2
   %67 = load ptr, ptr @stderr, align 8
@@ -268,7 +388,7 @@ define dso_local void @after_main() #0 {
   %69 = load i32, ptr @_sysy_m, align 16
   %70 = load i32, ptr @_sysy_s, align 16
   %71 = load i32, ptr @_sysy_us, align 16
-  %72 = call i32 (ptr, ptr, ...) @fprintf(ptr noundef %67, ptr noundef @.str.6, i32 noundef %68, i32 noundef %69, i32 noundef %70, i32 noundef %71)
+  %72 = call i32 (ptr, ptr, ...) @fprintf(ptr noundef %67, ptr noundef @.str.8, i32 noundef %68, i32 noundef %69, i32 noundef %70, i32 noundef %71)
   ret void
 }
 
@@ -283,18 +403,18 @@ define dso_local void @_sysy_starttime(i32 noundef %0) #0 {
   %5 = sext i32 %4 to i64
   %6 = getelementptr inbounds [1024 x i32], ptr @_sysy_l1, i64 0, i64 %5
   store i32 %3, ptr %6, align 4
-  %7 = call i32 @gettimeofday(ptr noundef @_sysy_start, ptr noundef null) #3
+  %7 = call i32 @gettimeofday(ptr noundef @_sysy_start, ptr noundef null) #4
   ret void
 }
 
 ; Function Attrs: nounwind
-declare i32 @gettimeofday(ptr noundef, ptr noundef) #2
+declare i32 @gettimeofday(ptr noundef, ptr noundef) #3
 
 ; Function Attrs: noinline nounwind optnone uwtable
 define dso_local void @_sysy_stoptime(i32 noundef %0) #0 {
   %2 = alloca i32, align 4
   store i32 %0, ptr %2, align 4
-  %3 = call i32 @gettimeofday(ptr noundef @_sysy_end, ptr noundef null) #3
+  %3 = call i32 @gettimeofday(ptr noundef @_sysy_end, ptr noundef null) #4
   %4 = load i32, ptr %2, align 4
   %5 = load i32, ptr @_sysy_idx, align 4
   %6 = sext i32 %5 to i64
@@ -375,8 +495,9 @@ define dso_local void @_sysy_stoptime(i32 noundef %0) #0 {
 
 attributes #0 = { noinline nounwind optnone uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
 attributes #1 = { "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
-attributes #2 = { nounwind "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
-attributes #3 = { nounwind }
+attributes #2 = { nocallback nofree nosync nounwind willreturn }
+attributes #3 = { nounwind "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
+attributes #4 = { nounwind }
 
 !llvm.module.flags = !{!0, !1, !2, !3, !4}
 !llvm.ident = !{!5}
@@ -392,3 +513,5 @@ attributes #3 = { nounwind }
 !8 = distinct !{!8, !7}
 !9 = distinct !{!9, !7}
 !10 = distinct !{!10, !7}
+!11 = distinct !{!11, !7}
+!12 = distinct !{!12, !7}

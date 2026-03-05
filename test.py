@@ -210,11 +210,8 @@ def main():
             # Run compiler
             # Command: ./target/debug/compiler <input> -o <output>
             cmd = [compiler_binary, "--emit-llvm", test_file, "-o", output_file_name]
-<<<<<<< HEAD
-=======
             if args.dump_after:
                 cmd.append(f"--dump-after={args.dump_after}")
->>>>>>> refactor/pass
             if args.graph:
                 cmd.append("--graph")
             

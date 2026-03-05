@@ -1,7 +1,9 @@
 use crate::base::BuilderContext;
 use crate::debug::info;
+use crate::debug::DumpLLVM;
 use crate::ir::mir::Program;
 
+use crate::cli::Cli;
 use std::collections::VecDeque;
 
 pub trait Pass<'a> {
@@ -15,12 +17,14 @@ pub struct PassManager<'a> {
     // The `+ 'a` bound is necessary because the passes themselves (like DCE<'a>)
     // contain a mutable reference to the Program with lifetime 'a.
     passes: VecDeque<Box<dyn Pass<'a> + 'a>>,
+    cli: &'a Cli,
 }
 
 impl<'a> PassManager<'a> {
-    pub fn new() -> Self {
+    pub fn new(cli: &'a Cli) -> Self {
         PassManager {
             passes: VecDeque::new(),
+            cli,
         }
     }
 
@@ -37,6 +41,37 @@ impl<'a> PassManager<'a> {
             unsafe { pass.set_program(&mut *ir_ptr) };
             pass.run();
             info!("Finished pass: {}", pass.name());
+
+            if self.cli.emit_llvm && self.cli.dump_after == pass.name() {
+                info!("Dumping IR after pass: {}", pass.name());
+                let filename = self
+                    .cli
+                    .input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output")
+                    .to_string();
+                unsafe {
+                    DumpLLVM::new(&mut *ir_ptr, filename).run();
+                }
+                info!("Finished dumping IR after pass: {}", pass.name());
+            }
+        }
+
+        // If no pass specified, dump the LLVM IR after all optimizations.
+        if self.cli.dump_after.is_empty() && self.cli.emit_llvm {
+            info!("Start Dumping LLVM IR.");
+            let filename = self
+                .cli
+                .input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output")
+                .to_string();
+            unsafe {
+                DumpLLVM::new(&mut *ir_ptr, filename).run();
+            }
+            info!("Finish Dumping LLVM IR.");
         }
     }
 }

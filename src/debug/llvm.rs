@@ -7,7 +7,7 @@ use crate::ir::mir::*;
 use crate::utils::arena::{ArenaItem, IndexedArena};
 use std::fmt::Write;
 
-pub trait DumpLLVM {
+pub trait Dump {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error>;
 }
 
@@ -81,7 +81,7 @@ fn type_alignment(typ: &Type) -> u32 {
     }
 }
 
-impl DumpLLVM for Type {
+impl Dump for Type {
     fn dump_to_llvm(&self, _ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         fn dump_type(typ: &Type) -> Result<String, std::fmt::Error> {
             let mut s = String::new();
@@ -108,7 +108,7 @@ impl DumpLLVM for Type {
     }
 }
 
-impl DumpLLVM for Operand {
+impl Dump for Operand {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match self {
@@ -126,7 +126,7 @@ impl DumpLLVM for Operand {
     }
 }
 
-impl DumpLLVM for Op {
+impl Dump for Op {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         match &self.data {
@@ -713,7 +713,7 @@ impl DumpLLVM for Op {
     }
 }
 
-impl DumpLLVM for BasicBlock {
+impl Dump for BasicBlock {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let dfg = match ctx.function {
@@ -741,7 +741,7 @@ impl DumpLLVM for BasicBlock {
     }
 }
 
-impl DumpLLVM for Function {
+impl Dump for Function {
     fn dump_to_llvm(&self, ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
 
@@ -796,7 +796,7 @@ impl DumpLLVM for Function {
     }
 }
 
-impl DumpLLVM for Program {
+impl Dump for Program {
     fn dump_to_llvm(&self, _ctx: &DumpContext) -> Result<String, std::fmt::Error> {
         let mut s = String::new();
         let program_ctx = DumpContext {
@@ -977,12 +977,12 @@ where
     }
 }
 
-pub struct DumpLLVMPass<'a> {
+pub struct DumpLLVM<'a> {
     program: &'a mut Program,
     filename: String,
 }
 
-impl<'a> DumpLLVMPass<'a> {
+impl<'a> DumpLLVM<'a> {
     pub fn new(program: &'a mut Program, filename: String) -> Self {
         Self { program, filename }
     }

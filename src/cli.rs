@@ -4,7 +4,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// enable this to transform src to koopa ir.
+    /// enable this to stop running optimization passes and directly emit LLVM IR.
     #[arg(long = "emit-llvm", default_value_t = false)]
     pub emit_llvm: bool,
 

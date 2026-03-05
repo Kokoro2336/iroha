@@ -100,6 +100,7 @@ def main():
     parser.add_argument('--clean', action='store_true', help='Clean test directories before running')
     parser.add_argument('--graph', action='store_true', help='Generate CFG graphs (.dot/.svg) from linked LLVM IR using opt + graphviz')
     parser.add_argument('--trace', action='store_true', help='Enable trace logging')
+    parser.add_argument('--dump-after', type=str, default='', help='Dump LLVM IR after a specific pass (pass name)')
     backend_group = parser.add_mutually_exclusive_group()
     backend_group.add_argument('--lli', action='store_true', help='Use lli to interpret linked .ll')
     backend_group.add_argument('--llc', action='store_true', help='Use llc to compile linked .ll into executable and run it')
@@ -209,6 +210,11 @@ def main():
             # Run compiler
             # Command: ./target/debug/compiler <input> -o <output>
             cmd = [compiler_binary, "--emit-llvm", test_file, "-o", output_file_name]
+<<<<<<< HEAD
+=======
+            if args.dump_after:
+                cmd.append(f"--dump-after={args.dump_after}")
+>>>>>>> refactor/pass
             if args.graph:
                 cmd.append("--graph")
             

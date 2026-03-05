@@ -55,11 +55,13 @@ impl<'a> PassManager<'a> {
                     DumpLLVM::new(&mut *ir_ptr, filename).run();
                 }
                 info!("Finished dumping IR after pass: {}", pass.name());
+                info!("Quit after dumping.");
+                std::process::exit(0)
             }
         }
 
         // If no pass specified, dump the LLVM IR after all optimizations.
-        if self.cli.dump_after.is_empty() && self.cli.emit_llvm {
+        if self.cli.emit_llvm && self.cli.dump_after.is_empty() {
             info!("Start Dumping LLVM IR.");
             let filename = self
                 .cli
@@ -72,6 +74,8 @@ impl<'a> PassManager<'a> {
                 DumpLLVM::new(&mut *ir_ptr, filename).run();
             }
             info!("Finish Dumping LLVM IR.");
+            info!("Quit after dumping.");
+            std::process::exit(0)
         }
     }
 }

@@ -521,34 +521,6 @@ impl<'a> SCCP<'a> {
             })
             .collect::<Vec<(Operand, Operand)>>();
 
-        // Slay the edge of dead block in phi operations.
-        let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
-        let phis = self.builder.get_all_ops(&mut ctx, OpType::Phi);
-        for phi_op in &phis {
-            let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
-            let op = dfg[phi_op.clone()].clone();
-            if let OpData::Phi { incoming } = op.data {
-                for incoming in incoming.iter() {
-                    if let PhiIncoming::Data { bb, .. } = incoming {
-                        if let Operand::BB(bb_id) = bb {
-                            if !self.visited.contains(*bb_id) {
-                                let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
-                                self.builder.slay_phi_incoming(
-                                    &mut ctx,
-                                    phi_op.clone(),
-                                    bb.clone(),
-                                );
-                            }
-                        } else {
-                            panic!("SCCP rewrite: phi incoming bb is not a BB operand");
-                        }
-                    }
-                }
-            } else {
-                panic!("SCCP rewrite: op is not a phi node");
-            }
-        }
-
         // Replace br with jump if the condition is a constant.
         for br_op in self.br_ops.iter() {
             let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
@@ -585,6 +557,40 @@ impl<'a> SCCP<'a> {
                 }
             } else {
                 panic!("SCCP rewrite: op is not a br node");
+            }
+        }
+
+        // Slay the edge of dead block in phi operations.
+        let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+        let phis = self.builder.get_all_ops(&mut ctx, OpType::Phi);
+        for phi_op in &phis {
+            let dfg = &mut self.program.funcs[self.current_function.unwrap()].dfg;
+            let op = dfg[phi_op.clone()].clone();
+            if let OpData::Phi { incoming } = op.data {
+                for incoming in incoming.iter() {
+                    if let PhiIncoming::Data { bb, .. } = incoming {
+                        if let Operand::BB(bb_id) = bb {
+                            // Check whether the block is dead or the current block is no longer the successor of the incoming block. 
+                            // If so, we need to slay this incoming edge.
+                            let current_bb = self.op_to_bb[phi_op.get_op_id()].clone();
+                            let cfg = &mut self.program.funcs[self.current_function.unwrap()].cfg;
+                            let ans_succ = &cfg[*bb_id].succs;
+
+                            if !self.visited.contains(*bb_id) || !ans_succ.contains(&current_bb) {
+                                let mut ctx = context_or_err!(self, "SCCP: no context in rewrite");
+                                self.builder.slay_phi_incoming(
+                                    &mut ctx,
+                                    phi_op.clone(),
+                                    bb.clone(),
+                                );
+                            }
+                        } else {
+                            panic!("SCCP rewrite: phi incoming bb is not a BB operand");
+                        }
+                    }
+                }
+            } else {
+                panic!("SCCP rewrite: op is not a phi node");
             }
         }
 

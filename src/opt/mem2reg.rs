@@ -1,8 +1,8 @@
+/// SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
+/// Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
 use crate::analysis::dom::{BuildDomFrontier, BuildDomTree, DomFrontier, DomTree};
 use crate::base::{context_or_err, Builder, BuilderGuard, Pass, Type};
 use crate::debug::info;
-/// SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
-/// Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
 use crate::ir::mir::{Attr, Op, OpData, OpType, Operand, PhiIncoming, Program};
 
 use std::collections::HashMap;

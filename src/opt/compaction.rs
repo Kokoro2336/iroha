@@ -1,3 +1,4 @@
+/// Garbage collection and reference rewriting support for Arena.
 use crate::base::Pass;
 use crate::ir::mir::Program;
 use crate::utils::arena::Arena;

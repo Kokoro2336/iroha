@@ -22,8 +22,7 @@ use crate::cli::Cli;
 
 use debug::info;
 
-// 引用 lalrpop 生成的解析器
-// 因为我们刚刚创建了 sysy.lalrpop, 所以模块名是 sysy
+// Import SysY parser.
 lalrpop_mod!(sysy);
 
 fn main() -> Result<()> {
@@ -36,13 +35,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let input_path = cli.input.clone();
-    #[allow(unused)]
-    let output = cli.output.clone();
+    let _ = cli.output.clone();
 
-    // 读取输入文件
+    // Get input str.
     let input_str = read_to_string(&input_path)?;
 
-    // 调用 lalrpop 生成的 parser 解析输入文件
+    // Parse the input string into an AST.
     let result = {
         let mut parser = parse::Parser::new();
         let root_id = sysy::CompUnitParser::new()

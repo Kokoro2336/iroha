@@ -1,11 +1,12 @@
-/// Dead Code Elimination (DCE).
-use crate::base::ir::{OpData, Operand, PhiIncoming};
+use crate::base::Builder;
 use crate::base::{context_or_err, Pass};
-use crate::base::{Builder, BuilderContext};
+/// Dead Code Elimination (DCE).
+use crate::ir::mir::{OpData, Operand, PhiIncoming, Program};
 use crate::utils::arena::ArenaItem;
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct DCE<'a> {
-    pub program: &'a mut crate::base::ir::Program,
+    pub program: Option<&'a mut Program>,
     builder: Builder,
     // Worklist of inst
     worklist: Vec<(Operand, Operand)>,
@@ -16,9 +17,9 @@ pub struct DCE<'a> {
 }
 
 impl<'a> DCE<'a> {
-    pub fn new(program: &'a mut crate::base::ir::Program) -> Self {
+    pub fn new() -> Self {
         Self {
-            program,
+            program: None,
             builder: Builder::new(),
             worklist: vec![],
             op_to_bb: vec![],
@@ -27,12 +28,13 @@ impl<'a> DCE<'a> {
     }
 
     pub fn is_dead(&self, operand: &Operand) -> bool {
+        let program = self.program.as_ref().unwrap();
         let current_func = match self.current_function {
-            Some(idx) => &self.program.funcs[idx],
+            Some(idx) => &program.funcs[idx],
             None => panic!("DCE: not in a function"),
         };
         let dfg = &current_func.dfg;
-        let globals = &self.program.globals;
+        let globals = &program.globals;
         match operand {
             Operand::Value(id) => dfg[*id].users.is_empty(),
             Operand::Global(id) => globals[*id].users.is_empty(),
@@ -42,7 +44,8 @@ impl<'a> DCE<'a> {
 
     pub fn init(&mut self, func_id: usize) {
         self.current_function = Some(func_id);
-        let func = &self.program.funcs[self.current_function.unwrap()];
+        let program = self.program.as_ref().unwrap();
+        let func = &program.funcs[self.current_function.unwrap()];
         self.worklist.clear();
 
         // map OpId to BBId
@@ -68,8 +71,11 @@ impl<'a> DCE<'a> {
                     Operand::Value(id) => *id,
                     _ => panic!("DCE: instruction id is not a value"),
                 };
-                let inst = &func.dfg[op_id];
-                if self.is_dead(inst_id) && !inst.is_impure() {
+                let is_impure = {
+                    let inst = &func.dfg[op_id];
+                    inst.is_impure()
+                };
+                if self.is_dead(inst_id) && !is_impure {
                     self.worklist.push((inst_id.clone(), Operand::BB(block_id)));
                 }
             }
@@ -78,8 +84,9 @@ impl<'a> DCE<'a> {
 
     fn run(&mut self) {
         fn check(this: &mut DCE, operand: &Operand) {
+            let program = this.program.as_ref().unwrap();
             let func = match this.current_function {
-                Some(idx) => &this.program.funcs[idx],
+                Some(idx) => &program.funcs[idx],
                 None => panic!("DCE: not in a function"),
             };
             match operand {
@@ -92,7 +99,7 @@ impl<'a> DCE<'a> {
                 }
                 Operand::Global(id) => {
                     let global_id = *id;
-                    if this.is_dead(operand) && !this.program.globals[global_id].is_impure() {
+                    if this.is_dead(operand) && !program.globals[global_id].is_impure() {
                         this.worklist.push((operand.clone(), Operand::BB(0)));
                     }
                 }
@@ -103,18 +110,24 @@ impl<'a> DCE<'a> {
                 _ => panic!("DCE: operand is not a value or basic block: {:?}", operand),
             }
         }
-        for func_id in self.program.funcs.collect_internal() {
+        let func_ids = self.program.as_ref().unwrap().funcs.collect_internal();
+        for func_id in func_ids {
             self.init(func_id);
             while let Some((op_id, bb_id)) = self.worklist.pop() {
                 if let Operand::Value(id) = op_id {
-                    let func = &self.program.funcs[self.current_function.unwrap()];
+                    let func =
+                        &self.program.as_ref().unwrap().funcs[self.current_function.unwrap()];
                     let bb = bb_id.get_bb_id();
                     if !func.cfg[bb].cur.iter().any(|inst| inst.get_op_id() == id) {
                         continue;
                     }
                 }
 
-                let mut ctx = context_or_err!(self, "DCE: no context in run");
+                let mut ctx = context_or_err(
+                    self.program.as_deref_mut().unwrap(),
+                    self.current_function,
+                    "DCE: no context in run",
+                );
                 self.builder.set_current_block(bb_id.clone());
                 let removed_op = match op_id {
                     Operand::Global(_) => self.builder.remove_op(&mut ctx, op_id, None),
@@ -140,8 +153,6 @@ impl<'a> DCE<'a> {
                     | OpData::SLt { lhs, rhs }
                     | OpData::SGe { lhs, rhs }
                     | OpData::SLe { lhs, rhs }
-                    | OpData::And { lhs, rhs }
-                    | OpData::Or { lhs, rhs }
                     | OpData::Xor { lhs, rhs }
                     | OpData::Shl { lhs, rhs }
                     | OpData::Shr { lhs, rhs }
@@ -185,7 +196,6 @@ impl<'a> DCE<'a> {
                     | OpData::Br { .. }
                     | OpData::Jump { .. }
                     | OpData::Ret { .. }
-                    | OpData::Move { .. }
                     | OpData::Alloca(_)
                     | OpData::GlobalAlloca(_)
                     | OpData::Declare { .. } => {
@@ -200,7 +210,13 @@ impl<'a> DCE<'a> {
     }
 }
 
-impl Pass<()> for DCE<'_> {
+impl<'a> Pass<'a> for DCE<'a> {
+    fn name(&self) -> &str {
+        "DCE"
+    }
+    fn set_program(&mut self, program: &'a mut crate::ir::mir::Program) {
+        self.program = Some(program);
+    }
     fn run(&mut self) {
         self.run()
     }

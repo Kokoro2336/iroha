@@ -2,11 +2,10 @@
  * Semantic analysis.
  * Performs type inference, add implicit cast and checks for semantic errors.
  */
-use crate::base::Type;
-use crate::base::SYSY_LIB;
-use crate::base::{Pass, SymbolTable};
+use crate::base::{Type, SYSY_LIB};
 use crate::frontend::ast::*;
 use crate::utils::arena::Arena;
+use crate::utils::table::SymbolTable;
 
 use regex::Regex;
 use std::collections::HashMap;
@@ -73,7 +72,7 @@ impl Semantic {
         matches!(op, Op::Mul | Op::Div | Op::Mod | Op::Add | Op::Sub)
     }
 
-    pub fn analyze(&mut self, node_id: NodeId) -> Result<Type, String> {
+    fn analyze(&mut self, node_id: NodeId) -> Result<Type, String> {
         let node_type = self.ast.get_node_type(node_id);
         match node_type {
             NodeType::BinaryOp => {
@@ -366,7 +365,7 @@ impl Semantic {
                             return Ok(res_type);
                         }
 
-                        if op_list.len() % 2 == 0 {
+                        if op_list.len().is_multiple_of(2) {
                             let operand = self.ast.remove(res_id);
                             self.ast.replace(node_id, operand);
                             for id in op_list.into_iter().filter(|id| *id != node_id) {
@@ -391,9 +390,7 @@ impl Semantic {
                                 Ok(res_type)
                             }
                             Op::Not => {
-                                if matches!(operand_type, Type::Float) {
-                                    self.cast_expr_to(&mut res_id, &operand_type, &Type::Bool)?;
-                                } else if matches!(operand_type, Type::Int) {
+                                if matches!(operand_type, Type::Float | Type::Int) {
                                     self.cast_expr_to(&mut res_id, &operand_type, &Type::Bool)?;
                                 } else if !matches!(operand_type, Type::Bool) {
                                     return Err(format!(
@@ -891,10 +888,8 @@ impl Semantic {
             _ => Ok(Type::Void),
         }
     }
-}
 
-impl Pass<Result<AST, String>> for Semantic {
-    fn run(&mut self) -> Result<AST, String> {
+    pub fn run(&mut self) -> Result<AST, String> {
         self.syms.enter_scope();
         SYSY_LIB.with(|lib| {
             for (name, typ) in lib.iter() {
@@ -944,7 +939,7 @@ pub fn raise(typ: Type) -> Result<Type, String> {
                 dims,
             } => {
                 if dims.is_empty() {
-                    return Err("Cannot raise pointer to array with zero dimensions!".to_string());
+                    Err("Cannot raise pointer to array with zero dimensions!".to_string())
                 } else {
                     Ok(Type::Array {
                         base: array_base,

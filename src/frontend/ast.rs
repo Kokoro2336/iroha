@@ -7,10 +7,11 @@ use crate::utils::arena::*;
 
 use strum_macros::EnumDiscriminants;
 
+#[allow(clippy::upper_case_acronyms)]
 pub type AST = IndexedArena<Node>;
 pub type NodeId = usize;
 
-#[derive(Debug, EnumDiscriminants, Clone)]
+#[derive(Debug, Default, EnumDiscriminants, Clone)]
 #[strum_discriminants(name(NodeType))]
 #[strum_discriminants(derive(Hash, Ord, PartialOrd))]
 pub enum Node {
@@ -101,6 +102,7 @@ pub enum Node {
         typ: Type,
     },
 
+    #[default]
     Empty,
 
     Literal(Literal),
@@ -119,6 +121,7 @@ pub enum Node {
     },
 
     // Original signle declaration
+    #[allow(unused)]
     RawDef {
         ident: String,
         const_exps: Vec<NodeId>,
@@ -160,13 +163,6 @@ impl Literal {
             panic!("Literal is not Float");
         }
     }
-    pub fn is_zero(&self) -> bool {
-        match self {
-            Literal::Int(val) => *val == 0,
-            Literal::Float(val) => *val == 0.0,
-            _ => false,
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -198,28 +194,6 @@ pub enum Op {
     Ne,
     And,
     Or,
-}
-
-impl Op {
-    // Check if the operation only returns int type
-    pub fn only_ret_int(&self) -> bool {
-        matches!(
-            self,
-            Op::And | Op::Or | Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::Eq | Op::Ne
-        )
-    }
-}
-
-impl Default for Node {
-    fn default() -> Self {
-        Node::Empty
-    }
-}
-
-impl Node {
-    pub fn is(&self, typ: NodeType) -> bool {
-        matches!(NodeType::from(self), typ)
-    }
 }
 
 impl AST {

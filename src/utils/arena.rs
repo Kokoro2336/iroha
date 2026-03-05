@@ -1,7 +1,5 @@
-/**
- * Simple arena allocator for indexed storage of values.
- * Faster retrieval by index compared to HashMap.
- */
+/// Simple arena allocator for indexed storage of values.
+/// Faster retrieval by index compared to HashMap.
 use std::collections::HashMap;
 use std::ops::{Index, IndexMut};
 

@@ -1,27 +1,27 @@
 /**
  * IRBuilder API.
  */
-use crate::base::ir::*;
+use crate::ir::mir::*;
 use crate::utils::arena::{Arena, ArenaItem};
 
 use std::ops::{Deref, DerefMut};
 
 macro_rules! acquire_cfg {
     ($ctx:ident, $msg:expr) => {
-        if $ctx.cfg.is_none() {
-            panic!("{}", $msg);
+        if let Some(cfg) = $ctx.cfg.as_mut() {
+            cfg
         } else {
-            $ctx.cfg.as_mut().unwrap()
+            panic!("{}", $msg);
         }
     };
 }
 
 macro_rules! acquire_dfg {
     ($ctx:ident, $msg:expr) => {
-        if $ctx.dfg.is_none() {
-            panic!("{}", $msg);
+        if let Some(dfg) = $ctx.dfg.as_mut() {
+            dfg
         } else {
-            $ctx.dfg.as_mut().unwrap()
+            panic!("{}", $msg);
         }
     };
 }
@@ -94,6 +94,7 @@ pub struct BuilderContext<'a> {
     pub globals: &'a mut DFG,
 }
 
+#[allow(unused)]
 impl Builder {
     pub fn new() -> Self {
         Self {
@@ -109,10 +110,6 @@ impl Builder {
 
     pub fn pop_loop(&mut self) -> Option<LoopInfo> {
         self.loop_stack.pop()
-    }
-
-    pub fn current_loop(&mut self) -> Option<&mut LoopInfo> {
-        self.loop_stack.last_mut()
     }
 
     pub fn set_current_block(&mut self, block_id: Operand) {
@@ -246,8 +243,6 @@ impl Builder {
             | OpData::SLt { lhs, rhs }
             | OpData::SGe { lhs, rhs }
             | OpData::SLe { lhs, rhs }
-            | OpData::And { lhs, rhs }
-            | OpData::Or { lhs, rhs }
             | OpData::Xor { lhs, rhs }
             | OpData::Shl { lhs, rhs }
             | OpData::Shr { lhs, rhs }
@@ -282,10 +277,6 @@ impl Builder {
                 for index in indices {
                     dfg.add_use(index, op.clone());
                 }
-            }
-
-            OpData::Move { value, .. } => {
-                dfg.add_use(value, op);
             }
 
             // GlobalAlloca: Do not maintain uses for global alloca
@@ -363,8 +354,6 @@ impl Builder {
             | OpData::SLt { lhs, rhs }
             | OpData::SGe { lhs, rhs }
             | OpData::SLe { lhs, rhs }
-            | OpData::And { lhs, rhs }
-            | OpData::Or { lhs, rhs }
             | OpData::Xor { lhs, rhs }
             | OpData::Shl { lhs, rhs }
             | OpData::Shr { lhs, rhs }
@@ -401,9 +390,6 @@ impl Builder {
                 for index in indices {
                     dfg.remove_use(index, op.clone());
                 }
-            }
-            OpData::Move { value, .. } => {
-                dfg.remove_use(value, op);
             }
             OpData::GlobalAlloca(_)
             | OpData::Alloca(_)
@@ -457,7 +443,6 @@ impl Builder {
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
             | OpData::Call { .. }
-            | OpData::Move { .. }
             | OpData::GEP { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
@@ -469,8 +454,6 @@ impl Builder {
             | OpData::Sar { .. }
             | OpData::SNe { .. }
             | OpData::SEq { .. }
-            | OpData::And { .. }
-            | OpData::Or { .. }
             | OpData::Xor { .. }
             | OpData::SGt { .. }
             | OpData::SLt { .. }
@@ -520,7 +503,6 @@ impl Builder {
             | OpData::Phi { .. }
             | OpData::GlobalAlloca { .. }
             | OpData::Call { .. }
-            | OpData::Move { .. }
             | OpData::GEP { .. }
             | OpData::Sitofp { .. }
             | OpData::Fptosi { .. }
@@ -532,8 +514,6 @@ impl Builder {
             | OpData::Sar { .. }
             | OpData::SNe { .. }
             | OpData::SEq { .. }
-            | OpData::And { .. }
-            | OpData::Or { .. }
             | OpData::Xor { .. }
             | OpData::SGt { .. }
             | OpData::SLt { .. }
@@ -565,14 +545,11 @@ impl Builder {
             }
 
             OpData::GEP { .. }
-            | OpData::Move { .. }
             | OpData::AddI { .. }
             | OpData::SubI { .. }
             | OpData::MulI { .. }
             | OpData::DivI { .. }
             | OpData::ModI { .. }
-            | OpData::And { .. }
-            | OpData::Or { .. }
             | OpData::Xor { .. }
             | OpData::SNe { .. }
             | OpData::SEq { .. }
@@ -912,6 +889,7 @@ impl Builder {
     }
 
     // Remove means we update the incoming value to None.
+    #[allow(unused)]
     pub fn remove_phi_incoming(&mut self, ctx: &mut BuilderContext, phi: Operand, idx: usize) {
         unimplemented!()
     }

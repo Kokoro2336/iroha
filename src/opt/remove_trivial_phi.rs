@@ -1,5 +1,7 @@
-use crate::base::ir::{Attr, OpData, Operand, PhiIncoming, Program};
+/// Remove Trivial Phi.
 use crate::base::{context_or_err, Builder, BuilderContext, Pass};
+use crate::ir::mir::{Attr, OpData, OpType, Operand, PhiIncoming, Program};
+use crate::utils::arena::ArenaItem;
 
 enum CheckType {
     Empty,           // No non-phi incoming value. We can replace the phi with undef.
@@ -8,23 +10,25 @@ enum CheckType {
 }
 
 pub struct RemoveTrivialPhi<'a> {
-    program: &'a mut Program,
+    program: Option<&'a mut Program>,
     builder: Builder,
-    phi_ids: Vec<Vec<(Operand, Operand)>>,
+    phi_ids: Vec<Operand>,
 
     // Ancillary state fields
     worklist: Vec<(Operand, Operand, CheckType)>, // Vec of (PhiId, BBId, CheckType)
+    op_to_bb: Vec<Operand>,                       // Mapping from OpId to BBId
 
     // State function
     current_function: Option<usize>,
 }
 
 impl<'a> RemoveTrivialPhi<'a> {
-    pub fn new(program: &'a mut Program, phi_ids: Vec<Vec<(Operand, Operand)>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            program,
+            program: None,
             builder: Builder::new(),
-            phi_ids,
+            phi_ids: Vec::new(),
+            op_to_bb: Vec::new(),
             current_function: None,
             worklist: Vec::new(),
         }
@@ -68,22 +72,50 @@ impl<'a> RemoveTrivialPhi<'a> {
 
     fn init(&mut self, idx: usize) {
         self.current_function = Some(idx);
-        self.worklist = self.phi_ids[idx]
+
+        let mut ctx = context_or_err(
+            self.program.as_deref_mut().unwrap(),
+            self.current_function,
+            "RemoveTrivialPhi: No current function context found",
+        );
+        self.op_to_bb.clear();
+        self.op_to_bb
+            .resize(ctx.dfg.as_ref().unwrap().storage.len(), Operand::BB(0));
+        ctx.cfg
+            .as_ref()
+            .unwrap()
+            .storage
             .iter()
-            .map(|(phi_id, bb_id)| {
-                let mut ctx =
-                    context_or_err!(self, "RemoveTrivialPhi: No current function context found");
+            .enumerate()
+            .for_each(|(bb_id, item)| {
+                if let ArenaItem::Data(bb) = item {
+                    for op_id in bb.cur.iter() {
+                        self.op_to_bb[op_id.get_op_id()] = Operand::BB(bb_id);
+                    }
+                }
+            });
+
+        self.phi_ids = self.builder.get_all_ops(&mut ctx, OpType::Phi);
+        self.worklist = self
+            .phi_ids
+            .iter()
+            .map(|phi_id| {
+                let mut ctx = context_or_err(
+                    self.program.as_deref_mut().unwrap(),
+                    self.current_function,
+                    "RemoveTrivialPhi: No current function context found",
+                );
                 let check_result = Self::check(&mut ctx, phi_id.clone());
-                (phi_id.clone(), bb_id.clone(), check_result)
+                (
+                    phi_id.clone(),
+                    self.op_to_bb[phi_id.get_op_id()].clone(),
+                    check_result,
+                )
             })
             .collect();
     }
 
     fn remove_phi(&mut self) {
-        let idx = match self.current_function {
-            Some(i) => i,
-            None => panic!("RemoveTrivialPhi: no current function"),
-        };
         // Check whether the phi_ids are valid
         while let Some((phi_id, bb_id, check_result)) = self.worklist.pop() {
             let uses = {
@@ -91,14 +123,17 @@ impl<'a> RemoveTrivialPhi<'a> {
                     Some(id) => id,
                     None => panic!("RemoveTrivialPhi: no current function"),
                 };
-                let func = &mut self.program.funcs[func_id];
+                let func = &mut self.program.as_mut().unwrap().funcs[func_id];
                 let phi_op = &mut func.dfg[phi_id.clone()];
                 // Remove OldIdx Attr
                 phi_op.attrs.retain(|attr| !matches!(attr, Attr::OldIdx(_)));
                 phi_op.users.clone()
             };
-            let mut ctx =
-                context_or_err!(self, "RemoveTrivialPhi: No current function context found");
+            let mut ctx = context_or_err(
+                self.program.as_deref_mut().unwrap(),
+                self.current_function,
+                "RemoveTrivialPhi: No current function context found",
+            );
             match check_result {
                 CheckType::Empty => {
                     self.builder
@@ -110,16 +145,16 @@ impl<'a> RemoveTrivialPhi<'a> {
                         }
                         let check_result = Self::check(&mut ctx, user.clone());
                         if matches!(check_result, CheckType::Empty | CheckType::Single(_)) {
-                            if let Some((id, bb)) = self.phi_ids[idx]
+                            if let Some((id, bb)) = self
+                                .phi_ids
                                 .iter()
-                                .find(|(id, _)| *id == user)
-                                .map(|(id, bb)| (id.clone(), bb.clone()))
+                                .find(|id| **id == user)
+                                .map(|id| (id.clone(), self.op_to_bb[id.get_op_id()].clone()))
                             {
                                 // We should check whether the user phi is already in the worklist to avoid duplicate entries.
                                 let pos = self.worklist.iter().position(|(w_id, _, _)| *w_id == id);
                                 if let Some(pos) = pos {
-                                    self.worklist[pos] =
-                                        (id.clone(), bb.clone(), check_result);
+                                    self.worklist[pos] = (id.clone(), bb.clone(), check_result);
                                 } else {
                                     self.worklist.push((id.clone(), bb.clone(), check_result));
                                 }
@@ -138,16 +173,16 @@ impl<'a> RemoveTrivialPhi<'a> {
                         }
                         let check_result = Self::check(&mut ctx, user.clone());
                         if matches!(check_result, CheckType::Empty | CheckType::Single(_)) {
-                            if let Some((id, bb)) = self.phi_ids[idx]
+                            if let Some((id, bb)) = self
+                                .phi_ids
                                 .iter()
-                                .find(|(id, _)| *id == user)
-                                .map(|(id, bb)| (id.clone(), bb.clone()))
+                                .find(|id| **id == user)
+                                .map(|id| (id.clone(), self.op_to_bb[id.get_op_id()].clone()))
                             {
                                 // We should check whether the user phi is already in the worklist to avoid duplicate entries.
                                 let pos = self.worklist.iter().position(|(w_id, _, _)| *w_id == id);
                                 if let Some(pos) = pos {
-                                    self.worklist[pos] =
-                                        (id.clone(), bb.clone(), check_result);
+                                    self.worklist[pos] = (id.clone(), bb.clone(), check_result);
                                 } else {
                                     self.worklist.push((id.clone(), bb.clone(), check_result));
                                 }
@@ -161,17 +196,21 @@ impl<'a> RemoveTrivialPhi<'a> {
             }
         }
     }
+}
 
-    pub fn run(&mut self) {
-        for idx in self.program.funcs.collect_internal() {
+impl<'a> Pass<'a> for RemoveTrivialPhi<'a> {
+    fn name(&self) -> &str {
+        "RemoveTrivialPhi"
+    }
+
+    fn set_program(&mut self, program: &'a mut Program) {
+        self.program = Some(program);
+    }
+
+    fn run(&mut self) {
+        for idx in self.program.as_ref().unwrap().funcs.collect_internal() {
             self.init(idx);
             self.remove_phi();
         }
-    }
-}
-
-impl<'a> Pass<()> for RemoveTrivialPhi<'a> {
-    fn run(&mut self) {
-        self.run();
     }
 }

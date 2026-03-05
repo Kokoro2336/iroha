@@ -1,358 +1,11 @@
-/**
- * SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
- * Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
- */
-use crate::base::ir::{Attr, Op, OpData, OpType, Operand, PhiIncoming, Program};
-use crate::base::{context_or_err, Builder, BuilderContext, BuilderGuard, Pass, Type};
+use crate::analysis::dom::{BuildDomFrontier, BuildDomTree, DomFrontier, DomTree};
+use crate::base::{context_or_err, Builder, BuilderGuard, Pass, Type};
 use crate::debug::info;
-use crate::opt::RemoveTrivialPhi;
-use crate::utils::bitset::BitSet;
+/// SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
+/// Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
+use crate::ir::mir::{Attr, Op, OpData, OpType, Operand, PhiIncoming, Program};
 
 use std::collections::HashMap;
-
-macro_rules! acquire_cur_func_id {
-    ($self:ident) => {
-        match $self.current_function {
-            Some(func_id) => func_id,
-            None => panic!("No current function set"),
-        }
-    };
-}
-
-/**
- * Building dominator tree based on Lengauer-Tarjan algorithm.
- * Reference: https://dl.acm.org/doi/10.1145/357062.357071
- */
-pub type DomTree = Vec<Vec<usize>>;
-pub struct BuildDomTree<'a> {
-    program: &'a mut Program,
-    // Vertex number -> DFS number
-    dfn: Vec<usize>,
-    dfn_cnt: usize,
-    // DFS number -> Vertex number
-    rev: Vec<usize>,
-    // Vertex number -> Semi-dominator DFS number
-    sdom: Vec<usize>,
-    // Vertex number -> vertices that this vertex semi-dominates
-    bucket: Vec<Vec<usize>>,
-    // Parent in DSU Forest
-    parent: Vec<usize>,
-    // Parent in the DFS Tree
-    father: Vec<usize>,
-    // Recording the vertex with the minimum semi-dominator on path sdom[u] -> u
-    min: Vec<usize>,
-    // Immediate dominator
-    idom: Vec<usize>,
-
-    // temp structure
-    // Vertex number -> whether visited in DFS
-    visited: BitSet,
-
-    // state structure
-    current_function: Option<usize>,
-
-    // result
-    dom_trees: Vec<DomTree>,
-}
-
-impl<'a> BuildDomTree<'a> {
-    pub fn new(program: &'a mut Program) -> Self {
-        let current_function = program.funcs.entry;
-        Self {
-            program,
-            dfn: vec![],
-            dfn_cnt: 0,
-            rev: vec![],
-            sdom: vec![],
-            bucket: vec![],
-            parent: vec![],
-            father: vec![],
-            min: vec![],
-            idom: vec![],
-            visited: BitSet::new(),
-            current_function,
-            dom_trees: vec![],
-        }
-    }
-
-    fn init(&mut self, func: usize) {
-        self.current_function = Some(func);
-        let func = &self.program.funcs[func];
-
-        let n = func.cfg.storage.len();
-        self.dfn = vec![0; n];
-        self.dfn_cnt = 0;
-
-        self.rev = vec![0; n];
-
-        self.bucket = vec![vec![]; n];
-        self.father = vec![0; n];
-
-        self.parent = (0..n).collect();
-        self.sdom = (0..n).collect();
-        self.idom = (0..n).collect();
-        self.min = (0..n).collect();
-
-        self.visited = BitSet::new();
-    }
-
-    fn dfs(&mut self, src: usize) {
-        self.visited.insert(src);
-        let dfs_num = self.dfn_cnt;
-        self.dfn[src] = dfs_num;
-        self.rev[dfs_num] = src;
-        self.dfn_cnt += 1;
-
-        let func_idx = acquire_cur_func_id!(self);
-
-        let succs_len = {
-            let func = &self.program.funcs[func_idx];
-            let block = &func.cfg[src];
-            block.succs.len()
-        };
-
-        (0..succs_len).for_each(|i| {
-            let succ = {
-                let func = &self.program.funcs[func_idx];
-                let block = &func.cfg[src];
-                match &block.succs[i] {
-                    Operand::BB(id) => *id,
-                    _ => panic!("BuildDomTree: successor is not a basic block"),
-                }
-            };
-            if !self.visited.contains(succ) {
-                self.father[succ] = src;
-                self.dfs(succ);
-            }
-        })
-    }
-
-    fn find(&mut self, u: usize) -> usize {
-        if self.parent[u] == u {
-            return u;
-        }
-        let v = self.find(self.parent[u]);
-        if self.dfn[self.sdom[self.min[u]]] > self.dfn[self.sdom[self.min[self.parent[u]]]] {
-            self.min[u] = self.min[self.parent[u]];
-        }
-        self.parent[u] = v;
-        self.parent[u]
-    }
-
-    fn query(&mut self, u: usize) -> usize {
-        self.find(u);
-        self.min[u]
-    }
-
-    fn dfn_min(&mut self, u: usize, v: usize) -> usize {
-        if self.dfn[u] < self.dfn[v] {
-            u
-        } else {
-            v
-        }
-    }
-
-    pub fn build(&mut self) -> Vec<DomTree> {
-        // Init dom trees first
-        self.dom_trees = vec![vec![]; self.program.funcs.storage.len()];
-
-        for idx in self.program.funcs.collect_internal() {
-            let func = &self.program.funcs[idx];
-            let head = match func.cfg.entry {
-                Some(id) => id,
-                None => continue,
-            };
-
-            self.init(idx);
-            info!("Start DFS traversal.");
-            self.dfs(head);
-
-            info!("DFS traversal completed. Start computing dominators.");
-            let num_visited = self.dfn_cnt;
-            for i in (1..num_visited).rev() {
-                let u = self.rev[i];
-
-                let preds_num = {
-                    let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                    let block = &func.cfg[u];
-                    block.preds.len()
-                };
-
-                // find sdom[u]
-                for idx in 0..preds_num {
-                    let pred = {
-                        let func = &self.program.funcs[acquire_cur_func_id!(self)];
-                        let block = &func.cfg[u];
-                        match &block.preds[idx] {
-                            Operand::BB(id) => *id,
-                            _ => continue,
-                        }
-                    };
-
-                    if !self.visited.contains(pred) {
-                        continue;
-                    }
-
-                    if self.dfn[pred] < self.dfn[u] {
-                        self.sdom[u] = self.dfn_min(self.sdom[u], pred);
-                    } else {
-                        let v = self.query(pred);
-                        self.sdom[u] = self.dfn_min(self.sdom[u], self.sdom[v]);
-                    }
-                }
-
-                // push u to bucket of sdom[u]
-                self.bucket[self.sdom[u]].push(u);
-
-                // hang u to father[u] in DSU Forest
-                self.parent[u] = self.father[u];
-
-                // evaluate idom of vertices in bucket of father[u]
-                // Emm... I have to use a clone due to the bothering borrow checker.
-                let father = self.father[u];
-                let bucket_len = self.bucket[father].len();
-                for i in 0..bucket_len {
-                    let v = self.bucket[father][i];
-                    self.idom[v] = self.query(v);
-                }
-                self.bucket[father].clear();
-            }
-
-            // Refine idom
-            info!("Dominator tree computed. Start refining immediate dominators.");
-            for i in 0..self.rev.len() {
-                let v = self.rev[i];
-                let u = self.idom[v];
-                // If sdom[u] != sdom[v], then there's a vertex with lower dfn that dominates v, which is idom[u],
-                // so we set idom[v] to idom[u].
-                // Otherwise, sdom[u] is the immediate dominator of v.
-                if self.sdom[u] != self.sdom[v] {
-                    self.idom[v] = self.idom[u];
-                } else {
-                    self.idom[v] = self.sdom[u];
-                }
-            }
-
-            // export dom tree
-            self.dom_trees[idx] = self.export();
-        }
-        std::mem::take(&mut self.dom_trees)
-    }
-
-    // FuncId -> DomTree
-    pub fn export(&mut self) -> DomTree {
-        let mut dom_tree = vec![vec![]; self.idom.len()];
-        for idx in 0..self.idom.len() {
-            let idom = self.idom[idx];
-            if idom != idx {
-                dom_tree[idom].push(idx);
-            }
-        }
-        dom_tree
-    }
-}
-
-pub type DomFrontier = Vec<Vec<usize>>;
-
-pub struct BuildDomFrontier<'a> {
-    program: &'a mut Program,
-    dom_trees: Vec<DomTree>,
-    // FuncId -> BlockId -> Frontier
-    frontiers: Vec<DomFrontier>,
-    // State field
-    current_function: Option<usize>,
-}
-
-impl<'a> BuildDomFrontier<'a> {
-    pub fn new(program: &'a mut Program, dom_trees: Vec<DomTree>) -> Self {
-        Self {
-            program,
-            dom_trees,
-            frontiers: vec![],
-            current_function: None,
-        }
-    }
-
-    pub fn init(&mut self, func_id: usize) {
-        let func = &self.program.funcs[func_id];
-        self.current_function = Some(func_id);
-        self.frontiers[func_id] = vec![vec![]; func.cfg.storage.len()];
-    }
-
-    pub fn is_dom(&self, dominator: usize, dominatee: usize) -> bool {
-        let func_id = acquire_cur_func_id!(self);
-
-        let dom_num = {
-            let dom_tree = &self.dom_trees[func_id];
-            dom_tree[dominator].len()
-        };
-        if self.dom_trees[func_id][dominator].contains(&dominatee) {
-            true
-        } else {
-            // If not direct child, check recursively
-            (0..dom_num).any(|child| {
-                let child = {
-                    let dom_tree = &self.dom_trees[func_id];
-                    dom_tree[dominator][child]
-                };
-                self.is_dom(child, dominatee)
-            })
-        }
-    }
-
-    pub fn compute(&mut self, bb_id: usize) {
-        let func_id = acquire_cur_func_id!(self);
-
-        let succs = {
-            let func = &self.program.funcs[func_id];
-            let block = &func.cfg[bb_id];
-            let mut succs = Vec::new();
-            for op in &block.succs {
-                match op {
-                    Operand::BB(id) => succs.push(*id),
-                    _ => panic!("DomFrontier: successor is not a basic block"),
-                }
-            }
-            succs
-        };
-
-        // Local frontier
-        for succ in succs {
-            if !self.is_dom(bb_id, succ) {
-                self.frontiers[func_id][bb_id].push(succ);
-            }
-        }
-        // Upward frontier
-        let children_num = self.dom_trees[func_id][bb_id].len();
-        for child_idx in 0..children_num {
-            let child = self.dom_trees[func_id][bb_id][child_idx];
-            self.compute(child);
-            let child_frontier_len = self.frontiers[func_id][child].len();
-            for i in 0..child_frontier_len {
-                let w = self.frontiers[func_id][child][i];
-                if !self.is_dom(bb_id, w) {
-                    self.frontiers[func_id][bb_id].push(w);
-                }
-            }
-        }
-    }
-
-    pub fn build(&mut self) -> Vec<DomFrontier> {
-        // Init frontiers first
-        self.frontiers = vec![vec![]; self.program.funcs.storage.len()];
-
-        for idx in self.program.funcs.collect_internal() {
-            let func = &self.program.funcs[idx];
-            let head = match func.cfg.entry {
-                Some(id) => id,
-                None => continue,
-            };
-            self.init(idx);
-            self.compute(head);
-        }
-        std::mem::take(&mut self.frontiers)
-    }
-}
 
 struct InsertPhi<'a> {
     program: &'a mut Program,
@@ -408,7 +61,11 @@ impl<'a> InsertPhi<'a> {
             self.current_function = Some(idx);
             let func = &self.program.funcs[idx];
             let cfg_len = func.cfg.storage.len();
-            let mut ctx = context_or_err!(self, "InsertPhi: No current function context found");
+            let mut ctx = context_or_err(
+                self.program,
+                self.current_function,
+                "InsertPhi: No current function context found",
+            );
             (cfg_len, self.builder.get_all_ops(&mut ctx, OpType::Alloca))
         };
 
@@ -430,7 +87,7 @@ impl<'a> InsertPhi<'a> {
         self.phis = vec![vec![]; self.var_counter];
 
         // Compute defsites, origins and phis
-        let func_id = acquire_cur_func_id!(self);
+        let func_id = self.current_function.unwrap();
         let bb_ids = self.program.funcs[func_id].cfg.collect();
         for bb_id in bb_ids {
             let func = &self.program.funcs[func_id];
@@ -469,7 +126,7 @@ impl<'a> InsertPhi<'a> {
         let mut phi_ids = vec![];
 
         let defsites_len = self.defsites.len();
-        let func_id = acquire_cur_func_id!(self);
+        let func_id = self.current_function.unwrap();
         for idx in 0..defsites_len {
             while let Some(bb_id) = self.defsites[idx].pop() {
                 let frontiers = self.frontiers[func_id][bb_id].clone();
@@ -509,9 +166,10 @@ impl<'a> InsertPhi<'a> {
                                 }
                             };
 
-                            let mut ctx = context_or_err!(
-                                self,
-                                "InsertPhi: No current function context found"
+                            let mut ctx = context_or_err(
+                                self.program,
+                                self.current_function,
+                                "InsertPhi: No current function context found",
                             );
                             guard.create_at_head(
                                 &mut ctx,
@@ -557,7 +215,7 @@ impl<'a> InsertPhi<'a> {
 }
 
 struct Renaming<'a> {
-    program: &'a mut Program,
+    program: Option<&'a mut Program>,
     builder: Builder,
     dom_trees: Vec<DomTree>,
     // Record the previous "frame pointer" of the version stack
@@ -581,7 +239,7 @@ struct Renaming<'a> {
 impl<'a> Renaming<'a> {
     pub fn new(program: &'a mut Program, dom_trees: Vec<DomTree>) -> Self {
         Self {
-            program,
+            program: Some(program),
             builder: Builder::new(),
             dom_trees,
             records: vec![],
@@ -600,7 +258,7 @@ impl<'a> Renaming<'a> {
         self.var_counter = 0;
 
         let (entry, bbs) = {
-            let func = &self.program.funcs[acquire_cur_func_id!(self)];
+            let func = &self.program.as_ref().unwrap().funcs[self.current_function.unwrap()];
             let entry = match func.cfg.entry {
                 Some(id) => id,
                 None => panic!("Renaming: function has no entry block"),
@@ -610,16 +268,24 @@ impl<'a> Renaming<'a> {
         };
 
         self.builder.set_current_block(Operand::BB(entry));
-        let func_id = acquire_cur_func_id!(self);
+        let func_id = self.current_function.unwrap();
         // For each block, we check if it contains an alloca. If it does, we move the alloca to the entry block.
         for bb_id in bbs {
             let allocas = {
-                let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+                let mut ctx = context_or_err(
+                    self.program.as_deref_mut().unwrap(),
+                    self.current_function,
+                    "Renaming: No current function context found",
+                );
                 self.builder
                     .get_all_ops_in_block(&mut ctx, Operand::BB(bb_id), OpType::Alloca)
             };
 
-            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+            let mut ctx = context_or_err(
+                self.program.as_deref_mut().unwrap(),
+                self.current_function,
+                "Renaming: No current function context found",
+            );
             // Raise all the allocas to the entry block.
             for alloca in &allocas {
                 // raise alloca to the entry block if it's not already in the entry block
@@ -639,7 +305,7 @@ impl<'a> Renaming<'a> {
             let promoted_allocas: Vec<Operand> = allocas
                 .into_iter()
                 .filter(|alloca| {
-                    let func = &self.program.funcs[func_id];
+                    let func = &self.program.as_ref().unwrap().funcs[func_id];
                     let alloca_op = &func.dfg[alloca.clone()];
                     alloca_op
                         .attrs
@@ -678,7 +344,7 @@ impl<'a> Renaming<'a> {
 
         // Gather information first to avoid holding borrow of self.program.funcs
         let (insts, succs) = {
-            let func = &self.program.funcs[acquire_cur_func_id!(self)];
+            let func = &self.program.as_ref().unwrap().funcs[self.current_function.unwrap()];
             let bb = &func.cfg[bb_id];
             let insts = bb.cur.clone();
             let succs = bb.succs.clone();
@@ -691,7 +357,7 @@ impl<'a> Renaming<'a> {
             // We can't hold `op` borrow across replace_all_uses (which takes &mut ctx).
             // So we clone the necessary data or just check type first.
             let (op_data, op_attrs) = {
-                let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                let func = &self.program.as_ref().unwrap().funcs[self.current_function.unwrap()];
                 let op = &func.dfg[inst.clone()];
                 (op.data.clone(), op.attrs.clone())
             };
@@ -724,9 +390,10 @@ impl<'a> Renaming<'a> {
                         if let Some(version) = self.versions[var_id].last() {
                             // Replace the load with the current version
                             let new_val = version.clone();
-                            let mut ctx = context_or_err!(
-                                self,
-                                "Renaming: No current function context found"
+                            let mut ctx = context_or_err(
+                                self.program.as_deref_mut().unwrap(),
+                                self.current_function,
+                                "Renaming: No current function context found",
                             );
                             self.builder
                                 .replace_all_uses(&mut ctx, inst.clone(), new_val);
@@ -758,7 +425,7 @@ impl<'a> Renaming<'a> {
         for succ in succs {
             // Calculate k (predecessor index)
             let k = {
-                let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                let func = &self.program.as_ref().unwrap().funcs[self.current_function.unwrap()];
                 let succ_block = &func.cfg[succ.clone()];
                 succ_block
                     .preds
@@ -774,7 +441,11 @@ impl<'a> Renaming<'a> {
 
             // Get all phis in successor
             let phis = {
-                let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+                let mut ctx = context_or_err(
+                    self.program.as_deref_mut().unwrap(),
+                    self.current_function,
+                    "Renaming: No current function context found",
+                );
                 self.builder
                     .get_all_ops_in_block(&mut ctx, succ.clone(), OpType::Phi)
             };
@@ -783,7 +454,8 @@ impl<'a> Renaming<'a> {
                 // Check if this phi is one we track (has a var_id)
                 // Update phi incoming
                 let op_id = {
-                    let func = &self.program.funcs[acquire_cur_func_id!(self)];
+                    let func =
+                        &self.program.as_ref().unwrap().funcs[self.current_function.unwrap()];
                     let phi_op = &func.dfg[phi.clone()];
                     let op_id = phi_op
                         .attrs
@@ -803,9 +475,10 @@ impl<'a> Renaming<'a> {
                     if let Some(version) = self.versions[var_id].last().cloned() {
                         // Update phi incoming
                         self.builder.add_phi_incoming(
-                            &mut context_or_err!(
-                                self,
-                                "Renaming: No current function context found"
+                            &mut context_or_err(
+                                self.program.as_deref_mut().unwrap(),
+                                self.current_function,
+                                "Renaming: No current function context found",
                             ),
                             phi.clone(),
                             k,
@@ -829,7 +502,7 @@ impl<'a> Renaming<'a> {
 
         // 3. Process children in domtree
         // Clone children list to avoid borrow
-        let children = self.dom_trees[acquire_cur_func_id!(self)][bb_id].clone();
+        let children = self.dom_trees[self.current_function.unwrap()][bb_id].clone();
         for child_id in children {
             self.rename(child_id);
         }
@@ -847,11 +520,12 @@ impl<'a> Renaming<'a> {
     pub fn run(&mut self) {
         // remove load/store is done in rename
 
-        for idx in self.program.funcs.collect_internal() {
+        let func_ids = self.program.as_ref().unwrap().funcs.collect_internal();
+        for idx in func_ids {
             self.current_function = Some(idx);
             self.init();
             let head = {
-                let func = &self.program.funcs[idx];
+                let func = &self.program.as_ref().unwrap().funcs[idx];
                 match func.cfg.entry {
                     Some(id) => id,
                     None => continue,
@@ -860,7 +534,11 @@ impl<'a> Renaming<'a> {
             self.rename(head);
 
             // Clean up removed ops for this function
-            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+            let mut ctx = context_or_err(
+                self.program.as_deref_mut().unwrap(),
+                self.current_function,
+                "Renaming: No current function context found",
+            );
             for (op, bb) in &self.removed {
                 self.builder
                     .remove_op(&mut ctx, op.clone(), Some(bb.clone()));
@@ -869,12 +547,16 @@ impl<'a> Renaming<'a> {
 
             // Remove all the promoted allocas in entry block. You should do this after load/store removal, since some allocas might be used by dead load/store.
             let promoted_allocas = {
-                let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+                let mut ctx = context_or_err(
+                    self.program.as_deref_mut().unwrap(),
+                    self.current_function,
+                    "Renaming: No current function context found",
+                );
                 self.builder
                     .get_all_ops_in_block(&mut ctx, Operand::BB(head), OpType::Alloca)
                     .into_iter()
                     .filter(|alloca| {
-                        let func = &self.program.funcs[idx];
+                        let func = &self.program.as_ref().unwrap().funcs[idx];
                         let alloca_op = &func.dfg[alloca.clone()];
                         alloca_op
                             .attrs
@@ -883,7 +565,11 @@ impl<'a> Renaming<'a> {
                     })
                     .collect::<Vec<Operand>>()
             };
-            let mut ctx = context_or_err!(self, "Renaming: No current function context found");
+            let mut ctx = context_or_err(
+                self.program.as_deref_mut().unwrap(),
+                self.current_function,
+                "Renaming: No current function context found",
+            );
             for alloca in promoted_allocas {
                 self.builder
                     .remove_op(&mut ctx, alloca.clone(), Some(Operand::BB(head)));
@@ -893,45 +579,45 @@ impl<'a> Renaming<'a> {
 }
 
 pub struct Mem2Reg<'a> {
-    program: &'a mut Program,
+    program: Option<&'a mut Program>,
 }
 
 impl<'a> Mem2Reg<'a> {
-    pub fn new(program: &'a mut Program) -> Self {
-        Self { program }
+    pub fn new() -> Self {
+        Self { program: None }
     }
 }
 
-impl<'a> Pass<()> for Mem2Reg<'a> {
+impl<'a> Pass<'a> for Mem2Reg<'a> {
+    fn name(&self) -> &str {
+        "Mem2Reg"
+    }
+    fn set_program(&mut self, program: &'a mut Program) {
+        self.program = Some(program);
+    }
     fn run(&mut self) {
+        let program = self.program.as_mut().unwrap();
         // 1. Build dominator tree
         info!("Start building dominator tree.");
-        let mut dom_builder = BuildDomTree::new(self.program);
+        let mut dom_builder = BuildDomTree::new(program);
         let dom_trees = dom_builder.build();
         info!("Dominator tree built: {:?}", dom_trees);
 
         // 2. Build dominator frontier
         info!("Start building dominator frontier.");
-        let mut df_builder = BuildDomFrontier::new(self.program, dom_trees.clone());
+        let mut df_builder = BuildDomFrontier::new(program, dom_trees.clone());
         let frontiers = df_builder.build();
         info!("Dominator frontier built: {:?}", frontiers);
 
         // 3. Insert Phi nodes
         info!("Start inserting phi nodes.");
-        let mut phi_inserter = InsertPhi::new(self.program, frontiers);
-        let phi_ids = phi_inserter.run();
+        InsertPhi::new(program, frontiers).run();
         info!("Phi nodes inserted.");
 
         // 4. Rename variables
         info!("Start renaming variables.");
-        let mut renamer = Renaming::new(self.program, dom_trees);
+        let mut renamer = Renaming::new(program, dom_trees);
         renamer.run();
         info!("Variables renamed.");
-
-        // 5. Remove trivial phi nodes
-        info!("Start removing trivial phi nodes.");
-        let mut remover = RemoveTrivialPhi::new(self.program, phi_ids);
-        remover.run();
-        info!("Trivial phi nodes removed.");
     }
 }

@@ -2,18 +2,19 @@ use std::ops::{Index, IndexMut};
 use std::vec::Vec;
 use strum_macros::EnumDiscriminants;
 
-use crate::asm::config::Reg;
 use crate::base::Type;
 use crate::debug::info;
 use crate::frontend::ast::Literal;
 use crate::utils::arena::*;
 
+#[allow(clippy::upper_case_acronyms)]
 pub type DFG = IndexedArena<Op>;
 
 #[derive(Debug, Clone, EnumDiscriminants)]
 // Specify the type enum's name
 #[strum_discriminants(name(OpType))]
 #[strum_discriminants(derive(Hash, Ord, PartialOrd))]
+#[allow(clippy::upper_case_acronyms)]
 pub enum OpData {
     // customized instructions for convenience
     GlobalAlloca(u32),
@@ -22,10 +23,6 @@ pub enum OpData {
         base: Operand,
         // Vec<Index>
         indices: Vec<Operand>,
-    },
-    Move {
-        value: Operand,
-        reg: Operand,
     },
     Declare {
         name: String,
@@ -56,14 +53,6 @@ pub enum OpData {
     },
 
     // The comparisons are logical.
-    And {
-        lhs: Operand,
-        rhs: Operand,
-    },
-    Or {
-        lhs: Operand,
-        rhs: Operand,
-    },
     Xor {
         lhs: Operand,
         rhs: Operand,
@@ -96,14 +85,17 @@ pub enum OpData {
     },
 
     // Bitwise shift
+    #[allow(unused)]
     Shl {
         lhs: Operand,
         rhs: Operand,
     },
+    #[allow(unused)]
     Shr {
         lhs: Operand,
         rhs: Operand,
     },
+    #[allow(unused)]
     Sar {
         lhs: Operand,
         rhs: Operand,
@@ -213,10 +205,6 @@ impl OpData {
         OpType::from(self) == op_typ
     }
 
-    pub fn is_inner_control_flow(&self) -> bool {
-        matches!(self, OpData::Br { .. } | OpData::Jump { .. })
-    }
-
     pub fn is_impure(&self) -> bool {
         matches!(
             self,
@@ -226,7 +214,6 @@ impl OpData {
                 | OpData::Br { .. }
                 | OpData::Jump { .. }
                 | OpData::Ret { .. }
-                | OpData::Move { .. }
                 | OpData::Alloca(_)
                 | OpData::GlobalAlloca(_)
                 | OpData::Declare { .. }
@@ -238,17 +225,16 @@ impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data {
             OpData::GEP { base, indices } => {
-                write!(f, "gep {}, [", base);
+                write!(f, "gep {}, [", base)?;
                 for (i, index) in indices.iter().enumerate() {
-                    write!(f, "{}", index);
+                    write!(f, "{}", index)?;
                     if i != indices.len() - 1 {
-                        write!(f, ", ");
+                        write!(f, ", ")?;
                     }
                 }
                 write!(f, "]")
             }
             OpData::GlobalAlloca(size) => write!(f, "global_alloc {}", size),
-            OpData::Move { value, reg } => write!(f, "move {}, <reg = {}>", value, reg),
             OpData::Declare { name, typ } => {
                 let (ret_typ, param_typs) = match typ {
                     Type::Function {
@@ -276,8 +262,6 @@ impl std::fmt::Display for Op {
             OpData::DivI { lhs, rhs } => write!(f, "div {}, {}", lhs, rhs),
             OpData::ModI { lhs, rhs } => write!(f, "mod {}, {}", lhs, rhs),
 
-            OpData::And { lhs, rhs } => write!(f, "and {}, {}", lhs, rhs),
-            OpData::Or { lhs, rhs } => write!(f, "or {}, {}", lhs, rhs),
             OpData::Xor { lhs, rhs } => write!(f, "xor {}, {}", lhs, rhs),
 
             OpData::SNe { lhs, rhs } => write!(f, "sne {}, {}", lhs, rhs),
@@ -311,12 +295,12 @@ impl std::fmt::Display for Op {
             OpData::Store { addr, value } => write!(f, "store {}, {}", addr, value),
             OpData::Load { addr } => write!(f, "load {}", addr),
             OpData::Phi { incoming } => {
-                write!(f, "phi [");
+                write!(f, "phi [")?;
                 for (i, phi_incoming) in incoming.iter().enumerate() {
                     if let PhiIncoming::Data { value, bb } = phi_incoming {
-                        write!(f, "({}, {})", value, bb);
+                        write!(f, "({}, {})", value, bb)?;
                         if i != incoming.len() - 1 {
-                            write!(f, ", ");
+                            write!(f, ", ")?;
                         }
                     }
                 }
@@ -399,12 +383,11 @@ pub enum Operand {
 
     // Param
     Param { idx: usize, name: String, typ: Type },
-    // for move
-    Reg(Reg),
     // for phi
     Undefined,
 }
 
+#[allow(unused)]
 impl Operand {
     pub fn get_op_id(&self) -> usize {
         match self {
@@ -442,12 +425,6 @@ impl Operand {
             _ => panic!("Operand is not a FuncId: {:?}", self),
         }
     }
-    pub fn get_reg(&self) -> Reg {
-        match self {
-            Operand::Reg(reg) => *reg,
-            _ => panic!("Operand is not a Reg: {:?}", self),
-        }
-    }
     pub fn is_literal(&self) -> bool {
         matches!(self, Operand::Int(_) | Operand::Float(_) | Operand::Bool(_))
     }
@@ -464,7 +441,6 @@ impl std::fmt::Display for Operand {
             Operand::Bool(value) => write!(f, "{}", value),
             Operand::Param { idx, .. } => write!(f, "%arg{}", idx),
             Operand::Func(func_id) => write!(f, "@{}", func_id),
-            Operand::Reg(reg) => write!(f, "{}", reg),
             Operand::Undefined => write!(f, "undefined"),
         }
     }
@@ -538,6 +514,7 @@ impl Arena<Op> for IndexedArena<Op> {
             (old_arena.len() - self.storage.len()) as f64 / old_arena.len() as f64 * 100.0
         );
 
+        #[allow(unused)]
         let remap_idx = |idx: &mut usize, old_arena: &Vec<ArenaItem<Op>>| {
             *idx = match old_arena.get(*idx) {
                 Some(ArenaItem::NewIndex(new_idx)) => *new_idx,
@@ -605,8 +582,6 @@ impl Arena<Op> for IndexedArena<Op> {
                     | OpData::SLt { lhs, rhs }
                     | OpData::SGe { lhs, rhs }
                     | OpData::SLe { lhs, rhs }
-                    | OpData::And { lhs, rhs }
-                    | OpData::Or { lhs, rhs }
                     | OpData::Xor { lhs, rhs }
                     | OpData::Shl { lhs, rhs }
                     | OpData::Shr { lhs, rhs }
@@ -657,10 +632,6 @@ impl Arena<Op> for IndexedArena<Op> {
                         for index in indices.iter_mut() {
                             remap_value(index, &old_arena);
                         }
-                    }
-
-                    OpData::Move { value, .. } => {
-                        remap_value(value, &old_arena);
                     }
 
                     OpData::Phi { incoming } => {
@@ -769,8 +740,6 @@ impl IndexedArena<Op> {
             | OpData::SLt { lhs, rhs }
             | OpData::SGe { lhs, rhs }
             | OpData::SLe { lhs, rhs }
-            | OpData::And { lhs, rhs }
-            | OpData::Or { lhs, rhs }
             | OpData::Xor { lhs, rhs }
             | OpData::Shl { lhs, rhs }
             | OpData::Shr { lhs, rhs }
@@ -842,11 +811,6 @@ impl IndexedArena<Op> {
                         *index = new.clone();
                     };
                 }
-            }
-            OpData::Move { value, .. } => {
-                if *value == old {
-                    *value = new.clone();
-                };
             }
             OpData::Phi { incoming } => {
                 for phi_incoming in incoming.iter_mut() {

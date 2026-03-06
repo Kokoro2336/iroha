@@ -1,24 +1,24 @@
+use clap::Parser;
 use lalrpop_util::lalrpop_mod;
 use std::fs::read_to_string;
 use std::io::Result;
-use clap::Parser;
 
 mod analysis;
 mod backend;
 mod base;
+mod cli;
 mod debug;
 mod frontend;
 mod ir;
 mod opt;
 mod utils;
-mod cli;
 use crate::base::PassManager;
+use crate::cli::Cli;
 use crate::debug::log::setup;
 use crate::frontend::parse;
 use crate::frontend::*;
 use crate::opt::*;
 use crate::utils::arena::Arena;
-use crate::cli::Cli;
 
 use debug::info;
 
@@ -54,20 +54,34 @@ fn main() -> Result<()> {
     };
     // info!("\nParsed result: {:#?}", result);
 
-    info!("Start Semantic Analysis.");
-    let result = {
-        match Semantic::new(result).run() {
-            Ok(res) => res,
-            Err(e) => {
-                panic!("Semantic Error: {}", e);
-            }
+    let res = std::thread::Builder::new()
+        // Temporarily, we set the stack size to 16MB to avoid stack overflow in deep recursion of semantic analysis.
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            info!("Start Semantic Analysis.");
+            let result = {
+                match Semantic::new(result).run() {
+                    Ok(res) => res,
+                    Err(e) => {
+                        panic!("Semantic Error: {}", e);
+                    }
+                }
+            };
+            info!("Finish Semantic Analysis.");
+
+            info!("Start Emitting.");
+            let ir = Emit::new(result).run();
+            info!("Finish Emitting.");
+            ir
+        })?
+        .join();
+
+    let mut ir = match res {
+        Ok(ir) => ir,
+        Err(e) => {
+            panic!("Thread panicked: {:?}", e);
         }
     };
-    info!("Finish Semantic Analysis.");
-
-    info!("Start Emitting.");
-    let mut ir = Emit::new(result).run();
-    info!("Finish Emitting.");
 
     // Run optimizations.
     PassManager::new(&cli)

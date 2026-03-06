@@ -1,29 +1,28 @@
+use clap::Parser;
 use lalrpop_util::lalrpop_mod;
 use std::fs::read_to_string;
 use std::io::Result;
-use clap::Parser;
 
 mod analysis;
 mod backend;
 mod base;
+mod cli;
 mod debug;
 mod frontend;
 mod ir;
 mod opt;
 mod utils;
-mod cli;
 use crate::base::PassManager;
+use crate::cli::Cli;
 use crate::debug::log::setup;
 use crate::frontend::parse;
 use crate::frontend::*;
 use crate::opt::*;
 use crate::utils::arena::Arena;
-use crate::cli::Cli;
 
 use debug::info;
 
-// 引用 lalrpop 生成的解析器
-// 因为我们刚刚创建了 sysy.lalrpop, 所以模块名是 sysy
+// Import SysY parser.
 lalrpop_mod!(sysy);
 
 fn main() -> Result<()> {
@@ -36,13 +35,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let input_path = cli.input.clone();
-    #[allow(unused)]
-    let output = cli.output.clone();
+    let _ = cli.output.clone();
 
-    // 读取输入文件
+    // Get input str.
     let input_str = read_to_string(&input_path)?;
 
-    // 调用 lalrpop 生成的 parser 解析输入文件
+    // Parse the input string into an AST.
     let result = {
         let mut parser = parse::Parser::new();
         let root_id = sysy::CompUnitParser::new()
@@ -56,21 +54,36 @@ fn main() -> Result<()> {
     };
     // info!("\nParsed result: {:#?}", result);
 
-    info!("Start Semantic Analysis.");
-    let result = {
-        match Semantic::new(result).run() {
-            Ok(res) => res,
-            Err(e) => {
-                panic!("Semantic Error: {}", e);
-            }
+    let res = std::thread::Builder::new()
+        // Temporarily, we set the stack size to 16MB to avoid stack overflow in deep recursion of semantic analysis.
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            info!("Start Semantic Analysis.");
+            let result = {
+                match Semantic::new(result).run() {
+                    Ok(res) => res,
+                    Err(e) => {
+                        panic!("Semantic Error: {}", e);
+                    }
+                }
+            };
+            info!("Finish Semantic Analysis.");
+
+            info!("Start Emitting.");
+            let ir = Emit::new(result).run();
+            info!("Finish Emitting.");
+            ir
+        })?
+        .join();
+
+    let mut ir = match res {
+        Ok(ir) => ir,
+        Err(e) => {
+            panic!("Thread panicked: {:?}", e);
         }
     };
-    info!("Finish Semantic Analysis.");
 
-    info!("Start Emitting.");
-    let mut ir = Emit::new(result).run();
-    info!("Finish Emitting.");
-
+    // Run optimizations.
     PassManager::new(&cli)
         .register(Box::new(Mem2Reg::new()))
         .register(Box::new(RemoveTrivialPhi::new()))

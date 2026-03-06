@@ -236,19 +236,6 @@ impl<'a> SimplifyCFG<'a> {
     }
 
     pub fn rewrite(&mut self) {}
-
-    pub fn run(&mut self) {
-        // We can only simplify CFG at the end of all other optimizations, since it may change the structure of CFG and thus invalidate the assumptions of other optimizations.
-        let func_ids = self.program.as_ref().unwrap().funcs.collect_internal();
-        for func_id in func_ids {
-            self.init(func_id);
-            let entry = match self.program.as_ref().unwrap().funcs[func_id].cfg.entry {
-                Some(entry) => entry,
-                None => continue,
-            };
-            self.simplify(entry);
-        }
-    }
 }
 
 impl Pass<()> for SimplifyCFG<'_> {
@@ -259,6 +246,15 @@ impl Pass<()> for SimplifyCFG<'_> {
         self.program = Some(program);
     }
     fn run(&mut self) -> () {
-        self.run();
+        // We can only simplify CFG at the end of all other optimizations, since it may change the structure of CFG and thus invalidate the assumptions of other optimizations.
+        let func_ids = self.program.as_ref().unwrap().funcs.collect_internal();
+        for func_id in func_ids {
+            self.init(func_id);
+            let entry = match self.program.as_ref().unwrap().funcs[func_id].cfg.entry {
+                Some(entry) => entry,
+                None => continue,
+            };
+            self.simplify(entry);
+        }
     }
 }

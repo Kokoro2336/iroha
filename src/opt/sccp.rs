@@ -3,8 +3,6 @@
 /// Reference: https://dl.acm.org/doi/10.1145/103135.103136
 use crate::ir::mir::{Op, OpData, OpType, Operand, PhiIncoming, Program};
 use crate::base::{context_or_err, Builder, Pass, Type};
-use crate::debug::info;
-use crate::opt::RemoveTrivialPhi;
 use crate::utils::arena::{Arena, ArenaItem};
 use crate::utils::bitset::BitSet;
 
@@ -341,6 +339,7 @@ impl<'a> SCCP<'a> {
             } => {
                 let cond_lattice = self.get_lattice(&cond);
                 match cond_lattice {
+                    Lattice::Top => {/*do nothing*/}
                     Lattice::Constant(c) => {
                         if let Operand::Bool(b) = c {
                             if b {
@@ -353,7 +352,7 @@ impl<'a> SCCP<'a> {
                         }
                     }
                     // Top requires conservative assumption, and Bottom requires no assumption. So we need to push both branches to the edge list.
-                    Lattice::Bottom | Lattice::Top => {
+                    Lattice::Bottom => {
                         self.edge_list.push((bb_id.clone(), then_bb.clone()));
                         self.edge_list.push((bb_id.clone(), else_bb.clone()));
                     }
@@ -490,7 +489,7 @@ impl<'a> SCCP<'a> {
     }
 
     // Rewrite the program based on the results of propagation. And then return the existing phi nodes after rewriting.
-    fn rewrite(&mut self) -> Vec<(Operand, Operand)> {
+    fn rewrite(&mut self) {
         // Replace optimizable instructions with constants.
         let removed = self
             .lattices
@@ -781,42 +780,6 @@ impl<'a> SCCP<'a> {
             let cfg = &mut self.program.as_mut().unwrap().funcs[self.current_function.unwrap()].cfg;
             cfg.remove(bb_id);
         }
-
-        // Collect the surviving phi nodes after rewriting.
-        phis
-            .iter()
-            .filter_map(|phi_op| {
-                let dfg = &mut self.program.as_mut().unwrap().funcs[self.current_function.unwrap()].dfg;
-                // Bypass the Index operator
-                if let Some(ArenaItem::Data(data)) = dfg.storage.get(phi_op.get_op_id()) {
-                    if data.data.is(OpType::Phi) {
-                        Some((phi_op.clone(), self.op_to_bb[phi_op.get_op_id()].clone()))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<(Operand, Operand)>>()
-    }
-
-    pub fn run(&mut self) {
-        let program = self.program.as_mut().unwrap();
-        let mut phi_ops: Vec<Vec<(Operand, Operand)>> = vec![vec![]; program.funcs.storage.len()];
-        let func_ids = program.funcs.collect_internal();
-        for func_id in func_ids {
-            self.init(func_id);
-            self.propagate();
-            phi_ops[func_id] = self.rewrite();
-        }
-
-        // Remove trivial phi.
-        info!("SCCP: removing trivial phi nodes...");
-        let mut remover = RemoveTrivialPhi::new();
-        remover.set_program(self.program.as_mut().unwrap());
-        remover.run();
-        info!("SCCP: done");
     }
 }
 
@@ -824,6 +787,12 @@ impl<'a> Pass<'a> for SCCP<'a> {
     fn name(&self) -> &str { "SCCP" }
     fn set_program(&mut self, program: &'a mut Program) { self.program = Some(program); }
     fn run(&mut self) {
-        self.run()
+        let program = self.program.as_mut().unwrap();
+        let func_ids = program.funcs.collect_internal();
+        for func_id in func_ids {
+            self.init(func_id);
+            self.propagate();
+            self.rewrite();
+        }
     }
 }

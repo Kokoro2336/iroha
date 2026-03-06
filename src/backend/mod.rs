@@ -1,3 +1,3 @@
 /// Assembly module
-#[allow(unused)]
 pub mod config;
+pub mod isel;

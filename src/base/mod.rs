@@ -7,5 +7,3 @@ mod r#type;
 pub use crate::base::builder::*;
 pub use crate::base::pass::*;
 pub use crate::base::sysy_lib::*;
-
-pub use pass::{context, context_or_err};

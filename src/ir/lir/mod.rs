@@ -1,5 +1,7 @@
 /// Lower IR (LIR) definition.
-mod op;
+mod inst;
 mod reg;
-pub use op::*;
+mod asm;
+pub use inst::*;
 pub use reg::*;
+pub use asm::*;

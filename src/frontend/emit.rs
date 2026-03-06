@@ -1,5 +1,6 @@
 use crate::base::SYSY_LIB;
-use crate::base::{context, context_or_err, Builder, BuilderContext, LoopInfo, Type};
+use crate::base::{Builder, BuilderContext, LoopInfo, Type};
+use crate::utils::context::{context_or_err, context};
 use crate::frontend::ast;
 use crate::frontend::ast::*;
 use crate::frontend::semantic::decay;

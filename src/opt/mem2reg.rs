@@ -1,7 +1,8 @@
 /// SSA construction & Mem2Reg based on Cytron et al. 1991's algorithm.
 /// Reference: https://dl.acm.org/doi/pdf/10.1145/75277.75280
 use crate::analysis::dom::{BuildDomFrontier, BuildDomTree, DomFrontier, DomTree};
-use crate::base::{context_or_err, Builder, BuilderGuard, Pass, Type};
+use crate::base::{Builder, BuilderGuard, Pass, Type};
+use crate::utils::context::context_or_err;
 use crate::debug::info;
 use crate::ir::mir::{Attr, Op, OpData, OpType, Operand, PhiIncoming, Program};
 
@@ -29,10 +30,6 @@ struct InsertPhi<'a> {
 
     // State field
     current_function: Option<usize>,
-
-    // Phis' id
-    // Vec<(OpId, BBId)>
-    phi_ids: Vec<Vec<(Operand, Operand)>>,
 }
 
 impl<'a> InsertPhi<'a> {
@@ -48,7 +45,6 @@ impl<'a> InsertPhi<'a> {
             var_to_op: HashMap::new(),
             var_counter: 0,
             current_function: None,
-            phi_ids: vec![],
         }
     }
 
@@ -122,9 +118,7 @@ impl<'a> InsertPhi<'a> {
         }
     }
 
-    pub fn insert(&mut self) -> Vec<(Operand, Operand)> {
-        let mut phi_ids = vec![];
-
+    pub fn insert(&mut self) {
         let defsites_len = self.defsites.len();
         let func_id = self.current_function.unwrap();
         for idx in 0..defsites_len {
@@ -141,7 +135,7 @@ impl<'a> InsertPhi<'a> {
                         };
                         // Insert phi
                         // Use guard to save the old context
-                        let phi_op_id = {
+                        {
                             let mut guard = BuilderGuard::new(&mut self.builder);
 
                             guard.set_current_block(Operand::BB(frontier));
@@ -182,11 +176,10 @@ impl<'a> InsertPhi<'a> {
                                         incoming: vec![PhiIncoming::None; preds_num],
                                     },
                                 ),
-                            )
+                            );
                         };
 
                         // Record the phi's OpId.
-                        phi_ids.push((phi_op_id, Operand::BB(frontier)));
                         self.phis[idx].push(frontier);
                         if !self.origins[frontier].contains(&idx) {
                             // If it is a new definition in the frontier block, we add the block to the var's worklist.
@@ -196,21 +189,17 @@ impl<'a> InsertPhi<'a> {
                 }
             }
         }
-        phi_ids
     }
 
-    pub fn run(&mut self) -> Vec<Vec<(Operand, Operand)>> {
-        self.phi_ids = vec![vec![]; self.program.funcs.storage.len()];
+    pub fn run(&mut self) {
         self.program
             .funcs
             .collect_internal()
             .into_iter()
             .for_each(|idx| {
                 self.init(idx);
-                let phi_ids = self.insert();
-                self.phi_ids[idx] = phi_ids;
+                self.insert();
             });
-        std::mem::take(&mut self.phi_ids)
     }
 }
 

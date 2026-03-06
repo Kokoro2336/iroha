@@ -1,7 +1,7 @@
 /// Dead Code Elimination (DCE).
-use crate::base::Builder;
-use crate::base::{context_or_err, Pass};
+use crate::base::{Builder, Pass};
 use crate::ir::mir::{OpData, Operand, PhiIncoming, Program};
+use crate::utils::context::context_or_err;
 use crate::utils::arena::ArenaItem;
 
 #[allow(clippy::upper_case_acronyms)]

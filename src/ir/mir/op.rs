@@ -387,6 +387,18 @@ pub enum Operand {
     Undefined,
 }
 
+impl From<Operand> for usize {
+    fn from(operand: Operand) -> Self {
+        match operand {
+            Operand::Value(id) => id,
+            Operand::Global(id) => id,
+            Operand::BB(id) => id,
+            Operand::Func(id) => id,
+            _ => panic!("Operand cannot be converted to usize: {:?}", operand),
+        }
+    }
+}
+
 #[allow(unused)]
 impl Operand {
     pub fn get_op_id(&self) -> usize {

@@ -89,3 +89,9 @@ impl Reg {
         self as usize
     }
 }
+
+impl From<Reg> for u8 {
+    fn from(reg: Reg) -> Self {
+        reg as u8
+    }
+}

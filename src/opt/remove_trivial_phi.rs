@@ -1,6 +1,7 @@
 /// Remove Trivial Phi.
-use crate::base::{context_or_err, Builder, BuilderContext, Pass};
+use crate::base::{Builder, BuilderContext, Pass};
 use crate::ir::mir::{Attr, OpData, OpType, Operand, PhiIncoming, Program};
+use crate::utils::context::context_or_err;
 use crate::utils::arena::ArenaItem;
 
 enum CheckType {

@@ -1,3 +1,4 @@
+/// SysY standard library definitions.
 use crate::base::Type;
 
 thread_local! {
